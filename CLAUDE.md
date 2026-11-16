@@ -63,6 +63,20 @@ git checkout main && git pull
 git checkout -b feat/<name>      # or fix/<name>, chore/<name>
 ```
 
+## Release
+
+One crate per release pull request, from a branch named
+`release/<crate>-<version>` (for example `release/claude-code-sessions-0.1.1`)
+that sets the crate's `version`. Merging it runs `release.yml`: publish to
+crates.io through Trusted Publishing, then the tag and GitHub release
+`<crate>-v<version>`. Several crates: core → live → tui, each in its own pull
+request, each merged after the previous one is on crates.io.
+
+A crate's first version cannot use Trusted Publishing (the crate must exist to
+be configured): publish it by hand, then add the trusted publisher on
+crates.io (repository `td72/claude-code-sessions`, workflow `release.yml`,
+environment `release`).
+
 ## Conventions
 
 - **Issues / PRs**: present the title and body in Japanese for review first;
