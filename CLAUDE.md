@@ -14,9 +14,12 @@ Hard rules:
 
 - **Read-only.** The crates read files and listen on a socket. They never
   write to Claude Code's directories and never send anything to Claude Code.
-- **Never model, log or display** prompt text, response text, tool inputs,
-  tool outputs, `api-request-blob`, or environment variables. Tool calls are
-  name, duration and success only.
+- **The crates do not log what they read, and do not hoard it.** The
+  transcripts are the user's own files, so a view may model the text it needs
+  (the last prompt, a subagent's description, later a tool call's command or
+  path). But no crate writes record contents to a log by itself — `Record`'s
+  `Debug` leaves the raw value out — and a `Session` keeps bounded recent
+  activity, never the full history.
 - **The format is undocumented and changes with every Claude Code release.**
   Keep the raw record, treat unknown `type`s and keys as data for the drift
   survey, skip records that lack a needed key, and never fail a whole file on

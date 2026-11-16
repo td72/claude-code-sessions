@@ -15,8 +15,9 @@
 //! Code mod. Both apply to a [`session::SessionStore`] incrementally; no field
 //! is written by both, so arrival order never changes the result.
 //!
-//! Never modelled: prompt text, response text, tool inputs and outputs,
-//! environment variables.
+//! Text is modelled where a view needs it (a title, the last prompt, a subagent's
+//! description). The crates never log record contents themselves, and a session
+//! keeps bounded recent activity, not its whole history.
 //!
 //! | module | role |
 //! | --- | --- |
@@ -26,10 +27,7 @@
 //! | [`session`] | the fold of records into `Session` / `SessionStore` |
 //! | [`pricing`] | the embedded price table and context windows |
 
-pub mod record {
-    //! Typed views of transcript lines. Unknown `type`s and keys are kept,
-    //! never dropped, and reported through the drift survey.
-}
+pub mod record;
 
 pub mod discover {
     //! Sessions and subagents under a projects directory, and the resolution

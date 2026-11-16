@@ -13,7 +13,7 @@ so both ends change together.
   Sockets that refuse the connection are ignored.
 - Events: `session.start`, `turn.start` / `turn.complete`, `tool.call` start and
   end (tool name only), `tool.check`, `session.measure`, `agent.spawn`,
-  `session.end`. No prompt text and no tool input ever leave the session.
+  `session.end`. Events go to local Unix sockets only and stay small: names, ids, numbers and short summaries.
 - Without the mod the transcripts alone drive the model; the mod only adds
   freshness.
 
