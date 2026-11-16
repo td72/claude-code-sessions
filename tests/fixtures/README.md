@@ -18,3 +18,4 @@ is plain invented text without the marker.
 | `subagent.jsonl`, `subagent.meta.json` | a subagent transcript and its metadata |
 | `malformed.jsonl` | garbage, a truncated line and a bare scalar between two good records |
 | `unknown.jsonl` | a record type, keys, a content block, an attachment type and a system subtype the crate does not know, for the drift survey |
+| `projects/` | a projects directory: an indexed and an unindexed session in one project, a session with two subagents (one without metadata) in another |
