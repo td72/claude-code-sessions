@@ -24,11 +24,7 @@
 pub mod event;
 
 #[cfg(unix)]
-pub mod server {
-    //! `<state dir>/sockets/<pid>.sock`: created on start, removed on exit,
-    //! stale sockets cleaned on start. One request per connection, body
-    //! capped, anything malformed is dropped without touching the state.
-}
+pub mod server;
 
 pub mod merge {
     //! Apply an [`event::Event`] to a `Session`: freshness fields only,
