@@ -10,7 +10,6 @@ rust-version = "1.85"
 license = "MIT"
 authors = ["td72"]
 repository = "https://github.com/td72/claude-code-sessions"
-homepage = "https://github.com/td72/claude-code-sessions"
 keywords = ["claude-code", "claude", "agents", "sessions", "transcript"]
 categories = ["development-tools", "parser-implementations"]
 
