@@ -169,12 +169,20 @@ impl SessionStore {
         };
         let old = std::mem::replace(entry, Entry::new(session_id));
         entry.session.project_path = old.session.project_path;
+        entry.session.live = old.session.live;
         for (id, subagent) in old.session.subagents {
             let kept = entry.session.subagent_mut(&id);
             kept.agent_type = subagent.agent_type;
             kept.description = subagent.description;
             kept.finished = subagent.finished;
         }
+    }
+
+    /// The live side of a session, for whatever applies live events to write
+    /// (the `claude-code-sessions-live` crate). A session the transcripts have
+    /// not shown yet is created; its transcript joins it by id later.
+    pub fn live_mut(&mut self, session_id: &str) -> &mut Live {
+        self.entry(session_id).session.live.get_or_insert_default()
     }
 
     /// Removes a session.
@@ -246,6 +254,9 @@ pub struct Session {
     pub recent_tools: VecDeque<ToolCall>,
     /// The session's subagents by agent id.
     pub subagents: BTreeMap<String, Subagent>,
+    /// What live events have said, if any arrived. Never written by the
+    /// fold: see [`Live`].
+    pub live: Option<Live>,
 }
 
 impl Session {
@@ -269,6 +280,7 @@ impl Session {
             tool_calls: 0,
             recent_tools: VecDeque::new(),
             subagents: BTreeMap::new(),
+            live: None,
         }
     }
 
@@ -288,6 +300,16 @@ impl Session {
         } else {
             Activity::Idle
         }
+    }
+
+    /// How full the context is by the freshest source: the live measurement
+    /// when there is one (it knows the window in effect), the transcript's
+    /// otherwise.
+    pub fn current_context(&self) -> Option<Context> {
+        self.live
+            .as_ref()
+            .and_then(|live| live.context)
+            .or(self.context)
     }
 
     fn subagent_mut(&mut self, agent_id: &str) -> &mut Subagent {
@@ -435,6 +457,113 @@ pub enum CostSource {
     /// The price-table estimate: Claude Code has reported nothing, or
     /// reported less than the transcript accounts for.
     Estimated,
+}
+
+/// What live events say about a session right now.
+///
+/// The transcripts and the live events never write the same field: everything
+/// a live event reports lands here, and nothing here is touched by the fold.
+/// Arrival order between the two therefore never matters.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Live {
+    /// The time of the latest event that changed the state fields below.
+    pub state_at: Option<Timestamp>,
+    /// Where the session runs, as its start reported it.
+    pub cwd: Option<PathBuf>,
+    /// The model the session started with.
+    pub model: Option<String>,
+    /// The process announced its exit.
+    pub ended: bool,
+    /// The main thread's turn in progress.
+    pub turn: Option<LiveTurn>,
+    /// Since when the main thread has been waiting for its user: the end of
+    /// its last turn.
+    pub idle_since: Option<Timestamp>,
+    /// Tool calls that have started and not ended, oldest first.
+    pub running_tools: Vec<RunningTool>,
+    /// A tool call waiting for someone to approve it.
+    pub awaiting_approval: Option<PendingApproval>,
+    /// The time of the latest measurement.
+    pub measured_at: Option<Timestamp>,
+    /// How full the context is, against the window in effect.
+    pub context: Option<Context>,
+    pub rate_limits: Vec<RateLimit>,
+}
+
+impl Live {
+    /// The one thing to show for the session.
+    pub fn state(&self) -> LiveState<'_> {
+        if self.ended {
+            LiveState::Ended
+        } else if let Some(pending) = &self.awaiting_approval {
+            LiveState::AwaitingApproval(pending)
+        } else if let Some(tool) = self.running_tools.last() {
+            LiveState::RunningTool(tool)
+        } else if self.turn.is_some() {
+            LiveState::Working
+        } else if self.idle_since.is_some() {
+            LiveState::WaitingForInput
+        } else {
+            LiveState::Unknown
+        }
+    }
+}
+
+/// A session's state as live events describe it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LiveState<'a> {
+    /// A turn is in progress and no tool is running: the model is working.
+    Working,
+    /// A tool is running (the latest one, if several are).
+    RunningTool(&'a RunningTool),
+    /// A tool call waits for approval.
+    AwaitingApproval(&'a PendingApproval),
+    /// The last turn ended; the prompt is the user's.
+    WaitingForInput,
+    /// The process exited.
+    Ended,
+    /// Events arrived, but none that says what the session is doing.
+    Unknown,
+}
+
+/// A turn in progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveTurn {
+    pub id: String,
+    pub started_at: Timestamp,
+}
+
+/// A tool call that has started and not ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningTool {
+    pub tool_use_id: Option<String>,
+    pub name: String,
+    /// A line describing the call: the command, the file path.
+    pub summary: Option<String>,
+    /// The subagent making the call, if one is.
+    pub agent_id: Option<String>,
+    pub started_at: Timestamp,
+}
+
+/// A tool call waiting for approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub tool_use_id: Option<String>,
+    pub name: String,
+    pub agent_id: Option<String>,
+    pub since: Timestamp,
+}
+
+/// One rate limit and how much of it is used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimit {
+    /// Which limit (`five_hour`, `seven_day`, …).
+    pub kind: String,
+    /// 0–100.
+    pub percent_used: f64,
+    /// When it resets, as an RFC 3339 timestamp.
+    pub resets_at: Option<String>,
 }
 
 /// One tool call.
