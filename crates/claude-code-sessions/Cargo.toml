@@ -10,6 +10,8 @@ authors.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# The integration tests read the workspace fixtures, which are not packaged.
+exclude = ["tests/"]
 
 [features]
 default = []
@@ -24,3 +26,6 @@ notify = { version = "8", optional = true }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

@@ -19,6 +19,44 @@
 //! description). The crates never log record contents themselves, and a session
 //! keeps bounded recent activity, not its whole history.
 //!
+//! # Example
+//!
+//! ```no_run
+//! use claude_code_sessions::discover::{default_projects_dir, discover};
+//! use claude_code_sessions::record::Record;
+//! use claude_code_sessions::session::SessionStore;
+//! use claude_code_sessions::tail::Tail;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let projects = default_projects_dir().ok_or("no home directory")?;
+//! let mut store = SessionStore::new();
+//! let mut tails = Vec::new();
+//!
+//! for files in discover(&projects)? {
+//!     store.discovered(&files);
+//!     tails.push((files.id.clone(), Tail::from_start(&files.transcript.path)));
+//!     for subagent in &files.subagents {
+//!         tails.push((files.id.clone(), Tail::from_start(&subagent.transcript.path)));
+//!     }
+//! }
+//!
+//! // Call this again whenever the files may have grown: each poll reads only
+//! // what was appended.
+//! for (id, tail) in &mut tails {
+//!     let polled = tail.poll_each(|line, _| store.apply(id, &Record::parse_bytes(line)))?;
+//!     if polled.restarted {
+//!         // The file was replaced: forget the session and read its files again.
+//!         store.reset(id);
+//!     }
+//! }
+//!
+//! for session in store.sessions() {
+//!     println!("{} {:?} {:?}", session.id, session.model, session.cost.usd);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! | module | role |
 //! | --- | --- |
 //! | [`record`] | one transcript line as a typed view, raw JSON kept, unknown shapes collected by `drift` |

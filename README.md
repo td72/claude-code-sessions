@@ -9,8 +9,47 @@ machine: where it runs, what it is doing, what it has used, which tools and
 subagents it has called. It is a library first; [vig](https://github.com/td72/vig)
 renders it as a page, and a small standalone viewer ships here.
 
-> Status: scaffolding. Nothing is implemented yet; the layout below is the
-> design the crates are being built to.
+> Status: the transcript layer (`claude-code-sessions` 0.1) is implemented:
+> records, discovery, tailing, the session model and pricing. The live layer,
+> the mod and the viewer are still to come.
+
+## Using the crate
+
+```rust
+use claude_code_sessions::discover::{default_projects_dir, discover};
+use claude_code_sessions::record::Record;
+use claude_code_sessions::session::SessionStore;
+use claude_code_sessions::tail::Tail;
+
+let projects = default_projects_dir().ok_or("no home directory")?;
+let mut store = SessionStore::new();
+let mut tails = Vec::new();
+
+for files in discover(&projects)? {
+    store.discovered(&files);
+    tails.push((files.id.clone(), Tail::from_start(&files.transcript.path)));
+    for subagent in &files.subagents {
+        tails.push((files.id.clone(), Tail::from_start(&subagent.transcript.path)));
+    }
+}
+
+// Call this again whenever the files may have grown: each poll reads only
+// what was appended.
+for (id, tail) in &mut tails {
+    let polled = tail.poll_each(|line, _| store.apply(id, &Record::parse_bytes(line)))?;
+    if polled.restarted {
+        // The file was replaced: forget the session and read its files again.
+        store.reset(id);
+    }
+}
+
+for session in store.sessions() {
+    println!("{} {:?} {:?}", session.id, session.model, session.cost.usd);
+}
+```
+
+`examples/sessions.rs` is the same loop with a table at the end, and
+`examples/drift.rs` reports transcript shapes the crate does not know yet.
 
 ## Crates
 
