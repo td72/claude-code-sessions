@@ -148,35 +148,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
-name = "claude-code-sessions"
-version = "0.1.1"
-dependencies = [
- "notify",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "claude-code-sessions-live"
-version = "0.1.0"
-dependencies = [
- "claude-code-sessions",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "claude-code-sessions-tui"
-version = "0.1.0"
-dependencies = [
- "claude-code-sessions",
- "claude-code-sessions-live",
- "ratatui",
-]
-
-[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -515,6 +486,35 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "iktinos"
+version = "0.1.0"
+dependencies = [
+ "notify",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "iktinos-live"
+version = "0.1.0"
+dependencies = [
+ "iktinos",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "iktinos-tui"
+version = "0.1.0"
+dependencies = [
+ "iktinos",
+ "iktinos-live",
+ "ratatui",
+]
 
 [[package]]
 name = "indoc"

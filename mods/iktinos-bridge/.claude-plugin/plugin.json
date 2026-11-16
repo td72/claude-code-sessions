@@ -1,0 +1,8 @@
+{
+  "name": "iktinos-bridge",
+  "version": "0.1.0",
+  "description": "Sends live session events (turns, tool calls, permission prompts, context and rate limits) to local iktinos consumers over Unix sockets",
+  "author": { "name": "td72" },
+  "repository": "https://github.com/td72/iktinos",
+  "license": "MIT"
+}

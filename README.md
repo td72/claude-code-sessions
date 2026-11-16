@@ -1,4 +1,4 @@
-# claude-code-sessions
+# iktinos
 
 Claude Code sessions as data.
 
@@ -9,16 +9,20 @@ machine: where it runs, what it is doing, what it has used, which tools and
 subagents it has called. It is a library first; [vig](https://github.com/td72/vig)
 renders it as a page, and a small standalone viewer ships here.
 
-> Status: the transcript layer (`claude-code-sessions`) is published. The live
-> layer, the viewer and the mod are implemented here and not published yet.
+*Iktinos* (ἴκτινος) is ancient Greek for the kite, a bird that circles high
+and watches the ground; it was also the name of an architect of the Parthenon.
+
+> Status: the project was renamed from `claude-code-sessions` (whose 0.1
+> releases on crates.io hold the transcript layer only). The crates, the
+> viewer and the mod are implemented here; `iktinos` is not on crates.io yet.
 
 ## Using the crate
 
 ```rust
-use claude_code_sessions::discover::{default_projects_dir, discover};
-use claude_code_sessions::record::Record;
-use claude_code_sessions::session::SessionStore;
-use claude_code_sessions::tail::Tail;
+use iktinos::discover::{default_projects_dir, discover};
+use iktinos::record::Record;
+use iktinos::session::SessionStore;
+use iktinos::tail::Tail;
 
 let projects = default_projects_dir().ok_or("no home directory")?;
 let mut store = SessionStore::new();
@@ -54,16 +58,16 @@ for session in store.sessions() {
 
 | crate | role |
 | --- | --- |
-| [`claude-code-sessions`](crates/claude-code-sessions) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `pricing` (embedded price table) |
-| [`claude-code-sessions-live`](crates/claude-code-sessions-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
-| [`claude-code-sessions-tui`](crates/claude-code-sessions-tui) | the `claude-code-sessions` binary: a small terminal viewer |
-| [`mods/sessions-bridge`](mods/sessions-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
+| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `pricing` (embedded price table) |
+| [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
+| [`iktinos-tui`](crates/iktinos-tui) | the `iktinos` binary: a small terminal viewer |
+| [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
 
 ## The viewer
 
 ```bash
-cargo run -p claude-code-sessions-tui            # the sessions on this machine
-cargo run -p claude-code-sessions-tui -- --projects-dir tests/fixtures/2.1.325/projects --no-live
+cargo run -p iktinos-tui            # the sessions on this machine
+cargo run -p iktinos-tui -- --projects-dir tests/fixtures/2.1.325/projects --no-live
 ```
 
 A session list (title, repository, branch, state, last update, cost) and a
@@ -105,14 +109,14 @@ transcript, one count per API response.
 ## Prices
 
 `pricing` embeds a snapshot of Anthropic's first-party price list
-(`crates/claude-code-sessions/assets/pricing.json`: input, output, 5 minute and
+(`crates/iktinos/assets/pricing.json`: input, output, 5 minute and
 1 hour cache writes, cache reads and the context window per model, plus fast
 mode and Claude Haiku 5.5's long-prompt prices). A model the table does not
 know has no price; it is shown as `—`, never as `$0`.
 
 To refresh the snapshot, copy the rows of the
 [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) into
-the JSON, set `as_of`, and run `cargo test -p claude-code-sessions pricing`:
+the JSON, set `as_of`, and run `cargo test -p iktinos pricing`:
 the tests reject a table whose rates break the published multipliers (cache
 writes at 1.25× and 2× the input price, output at 5×). Automatic refresh is
 future work.

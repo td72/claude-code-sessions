@@ -1,12 +1,12 @@
 {
-  "name": "claude-code-sessions",
-  "description": "Mods for claude-code-sessions: live session events for vig and the standalone viewer",
+  "name": "iktinos",
+  "description": "Mods for iktinos: live session events for vig and the standalone viewer",
   "owner": { "name": "td72" },
   "plugins": [
     {
-      "name": "sessions-bridge",
-      "source": "./mods/sessions-bridge",
-      "description": "Sends live session events to local claude-code-sessions consumers (vig, the standalone viewer) over Unix sockets"
+      "name": "iktinos-bridge",
+      "source": "./mods/iktinos-bridge",
+      "description": "Sends live session events to local iktinos consumers (vig, the standalone viewer) over Unix sockets"
     }
   ]
 }
