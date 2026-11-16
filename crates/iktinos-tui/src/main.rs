@@ -1,8 +1,8 @@
 //! `iktinos`: a terminal viewer for the Claude Code sessions on this machine.
-//! Sessions, their recent tool calls and their subagents as three lists over a
-//! detail pane, and a usage page, over `iktinos::session::SessionStore`, with
-//! the live layer when the bridge mod is installed. Its pages and keys follow
-//! vig, which renders the same model as a page of its own.
+//! Sessions, recent tool calls, subagents and usage, a page each, over
+//! `iktinos::session::SessionStore`, with the live layer when the bridge mod
+//! is installed. Its pages and keys follow vig, which renders the same model
+//! as a page of its own.
 //!
 //! Read-only: it reads the transcripts and listens on its own socket.
 
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use iktinos::discover::default_projects_dir;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use app::{App, Config, Page, Pane};
+use app::{App, Config, Page};
 
 /// How often the transcripts are read again.
 const REFRESH_EVERY: Duration = Duration::from_secs(1);
@@ -133,14 +133,13 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('q') => return Handled::Quit,
         KeyCode::Char('r') => return Handled::Refresh,
         KeyCode::Char('?') => app.help = true,
-        KeyCode::Char('1') => app.page = Page::Sessions,
-        KeyCode::Char('2') => app.page = Page::Usage,
-        _ if app.page != Page::Sessions => {}
-        KeyCode::Tab => app.cycle_focus(1),
-        KeyCode::BackTab => app.cycle_focus(-1),
-        KeyCode::Char('h') | KeyCode::Left => app.focus_sideways(-1),
-        KeyCode::Char('l') | KeyCode::Right => app.focus_sideways(1),
-        KeyCode::Char('i') | KeyCode::Enter => app.focus(Pane::Detail),
+        KeyCode::Char(c @ '1'..='4') => {
+            app.go_to(Page::ALL[c as usize - '1' as usize]);
+        }
+        KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
+        KeyCode::Char('i') | KeyCode::Char('l') | KeyCode::Right => app.focus_detail(),
+        KeyCode::Enter => app.enter(),
+        KeyCode::Char('h') | KeyCode::Left => app.leave_detail(),
         KeyCode::Esc => app.back(),
         KeyCode::Char('d') if ctrl => app.move_by(app.half_page()),
         KeyCode::Char('u') if ctrl => app.move_by(-app.half_page()),
@@ -261,23 +260,7 @@ mod tests {
     #[test]
     fn keys_follow_vigs_conventions() {
         let mut app = app::tests::fixture_app();
-        assert_eq!((app.page, app.focus), (Page::Sessions, Pane::Sessions));
-
-        // Pane navigation.
-        press(&mut app, "\t");
-        assert_eq!(app.focus, Pane::Tools);
-        press(&mut app, "l");
-        assert_eq!(app.focus, Pane::Subagents);
-        press(&mut app, "l");
-        assert_eq!(app.focus, Pane::Subagents, "l stops at the last list");
-        press(&mut app, "hh");
-        assert_eq!(app.focus, Pane::Sessions);
-        press(&mut app, "i");
-        assert_eq!((app.focus, app.detail_of), (Pane::Detail, Pane::Sessions));
-        press(&mut app, "h");
-        assert_eq!(app.focus, Pane::Sessions);
-        press(&mut app, "\n\x1b");
-        assert_eq!(app.focus, Pane::Sessions, "Enter in, Esc out");
+        assert_eq!((app.page, app.in_detail), (Page::Sessions, false));
 
         // Moving.
         press(&mut app, "j");
@@ -290,11 +273,33 @@ mod tests {
         assert_eq!(app.selected, 0);
         press(&mut app, "gjg");
         assert_eq!(app.selected, 1, "a g followed by another key is dropped");
-        press(&mut app, "kk");
-        assert_eq!(app.selected, 0);
+
+        // The detail pane and back.
+        press(&mut app, "i");
+        assert!(app.in_detail);
+        press(&mut app, "h");
+        assert!(!app.in_detail);
+        press(&mut app, "\t");
+        assert!(app.in_detail);
+        press(&mut app, "\x1b");
+        assert!(!app.in_detail);
+
+        // Enter on a session: the other pages are narrowed to it.
+        press(&mut app, "\n");
+        assert_eq!(app.page, Page::Tools);
+        assert_eq!(app.scope.as_deref(), Some(app::tests::WITH_SUBAGENTS));
+        // Enter on any other list is the detail pane.
+        press(&mut app, "\n");
+        assert!(app.in_detail);
+        press(&mut app, "\x1b3");
+        assert_eq!((app.page, app.in_detail), (Page::Subagents, false));
+        assert!(app.scope.is_some(), "the narrowing holds across pages");
+        // Esc on a list clears it.
+        press(&mut app, "\x1b");
+        assert_eq!(app.scope, None);
 
         // Search: typed keys are text until Enter.
-        press(&mut app, "/sq1\n");
+        press(&mut app, "1/sq1\n");
         assert_eq!(app.search.as_ref().unwrap().query, "sq1");
         assert_eq!(
             app.page,
@@ -306,19 +311,20 @@ mod tests {
         press(&mut app, "/abc\x1b");
         assert_eq!((app.typing.clone(), app.search.clone()), (None, None));
 
-        // Sort, filter, pages, help.
+        // Sort and filter belong to the Sessions page.
         press(&mut app, "s");
         assert_eq!(app.sort, app::Sort::Cost);
         press(&mut app, "f");
         assert_eq!(app.filter, app::Filter::Live);
-        press(&mut app, "ff2");
-        assert_eq!(app.page, Page::Usage);
-        press(&mut app, "j\t");
+        press(&mut app, "ff2sf");
         assert_eq!(
-            app.focus,
-            Pane::Sessions,
-            "the Usage page has no panes to move in"
+            (app.page, app.sort, app.filter),
+            (Page::Tools, app::Sort::Cost, app::Filter::All)
         );
+        press(&mut app, "4j\ti");
+        assert_eq!((app.page, app.in_detail), (Page::Usage, false));
+
+        // Help.
         press(&mut app, "1?");
         assert!(app.help);
         press(&mut app, "q");

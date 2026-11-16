@@ -1,5 +1,5 @@
-//! Drawing. The Sessions page is three lists over a detail pane, in fixed
-//! proportions (the shape of vig's pages); the Usage page is three tables.
+//! Drawing. Each list page is a list over a detail pane in fixed proportions
+//! (the shape of vig's pages); the Usage page is three tables.
 
 use std::collections::BTreeMap;
 
@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use crate::app::{self, App, LiveStatus, Page, Pane, StatusKind};
+use crate::app::{self, App, LiveStatus, Page, StatusKind};
 use crate::format;
 
 pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
@@ -23,9 +23,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
     .areas(frame.area());
 
     draw_header(frame, header, app, now);
-    match app.page {
-        Page::Sessions => draw_sessions_page(frame, body, app, now),
-        Page::Usage => draw_usage_page(frame, body, app),
+    if app.page.has_list() {
+        // Fixed proportions, whatever the panes hold.
+        let [list, detail] =
+            Layout::vertical([Constraint::Percentage(45), Constraint::Min(3)]).areas(body);
+        app.viewport.list_rows = (list.height as usize).saturating_sub(3);
+        match app.page {
+            Page::Sessions => draw_session_list(frame, list, app, now),
+            Page::Tools => draw_tool_list(frame, list, app, now),
+            _ => draw_subagent_list(frame, list, app, now),
+        }
+        draw_detail(frame, detail, app, now);
+    } else {
+        draw_usage_page(frame, body, app);
     }
     draw_footer(frame, footer, app);
     if app.help {
@@ -43,25 +53,24 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
             StatusKind::Idle | StatusKind::Exited => {}
         }
     }
-    let tab = |page: Page, text: &'static str| {
+    let mut spans = Vec::new();
+    for (index, page) in Page::ALL.into_iter().enumerate() {
         let style = if app.page == page {
             Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
             dim()
         };
-        Span::styled(text, style)
-    };
-    let mut spans = vec![
-        Span::raw(" "),
-        tab(Page::Sessions, " 1:Sessions "),
-        Span::raw(" "),
-        tab(Page::Usage, " 2:Usage "),
-        Span::raw(format!(
-            "   {} sessions  {} busy",
-            app.store.len(),
-            counts[0]
-        )),
-    ];
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(" {}:{} ", index + 1, page.title()),
+            style,
+        ));
+    }
+    spans.push(Span::raw(format!(
+        "   {} sessions  {} busy",
+        app.store.len(),
+        counts[0]
+    )));
     if counts[1] > 0 {
         spans.push(Span::styled(
             format!("  {} need approval", counts[1]),
@@ -83,37 +92,34 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
     frame.render_widget(Line::from(spans), area);
 }
 
-/// A pane's frame: its title, the search in force and whether it has focus.
-fn pane_block(app: &App, pane: Pane, title: String, matches: usize) -> Block<'static> {
-    let focused = app.focus == pane;
-    let mut title = format!(" {title} ");
-    if let Some(search) = app.search.as_ref().filter(|s| s.pane == pane) {
-        title.push_str(&format!("/{} ({matches}) ", search.query));
-    }
+/// A pane's frame: its title and whether it has the focus.
+fn pane_block(title: String, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
         dim()
     };
-    Block::bordered().title(title).border_style(style)
+    Block::bordered()
+        .title(format!(" {title} "))
+        .border_style(style)
 }
 
-fn draw_sessions_page(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
-    // Fixed proportions: the lists on top, the detail below.
-    let [upper, lower] =
-        Layout::vertical([Constraint::Percentage(40), Constraint::Min(3)]).areas(area);
-    let [sessions, tools, subagents] = Layout::horizontal([
-        Constraint::Percentage(46),
-        Constraint::Percentage(30),
-        Constraint::Min(10),
-    ])
-    .areas(upper);
-
-    app.viewport.list_rows = (sessions.height as usize).saturating_sub(3);
-    draw_session_list(frame, sessions, app, now);
-    draw_tool_list(frame, tools, app, now);
-    draw_subagent_list(frame, subagents, app, now);
-    draw_detail(frame, lower, app, now);
+/// The title of a list pane: what it lists, the session it is narrowed to
+/// and the search in force.
+fn list_title(app: &App, what: String, matches: usize) -> String {
+    let mut title = what;
+    if app.page != Page::Sessions {
+        if let Some(session) = app.scoped_session() {
+            title.push_str(&format!(
+                " of {}",
+                format::truncate(app::label(session), 40)
+            ));
+        }
+    }
+    if let Some(search) = app.search.as_ref().filter(|s| s.page == app.page) {
+        title.push_str(&format!("  /{} ({matches})", search.query));
+    }
+    title
 }
 
 /// The style of a row the search matches.
@@ -125,17 +131,18 @@ fn row_style(matches: &[usize], index: usize) -> Style {
     }
 }
 
-fn highlight(app: &App, pane: Pane) -> Style {
-    if app.focus == pane || (app.focus == Pane::Detail && app.detail_of == pane) {
-        Style::new().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::new().add_modifier(Modifier::BOLD)
-    }
+fn session_cell(session: &Session) -> Cell<'static> {
+    Cell::from(
+        app::label(session)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    )
 }
 
 fn draw_session_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
-    let matches = app.matches(Pane::Sessions, now);
-    let wide = area.width >= 64;
+    let matches = app.matches(Page::Sessions, now);
     let rows = app
         .order
         .iter()
@@ -144,43 +151,56 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
         .map(|(index, session)| {
             let status = app::status(session, now);
             let updated = app::latest(session).map_or("—".to_owned(), |at| format::ago(now, at));
-            let mut cells = vec![Cell::from(
-                app::label(session)
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned(),
-            )];
-            if wide {
-                cells.push(Cell::from(
-                    app::project(session).unwrap_or_else(|| "—".to_owned()),
-                ));
-            }
-            cells.push(Cell::from(status.text).style(style_of(status.kind)));
-            cells.push(Cell::from(Line::from(updated).right_aligned()));
-            cells.push(Cell::from(
-                Line::from(format::cost(&session.cost)).right_aligned(),
-            ));
-            Row::new(cells).style(row_style(&matches, index))
+            // The session the other pages are narrowed to.
+            let scoped = app.scope.as_deref() == Some(session.id.as_str());
+            Row::new([
+                Cell::from(if scoped { "●" } else { "" }).style(Style::new().fg(Color::Cyan)),
+                session_cell(session),
+                Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned())),
+                Cell::from(session.git_branch.clone().unwrap_or_else(|| "—".to_owned())),
+                Cell::from(status.text).style(style_of(status.kind)),
+                Cell::from(Line::from(updated).right_aligned()),
+                Cell::from(
+                    Line::from(format::tokens(session.usage.total().total_tokens()))
+                        .right_aligned(),
+                ),
+                Cell::from(Line::from(format::cost(&session.cost)).right_aligned()),
+            ])
+            .style(row_style(&matches, index))
         });
-    let mut widths = vec![Constraint::Fill(3)];
-    let mut header = vec!["title"];
-    if wide {
-        widths.push(Constraint::Fill(1));
-        header.push("repository");
-    }
-    widths.extend([
-        Constraint::Length(14),
-        Constraint::Length(4),
-        Constraint::Length(9),
-    ]);
-    header.extend(["state", "upd", "cost"]);
-
-    let title = format!("Sessions ({} · {} ↓)", app.filter.label(), app.sort.label());
-    let table = Table::new(rows, widths)
-        .header(Row::new(header).style(dim()))
-        .row_highlight_style(highlight(app, Pane::Sessions))
-        .block(pane_block(app, Pane::Sessions, title, matches.len()));
+    let title = list_title(
+        app,
+        format!("Sessions ({} · {} ↓)", app.filter.label(), app.sort.label()),
+        matches.len(),
+    );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(1),
+            Constraint::Fill(4),
+            Constraint::Fill(2),
+            Constraint::Fill(2),
+            Constraint::Length(16),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(9),
+        ],
+    )
+    .header(
+        Row::new([
+            "",
+            "title",
+            "repository",
+            "branch",
+            "state",
+            "updated",
+            "tokens",
+            "cost",
+        ])
+        .style(dim()),
+    )
+    .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+    .block(pane_block(title, !app.in_detail));
     let mut state =
         TableState::default().with_selected((!app.order.is_empty()).then_some(app.selected));
     frame.render_stateful_widget(table, area, &mut state);
@@ -190,56 +210,58 @@ fn outcome(call: &ToolCall) -> (&'static str, Style) {
     match call.success {
         Some(true) => ("ok", Style::new().fg(Color::Green)),
         Some(false) => ("failed", Style::new().fg(Color::Red)),
-        None => ("…", dim()),
-    }
-}
-
-/// An outcome as one character, for a narrow column.
-fn symbol(outcome: &str) -> &'static str {
-    match outcome {
-        "ok" => "✓",
-        "failed" => "✗",
-        _ => "…",
+        None => ("running", dim()),
     }
 }
 
 fn draw_tool_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
-    let matches = app.matches(Pane::Tools, now);
+    let matches = app.matches(Page::Tools, now);
     let calls = app.tools();
-    let rows = calls.iter().enumerate().map(|(index, call)| {
+    // The session column says nothing once the page is narrowed to one.
+    let scoped = app.scope.is_some();
+    let rows = calls.iter().enumerate().map(|(index, (session, call))| {
         let (mark, style) = outcome(call);
         let name = format!(
             "{}{}",
             if call.agent_id.is_some() { "↳ " } else { "" },
             format::tool_name(&call.name)
         );
-        Row::new([
+        let when = call
+            .started_at
+            .map_or("—".to_owned(), |at| format::ago(now, at));
+        let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
+        if !scoped {
+            cells.push(session_cell(session));
+        }
+        cells.extend([
             Cell::from(name),
             Cell::from(call.summary.clone().unwrap_or_default()).style(dim()),
             Cell::from(
                 Line::from(call.duration_ms.map(format::duration).unwrap_or_default())
                     .right_aligned(),
             ),
-            Cell::from(symbol(mark)).style(style),
-        ])
-        .style(row_style(&matches, index))
+            Cell::from(mark).style(style),
+        ]);
+        Row::new(cells).style(row_style(&matches, index))
     });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(12),
-            Constraint::Fill(1),
-            Constraint::Length(6),
-            Constraint::Length(1),
-        ],
-    )
-    .row_highlight_style(highlight(app, Pane::Tools))
-    .block(pane_block(
-        app,
-        Pane::Tools,
-        format!("Tool calls ({})", calls.len()),
-        matches.len(),
-    ));
+    let mut widths = vec![Constraint::Length(5)];
+    let mut header = vec!["when"];
+    if !scoped {
+        widths.push(Constraint::Fill(2));
+        header.push("session");
+    }
+    widths.extend([
+        Constraint::Length(22),
+        Constraint::Fill(5),
+        Constraint::Length(7),
+        Constraint::Length(7),
+    ]);
+    header.extend(["tool", "what", "took", ""]);
+    let title = list_title(app, format!("Tool calls ({})", calls.len()), matches.len());
+    let table = Table::new(rows, widths)
+        .header(Row::new(header).style(dim()))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .block(pane_block(title, !app.in_detail));
     let mut state =
         TableState::default().with_selected((!calls.is_empty()).then_some(app.tool_selected));
     frame.render_stateful_widget(table, area, &mut state);
@@ -254,40 +276,75 @@ fn subagent_name(subagent: &Subagent) -> &str {
 }
 
 fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
-    let matches = app.matches(Pane::Subagents, now);
+    let matches = app.matches(Page::Subagents, now);
     let subagents = app.subagents();
-    let rows = subagents.iter().enumerate().map(|(index, subagent)| {
-        let done = match subagent.finished {
-            Some(true) => Span::styled("done", dim()),
-            _ => Span::styled("…", Style::new().fg(Color::Green)),
-        };
-        Row::new([
-            Cell::from(
-                subagent
-                    .agent_type
-                    .clone()
-                    .unwrap_or_else(|| "agent".to_owned()),
-            ),
-            Cell::from(subagent_name(subagent).to_owned()).style(dim()),
-            Cell::from(done),
-        ])
-        .style(row_style(&matches, index))
-    });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(10),
-            Constraint::Fill(1),
-            Constraint::Length(4),
-        ],
-    )
-    .row_highlight_style(highlight(app, Pane::Subagents))
-    .block(pane_block(
+    let scoped = app.scope.is_some();
+    let rows = subagents
+        .iter()
+        .enumerate()
+        .map(|(index, (session, subagent))| {
+            let done = match subagent.finished {
+                Some(true) => Span::styled("done", dim()),
+                _ => Span::styled("running", Style::new().fg(Color::Green)),
+            };
+            let when = subagent
+                .last_activity
+                .map_or("—".to_owned(), |at| format::ago(now, at));
+            let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
+            if !scoped {
+                cells.push(session_cell(session));
+            }
+            cells.extend([
+                Cell::from(
+                    subagent
+                        .agent_type
+                        .clone()
+                        .unwrap_or_else(|| "agent".to_owned()),
+                ),
+                Cell::from(subagent_name(subagent).to_owned()),
+                Cell::from(subagent.model.clone().unwrap_or_else(|| "—".to_owned())).style(dim()),
+                Cell::from(
+                    Line::from(format::tokens(subagent.usage.total_tokens())).right_aligned(),
+                ),
+                Cell::from(
+                    Line::from(
+                        subagent
+                            .usage
+                            .estimated_cost()
+                            .map_or("—".to_owned(), |usd| {
+                                format!("~{}", format::usd_amount(usd))
+                            }),
+                    )
+                    .right_aligned(),
+                ),
+                Cell::from(done),
+            ]);
+            Row::new(cells).style(row_style(&matches, index))
+        });
+    let mut widths = vec![Constraint::Length(5)];
+    let mut header = vec!["when"];
+    if !scoped {
+        widths.push(Constraint::Fill(2));
+        header.push("session");
+    }
+    widths.extend([
+        Constraint::Length(16),
+        Constraint::Fill(4),
+        Constraint::Length(18),
+        Constraint::Length(8),
+        Constraint::Length(9),
+        Constraint::Length(7),
+    ]);
+    header.extend(["type", "task", "model", "tokens", "cost", ""]);
+    let title = list_title(
         app,
-        Pane::Subagents,
         format!("Subagents ({})", subagents.len()),
         matches.len(),
-    ));
+    );
+    let table = Table::new(rows, widths)
+        .header(Row::new(header).style(dim()))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .block(pane_block(title, !app.in_detail));
     let mut state = TableState::default()
         .with_selected((!subagents.is_empty()).then_some(app.subagent_selected));
     frame.render_stateful_widget(table, area, &mut state);
@@ -295,30 +352,33 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) 
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
-    let (title, lines) = match (app.detail_of, app.selected_session()) {
-        (_, None) => (
-            "Detail".to_owned(),
-            vec![Line::raw(
-                app.notice
-                    .clone()
-                    .unwrap_or_else(|| "no sessions".to_owned()),
-            )],
-        ),
-        (Pane::Tools, Some(session)) => (
-            "Tool call".to_owned(),
+    let empty = |text: &str| vec![Line::styled(text.to_owned(), dim())];
+    let (title, lines) = match app.page {
+        Page::Tools => (
+            "Tool call",
             match app.selected_tool() {
-                Some(call) => tool_lines(session, call, now),
-                None => vec![Line::styled("no tool calls", dim())],
+                Some((session, call)) => tool_lines(session, call, now),
+                None => empty("no tool calls"),
             },
         ),
-        (Pane::Subagents, Some(session)) => (
-            "Subagent".to_owned(),
+        Page::Subagents => (
+            "Subagent",
             match app.selected_subagent() {
-                Some(subagent) => subagent_lines(session, subagent, now, width),
-                None => vec![Line::styled("no subagents", dim())],
+                Some((session, subagent)) => subagent_lines(session, subagent, now, width),
+                None => empty("no subagents"),
             },
         ),
-        (_, Some(session)) => ("Session".to_owned(), session_lines(session, now, width)),
+        _ => (
+            "Session",
+            match app.selected_session() {
+                Some(session) => session_lines(session, now, width),
+                None => vec![Line::raw(
+                    app.notice
+                        .clone()
+                        .unwrap_or_else(|| "no sessions".to_owned()),
+                )],
+            },
+        ),
     };
 
     let rows = area.height.saturating_sub(2) as usize;
@@ -333,11 +393,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
             lines.len()
         )
     } else {
-        title
+        title.to_owned()
     };
     let paragraph = Paragraph::new(lines)
         .scroll((u16::try_from(app.detail_scroll).unwrap_or(u16::MAX), 0))
-        .block(pane_block(app, Pane::Detail, title, 0));
+        .block(pane_block(title, app.in_detail));
     frame.render_widget(paragraph, area);
 }
 
@@ -512,15 +572,16 @@ fn tool_lines(session: &Session, call: &ToolCall, now: Timestamp) -> Vec<Line<'s
         Line::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
         Line::from(vec![
             Span::styled(format!("{:<10}", "outcome"), dim()),
-            Span::styled(
-                if call.success.is_none() {
-                    "running"
-                } else {
-                    mark
-                },
-                style,
-            ),
+            Span::styled(mark, style),
         ]),
+        field(
+            "session",
+            app::label(session)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+        ),
     ];
     if let Some(ms) = call.duration_ms {
         lines.push(field("took", format::duration(ms)));
@@ -561,6 +622,14 @@ fn subagent_lines(
     if let Some(kind) = &subagent.agent_type {
         lines.push(field("type", kind.clone()));
     }
+    lines.push(field(
+        "session",
+        app::label(session)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    ));
     lines.push(field(
         "state",
         match subagent.finished {
@@ -767,7 +836,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         Line::styled(
-            " Tab pane  j/k move  i detail  / search  s sort  f filter  ? help  q quit",
+            " 1-4 page  j/k move  Enter open session  i detail  / search  s sort  f filter  ? help  q quit",
             dim(),
         )
     };
@@ -775,15 +844,22 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("1 / 2", "Sessions page / Usage page"),
-    ("Tab / Shift+Tab", "next / previous pane"),
-    ("h / l", "the pane to the left / right"),
+    ("1 2 3 4", "Sessions / Tool calls / Subagents / Usage"),
     ("j / k", "down / up (scrolls the detail pane)"),
     ("gg / G", "top / bottom"),
     ("Ctrl+d / Ctrl+u", "half a page down / up"),
+    (
+        "Enter (session)",
+        "narrow pages 2 and 3 to it, show its tool calls",
+    ),
     ("i / Enter", "focus the detail pane"),
-    ("h / Esc", "back to the list (Esc also clears a search)"),
-    ("/", "search the focused list"),
+    (
+        "Tab / Shift+Tab",
+        "switch between the list and the detail pane",
+    ),
+    ("h / Esc", "back to the list"),
+    ("Esc (list)", "clear the search, then the narrowing"),
+    ("/", "search the list"),
     ("n / N", "next / previous match"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
@@ -793,7 +869,7 @@ const HELP: &[(&str, &str)] = &[
 ];
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let width = 62.min(area.width);
+    let width = 70.min(area.width);
     let height = (HELP.len() as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
@@ -840,6 +916,7 @@ mod tests {
     use ratatui::Terminal;
 
     const LATER: &str = "2026-11-03T12:00:00.000Z";
+    const SOON: &str = "2026-11-02T10:00:20.000Z";
 
     /// Draws the app and returns the screen as text, one line per row.
     fn screen(app: &mut App, width: u16, height: u16, now: &str) -> String {
@@ -859,64 +936,60 @@ mod tests {
             .join("\n")
     }
 
+    /// Puts the Sessions page's cursor on a session.
     fn select(app: &mut App, id: &str) {
-        app.focus(Pane::Sessions);
+        app.go_to(Page::Sessions);
+        app.leave_detail();
         let at = app.order.iter().position(|other| other == id).unwrap();
         app.move_first();
         app.move_by(at as isize);
         assert_eq!(app.selected_session().unwrap().id, id);
     }
 
-    /// The row and height of each pane's top border.
-    fn pane_top(screen: &str, title: &str) -> usize {
+    fn row<'a>(screen: &'a str, needle: &str) -> &'a str {
         screen
             .lines()
-            .position(|line| line.contains(title))
-            .unwrap_or_else(|| panic!("no pane titled {title}\n{screen}"))
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle}\n{screen}"))
+    }
+
+    /// The rows the two panes start on.
+    fn pane_tops(screen: &str) -> Vec<usize> {
+        screen
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with('┌'))
+            .map(|(row, _)| row)
+            .collect()
     }
 
     #[test]
-    fn the_sessions_page_shows_three_lists_over_a_detail_pane() {
+    fn the_sessions_page_is_one_list_and_a_detail_pane() {
         let mut app = fixture_app();
         select(&mut app, WITH_SUBAGENTS);
-        let screen = screen(&mut app, 160, 44, "2026-11-02T10:00:20.000Z");
+        let screen = screen(&mut app, 150, 44, SOON);
 
-        // Header.
-        assert!(screen.contains("1:Sessions"), "{screen}");
-        assert!(screen.contains("2:Usage"));
-        assert!(screen.contains("3 sessions"));
-        assert!(screen.contains("live off"));
+        // Header: the four pages, the counts, the live state.
+        let header = screen.lines().next().unwrap();
+        for page in ["1:Sessions", "2:Tool calls", "3:Subagents", "4:Usage"] {
+            assert!(header.contains(page), "{header}");
+        }
+        assert!(header.contains("3 sessions"));
+        assert!(header.contains("live off"));
 
-        // The three lists share the top row of panes.
-        let top = pane_top(&screen, "Sessions (all · updated ↓)");
-        assert_eq!(pane_top(&screen, "Tool calls (5)"), top);
-        assert_eq!(pane_top(&screen, "Subagents (2)"), top);
-        assert!(pane_top(&screen, "┌ Session ") > top);
+        // The list has the whole width.
+        assert!(screen.contains("Sessions (all · updated ↓)"), "{screen}");
+        let listed = row(&screen, "Synthetic session title");
+        assert!(listed.contains("example"));
+        assert!(listed.contains("main"));
+        assert!(listed.contains("idle"));
+        assert!(listed.contains("4.4k"));
+        assert!(listed.contains("~$0.0089"));
+        assert!(row(&screen, "other.repo").contains("active"));
+        assert!(row(&screen, "Synthetic title after the damage").contains("example"));
 
-        // Sessions.
-        assert!(screen.contains("Synthetic session title"));
-        assert!(screen.contains("other.repo"));
-        assert!(screen.contains("active"));
-
-        // The selected session's tool calls, the latest first.
-        let row = |needle: &str| {
-            screen
-                .lines()
-                .find(|line| line.contains(needle))
-                .unwrap_or_else(|| panic!("no row with {needle}\n{screen}"))
-        };
-        assert!(row("cargo test --workspace").contains("Bash"));
-        assert!(row("cargo test --workspace").contains("1.5s"));
-        assert!(row("cargo test --workspace").contains('✓'));
-        assert!(row("/work/example/README.md").contains('✗'));
-        assert!(row("synthetic lookup").contains("example/look"));
-        assert!(row("synthetic pattern").contains("↳ Grep"));
-
-        // Its subagents.
-        assert!(row("Synthetic agent task").contains("Explore"));
-        assert!(row("Synthetic agent task").contains("done"));
-
-        // The detail of the session.
+        // The detail of the session under the cursor.
+        assert!(screen.contains("┌ Session "));
         assert!(screen.contains("/work/other.repo"));
         assert!(screen.contains("claude-fable-5-2"));
         assert!(screen.contains("1 turn, 5 tool calls, 2 subagents"));
@@ -930,73 +1003,114 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_does_not_depend_on_what_the_panes_hold() {
+    fn the_tool_calls_page_lists_every_session_or_the_one_entered() {
         let mut app = fixture_app();
-        let tops = |screen: &str| {
-            (
-                pane_top(screen, "Sessions ("),
-                pane_top(screen, "Tool calls ("),
-                screen
-                    .lines()
-                    .position(|line| line.starts_with('┌') && !line.contains("Sessions ("))
-                    .unwrap(),
-            )
-        };
-        // A session with a lot to show, and one with almost nothing.
-        select(&mut app, WITH_SUBAGENTS);
-        let full = tops(&screen(&mut app, 120, 40, LATER));
-        select(&mut app, INDEXED);
-        let sparse = tops(&screen(&mut app, 120, 40, LATER));
-        assert_eq!(full, sparse);
-        // 40 rows: a header, a body of 38 split 40% / 60%, a footer.
-        assert_eq!(full, (1, 1, 16));
+        app.go_to(Page::Tools);
+        let all = screen(&mut app, 150, 44, SOON);
+        assert!(all.contains("Tool calls (5)"), "{all}");
+        // Unscoped rows name their session.
+        assert!(all
+            .lines()
+            .any(|l| l.contains("when") && l.contains("session")));
+        let bash = row(&all, "cargo test --workspace");
+        assert!(bash.contains("22222222"));
+        assert!(bash.contains("Bash"));
+        assert!(bash.contains("1.5s"));
+        assert!(bash.contains("ok"));
+        assert!(row(&all, "/work/example/README.md").contains("failed"));
+        assert!(row(&all, "synthetic lookup").contains("example/lookup"));
+        assert!(row(&all, "synthetic pattern").contains("↳ Grep"));
 
-        // Focusing a list changes what the detail pane describes, not where
-        // it is.
+        // Enter on a session: its calls only, and the title says whose.
         select(&mut app, WITH_SUBAGENTS);
-        app.focus(Pane::Tools);
-        let on_tools = screen(&mut app, 120, 40, LATER);
-        assert_eq!(pane_top(&on_tools, "┌ Tool call "), 16);
-        app.focus(Pane::Subagents);
-        let on_subagents = screen(&mut app, 120, 40, LATER);
-        assert_eq!(pane_top(&on_subagents, "┌ Subagent "), 16);
+        app.enter();
+        let scoped = screen(&mut app, 150, 44, SOON);
+        assert!(scoped.contains("Tool calls (5) of 22222222"), "{scoped}");
+        assert!(!scoped
+            .lines()
+            .any(|l| l.contains("when") && l.contains("session")));
+        select(&mut app, INDEXED);
+        app.enter();
+        let none = screen(&mut app, 150, 44, SOON);
+        assert!(
+            none.contains("Tool calls (0) of Synthetic session title"),
+            "{none}"
+        );
+        assert!(none.contains("no tool calls"));
+
+        // The Sessions page marks the session the others are narrowed to.
+        app.go_to(Page::Sessions);
+        let sessions = screen(&mut app, 150, 44, SOON);
+        assert!(row(&sessions, "Synthetic session title").contains('●'));
+        assert!(!row(&sessions, "other.repo").contains('●'));
     }
 
     #[test]
-    fn the_detail_pane_follows_the_focused_list() {
+    fn the_detail_pane_describes_the_selected_tool_call() {
         let mut app = fixture_app();
-        select(&mut app, WITH_SUBAGENTS);
-
-        app.focus(Pane::Tools);
+        app.go_to(Page::Tools);
         app.move_last(); // the oldest call: Bash
         let tool = screen(&mut app, 140, 44, LATER);
         let detail = &tool[tool.find("┌ Tool call ").unwrap()..];
         assert!(detail.contains("Bash"), "{tool}");
         assert!(detail.contains("outcome   ok"));
+        assert!(detail.contains("session   22222222"));
         assert!(detail.contains("took      1.5s"));
         assert!(detail.contains("by        the main thread"));
         assert!(detail.contains("toolu_01"));
         assert!(detail.contains("cargo test --workspace"));
 
-        app.move_first(); // the latest: a subagent's Grep
+        app.move_first();
+        app.move_by(1); // a subagent's Grep
         let tool = screen(&mut app, 140, 44, LATER);
         let detail = &tool[tool.find("┌ Tool call ").unwrap()..];
         assert!(detail.contains("by        subagent"), "{tool}");
+    }
 
-        app.focus(Pane::Subagents);
-        let agent = screen(&mut app, 140, 44, LATER);
-        let detail = &agent[agent.find("┌ Subagent ").unwrap()..];
-        assert!(detail.contains("type      Explore") || detail.contains("id        b2c3"));
-        assert!(detail.contains("claude-haiku-5-5"));
+    #[test]
+    fn the_subagents_page_lists_them_with_their_cost() {
+        let mut app = fixture_app();
+        app.go_to(Page::Subagents);
+        let screen = screen(&mut app, 150, 44, LATER);
+        assert!(screen.contains("Subagents (2)"), "{screen}");
+        let explore = row(&screen, "Synthetic agent task");
+        assert!(explore.contains("Explore"));
+        assert!(explore.contains("22222222"));
+        assert!(explore.contains("claude-haiku-5-5"));
+        assert!(explore.contains("1.8k"));
+        assert!(explore.contains("~$0.0002"));
+        assert!(explore.contains("done"));
+        // The one without a metadata file: no type, not marked done.
+        assert!(row(&screen, "b2c3d4e5f6071829").contains("running"));
+
+        let detail = &screen[screen.find("┌ Subagent ").unwrap()..];
+        assert!(detail.contains("session   22222222"));
         assert!(detail.contains("tool calls (1 in all, the latest 1)"));
         assert!(detail.contains("Grep"));
         assert!(detail.contains("synthetic pattern"));
+    }
 
-        // Into the detail pane and back: it keeps describing the same list.
-        app.focus(Pane::Detail);
-        assert!(screen(&mut app, 140, 44, LATER).contains("┌ Subagent "));
-        app.back();
-        assert_eq!(app.focus, Pane::Subagents);
+    #[test]
+    fn the_layout_does_not_depend_on_what_the_panes_hold() {
+        let mut app = fixture_app();
+        // 40 rows: a header, a body of 38 split 45% / 55%, a footer.
+        let expected = vec![1, 18];
+        for id in [WITH_SUBAGENTS, INDEXED] {
+            select(&mut app, id);
+            assert_eq!(pane_tops(&screen(&mut app, 120, 40, LATER)), expected);
+            app.focus_detail();
+            assert_eq!(pane_tops(&screen(&mut app, 120, 40, LATER)), expected);
+        }
+        for page in [Page::Tools, Page::Subagents] {
+            app.go_to(page);
+            assert_eq!(pane_tops(&screen(&mut app, 120, 40, LATER)), expected);
+        }
+        // Narrowed to a session with nothing to list: the same.
+        select(&mut app, INDEXED);
+        app.enter();
+        assert_eq!(pane_tops(&screen(&mut app, 120, 40, LATER)), expected);
+        // And at another width.
+        assert_eq!(pane_tops(&screen(&mut app, 70, 40, LATER)), expected);
     }
 
     #[test]
@@ -1008,7 +1122,7 @@ mod tests {
         assert!(first.contains("Session [1-"), "{first}");
         assert!(!first.contains("by source"));
 
-        app.focus(Pane::Detail);
+        app.focus_detail();
         app.move_last();
         let last = screen(&mut app, 120, 20, LATER);
         assert!(last.contains("repl_main_thread"), "{last}");
@@ -1025,12 +1139,13 @@ mod tests {
         assert!(app.detail_scroll < at);
         app.move_first();
         assert_eq!(app.detail_scroll, 0);
+        // Scrolling the detail pane does not move the list.
+        assert_eq!(app.selected_session().unwrap().id, WITH_SUBAGENTS);
     }
 
     #[test]
-    fn a_search_marks_its_matches_in_the_pane_title_and_moves_between_them() {
+    fn a_search_marks_its_matches_in_the_title_and_moves_between_them() {
         let mut app = fixture_app();
-        app.focus(Pane::Sessions);
         app.start_search();
         app.typing = Some("SYNTHETIC".to_owned());
         let typing = screen(&mut app, 140, 30, LATER);
@@ -1048,19 +1163,23 @@ mod tests {
         app.next_match(-1);
         assert_ne!(app.selected, first);
 
-        // A search belongs to its pane.
-        select(&mut app, WITH_SUBAGENTS);
-        app.focus(Pane::Tools);
+        // A search belongs to its page.
+        app.go_to(Page::Tools);
         app.start_search();
         app.typing = Some("cargo".to_owned());
         app.submit_search();
         let tools = screen(&mut app, 140, 30, LATER);
-        assert!(tools.contains("Tool calls (5) /cargo (1)"), "{tools}");
+        assert!(tools.contains("Tool calls (5)  /cargo (1)"), "{tools}");
         assert!(!tools.contains("/synthetic"));
-        assert_eq!(app.selected_tool().unwrap().name, "Bash");
+        assert_eq!(app.selected_tool().unwrap().1.name, "Bash");
 
+        // Esc clears the search first.
         app.back();
         assert_eq!(app.search, None);
+        // There is no searching from inside the detail pane.
+        app.focus_detail();
+        app.start_search();
+        assert_eq!(app.typing, None);
     }
 
     #[test]
@@ -1085,9 +1204,12 @@ mod tests {
         let live = screen(&mut app, 140, 30, LATER);
         assert!(live.contains("Sessions (live · tokens ↓)"), "{live}");
         assert!(app.order.is_empty());
-        assert!(live.contains("Tool calls (0)"));
         assert!(live.contains("no sessions"));
+        // The other pages are not filtered by it.
+        app.go_to(Page::Tools);
+        assert!(screen(&mut app, 140, 30, LATER).contains("Tool calls (5)"));
 
+        app.go_to(Page::Sessions);
         app.cycle_filter();
         assert_eq!(app.filter, Filter::Open);
         assert_eq!(app.order.len(), 3);
@@ -1096,7 +1218,7 @@ mod tests {
     #[test]
     fn the_usage_page_totals_every_session() {
         let mut app = fixture_app();
-        app.page = Page::Usage;
+        app.go_to(Page::Usage);
         let screen = screen(&mut app, 160, 40, LATER);
         assert!(screen.contains("Models"), "{screen}");
         assert!(screen.contains("claude-fable-5-2"));
@@ -1120,14 +1242,15 @@ mod tests {
         assert!(screen.contains("Keys (any key closes)"), "{screen}");
         assert!(screen.contains("Ctrl+d / Ctrl+u"));
         assert!(screen.contains("filter sessions"));
+        assert!(screen.contains("narrow pages 2 and 3"));
     }
 
     #[test]
     fn nothing_panics_at_small_sizes() {
         let mut app = fixture_app();
         app.help = true;
-        for page in [Page::Sessions, Page::Usage] {
-            app.page = page;
+        for page in Page::ALL {
+            app.go_to(page);
             for (width, height) in [(1, 1), (10, 3), (30, 5), (80, 10), (200, 2), (60, 24)] {
                 screen(&mut app, width, height, LATER);
             }
@@ -1141,9 +1264,13 @@ mod tests {
             live: false,
             socket_dir: None,
         });
-        let screen = screen(&mut app, 120, 20, LATER);
-        assert!(screen.contains("0 sessions"), "{screen}");
-        assert!(screen.contains("no projects directory"));
+        let sessions = screen(&mut app, 120, 20, LATER);
+        assert!(sessions.contains("0 sessions"), "{sessions}");
+        assert!(sessions.contains("no projects directory"));
+        for page in [Page::Tools, Page::Subagents, Page::Usage] {
+            app.go_to(page);
+            screen(&mut app, 120, 20, LATER);
+        }
     }
 
     #[test]
@@ -1151,25 +1278,26 @@ mod tests {
     fn show_the_screen() {
         let mut app = fixture_app();
         select(&mut app, WITH_SUBAGENTS);
-        println!("{}", screen(&mut app, 150, 40, "2026-11-02T10:00:20.000Z"));
-        app.focus(Pane::Tools);
-        println!("{}", screen(&mut app, 100, 30, "2026-11-02T10:00:20.000Z"));
-        app.page = Page::Usage;
-        println!("{}", screen(&mut app, 150, 30, "2026-11-02T10:00:20.000Z"));
+        println!("{}", screen(&mut app, 150, 36, SOON));
+        app.go_to(Page::Tools);
+        println!("{}", screen(&mut app, 150, 24, SOON));
+        app.go_to(Page::Subagents);
+        println!("{}", screen(&mut app, 150, 30, SOON));
+        app.go_to(Page::Sessions);
+        app.enter();
+        println!("{}", screen(&mut app, 100, 24, SOON));
     }
 
     #[test]
     fn no_unmodelled_text_reaches_the_screen() {
         let mut app = fixture_app();
-        for pane in [Pane::Sessions, Pane::Tools, Pane::Subagents] {
-            for id in [INDEXED, WITH_SUBAGENTS] {
-                select(&mut app, id);
-                app.focus(pane);
+        for page in Page::ALL {
+            app.go_to(page);
+            for _ in 0..6 {
                 let screen = screen(&mut app, 160, 50, LATER);
                 assert!(!screen.contains("SYNTHETIC-TEXT"), "{screen}");
+                app.move_by(1);
             }
         }
-        app.page = Page::Usage;
-        assert!(!screen(&mut app, 160, 50, LATER).contains("SYNTHETIC-TEXT"));
     }
 }

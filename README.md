@@ -71,24 +71,30 @@ iktinos                       # the sessions on this machine
 iktinos --projects-dir tests/fixtures/2.1.325/projects --no-live
 ```
 
-Two pages, in the shape and with the keys of [vig](https://github.com/td72/vig):
+Four pages, in the shape and with the keys of [vig](https://github.com/td72/vig).
+Each list page is a list over a detail pane, in fixed proportions:
 
-- **1:Sessions** — three lists over a detail pane, in fixed proportions. The
-  sessions (title, repository, state, last update, cost); the selected
-  session's recent tool calls (what ran, how long it took, how it ended); its
-  subagents. The detail pane describes the selected row of the focused list:
-  a session's context, tokens and cost by model and by source and its rate
-  limits, a tool call, or a subagent with its own tool calls.
-- **2:Usage** — tokens and estimated cost by model and by source over every
+- **1:Sessions** — every session: title, repository, branch, state, last
+  update, tokens, cost. The detail pane shows the selected session's context,
+  its tokens and cost by model and by source, and its rate limits.
+- **2:Tool calls** — recent tool calls, the latest first: what ran, how long
+  it took, how it ended.
+- **3:Subagents** — subagents with their type, task, model, tokens and cost;
+  the detail pane lists a subagent's own tool calls.
+- **4:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
+
+Pages 2 and 3 cover every session until `Enter` is pressed on one in the
+Sessions page; then they are narrowed to it, until `Esc`.
 
 | key | |
 | --- | --- |
-| `1` / `2` | switch page |
-| `Tab` / `Shift+Tab`, `h` / `l` | move between panes |
-| `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the focused pane |
-| `i` / `Enter`, then `h` / `Esc` | into the detail pane and back |
-| `/`, `n` / `N` | search the focused list |
+| `1` – `4` | switch page |
+| `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the list (or scroll the detail pane) |
+| `Enter` on a session | narrow pages 2 and 3 to it and show its tool calls |
+| `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back |
+| `/`, `n` / `N` | search the list |
+| `Esc` on a list | clear the search, then the narrowing |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
 | `r`, `?`, `q` | refresh, help, quit |
 

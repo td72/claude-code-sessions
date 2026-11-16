@@ -59,24 +59,26 @@ pub enum StatusKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Sessions,
+    Tools,
+    Subagents,
     Usage,
 }
 
-/// The panes of the Sessions page, in `Tab` order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pane {
-    Sessions,
-    Tools,
-    Subagents,
-    Detail,
-}
+impl Page {
+    pub const ALL: [Page; 4] = [Page::Sessions, Page::Tools, Page::Subagents, Page::Usage];
 
-impl Pane {
-    const ORDER: [Pane; 4] = [Pane::Sessions, Pane::Tools, Pane::Subagents, Pane::Detail];
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Sessions => "Sessions",
+            Page::Tools => "Tool calls",
+            Page::Subagents => "Subagents",
+            Page::Usage => "Usage",
+        }
+    }
 
-    fn step(self, by: isize) -> Pane {
-        let at = Self::ORDER.iter().position(|p| *p == self).unwrap_or(0) as isize;
-        Self::ORDER[(at + by).rem_euclid(Self::ORDER.len() as isize) as usize]
+    /// Whether the page is a list over a detail pane.
+    pub fn has_list(self) -> bool {
+        self != Page::Usage
     }
 }
 
@@ -129,10 +131,10 @@ impl Filter {
     }
 }
 
-/// A search within one pane.
+/// A search within one page's list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Search {
-    pub pane: Pane,
+    pub page: Page,
     /// Lower-cased: matching ignores case.
     pub query: String,
 }
@@ -140,7 +142,7 @@ pub struct Search {
 /// What the last draw measured, for keys that move by what is visible.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Viewport {
-    /// Rows a list pane shows.
+    /// Rows the list pane shows.
     pub list_rows: usize,
     /// Rows the detail pane shows.
     pub detail_rows: usize,
@@ -154,13 +156,14 @@ pub struct App {
     /// A tail per transcript, with the session it belongs to.
     tails: BTreeMap<PathBuf, (String, Tail)>,
     pub page: Page,
-    pub focus: Pane,
-    /// The list the detail pane describes, and that `Esc` returns to.
-    pub detail_of: Pane,
+    /// The detail pane has the focus, not the list above it.
+    pub in_detail: bool,
     pub sort: Sort,
     pub filter: Filter,
-    /// The ids of the sessions shown, in display order.
+    /// The ids of the sessions the Sessions page lists, in display order.
     pub order: Vec<String>,
+    /// The session the Tool calls and Subagents pages are narrowed to.
+    pub scope: Option<String>,
     pub selected: usize,
     pub tool_selected: usize,
     pub subagent_selected: usize,
@@ -177,8 +180,11 @@ pub struct App {
     listener: Option<live::Listener>,
 }
 
-/// How many recent tool calls per session the viewer keeps to show.
+/// How many recent tool calls per session the viewer keeps.
 const RECENT_TOOLS: usize = 200;
+
+/// How many rows the Tool calls page lists at most.
+const TOOL_ROWS: usize = 500;
 
 impl App {
     pub fn new(config: Config) -> Self {
@@ -186,11 +192,11 @@ impl App {
             store: SessionStore::new().with_recent_tools(RECENT_TOOLS),
             tails: BTreeMap::new(),
             page: Page::Sessions,
-            focus: Pane::Sessions,
-            detail_of: Pane::Sessions,
+            in_detail: false,
             sort: Sort::Updated,
             filter: Filter::All,
             order: Vec::new(),
+            scope: None,
             selected: 0,
             tool_selected: 0,
             subagent_selected: 0,
@@ -312,111 +318,138 @@ impl App {
         });
         self.order = sessions.into_iter().map(|s| s.id.clone()).collect();
         let kept = selected.and_then(|id| self.order.iter().position(|other| *other == id));
-        if kept.is_none() {
+        if kept.is_none() && self.page == Page::Sessions {
             // Another session is under the cursor now.
-            self.tool_selected = 0;
-            self.subagent_selected = 0;
             self.detail_scroll = 0;
         }
-        self.selected = kept.unwrap_or(0).min(self.order.len().saturating_sub(1));
+        self.selected = kept.unwrap_or(0);
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|id| self.store.get(id).is_none())
+        {
+            self.scope = None;
+        }
         self.clamp();
     }
 
+    /// The session under the cursor of the Sessions page.
     pub fn selected_session(&self) -> Option<&Session> {
         self.order
             .get(self.selected)
             .and_then(|id| self.store.get(id))
     }
 
-    /// The selected session's recent tool calls, latest first.
-    pub fn tools(&self) -> Vec<&ToolCall> {
-        let mut calls: Vec<&ToolCall> = self
-            .selected_session()
-            .map(|s| s.recent_tools.iter().collect())
-            .unwrap_or_default();
-        // The store keeps them in the order they were read.
-        calls.sort_by_key(|call| std::cmp::Reverse(call.started_at));
+    /// The session the other pages are narrowed to.
+    pub fn scoped_session(&self) -> Option<&Session> {
+        self.scope.as_ref().and_then(|id| self.store.get(id))
+    }
+
+    /// The sessions the Tool calls and Subagents pages draw from.
+    fn in_scope(&self) -> Vec<&Session> {
+        match self.scoped_session() {
+            Some(session) => vec![session],
+            None => self.store.sessions().collect(),
+        }
+    }
+
+    /// Recent tool calls, the latest first, each with its session.
+    pub fn tools(&self) -> Vec<(&Session, &ToolCall)> {
+        let mut calls: Vec<(&Session, &ToolCall)> = self
+            .in_scope()
+            .into_iter()
+            .flat_map(|session| session.recent_tools.iter().map(move |call| (session, call)))
+            .collect();
+        calls.sort_by(|a, b| {
+            b.1.started_at
+                .cmp(&a.1.started_at)
+                .then_with(|| a.1.id.cmp(&b.1.id))
+        });
+        calls.truncate(TOOL_ROWS);
         calls
     }
 
-    /// The selected session's subagents, the latest active first.
-    pub fn subagents(&self) -> Vec<&Subagent> {
-        let mut subagents: Vec<&Subagent> = self
-            .selected_session()
-            .map(|s| s.subagents.values().collect())
-            .unwrap_or_default();
+    /// Subagents, the latest active first, each with its session.
+    pub fn subagents(&self) -> Vec<(&Session, &Subagent)> {
+        let mut subagents: Vec<(&Session, &Subagent)> = self
+            .in_scope()
+            .into_iter()
+            .flat_map(|session| {
+                session
+                    .subagents
+                    .values()
+                    .map(move |agent| (session, agent))
+            })
+            .collect();
         subagents.sort_by(|a, b| {
-            b.last_activity
-                .cmp(&a.last_activity)
-                .then_with(|| a.agent_id.cmp(&b.agent_id))
+            b.1.last_activity
+                .cmp(&a.1.last_activity)
+                .then_with(|| a.1.agent_id.cmp(&b.1.agent_id))
         });
         subagents
     }
 
-    pub fn selected_tool(&self) -> Option<&ToolCall> {
+    pub fn selected_tool(&self) -> Option<(&Session, &ToolCall)> {
         self.tools().get(self.tool_selected).copied()
     }
 
-    pub fn selected_subagent(&self) -> Option<&Subagent> {
+    pub fn selected_subagent(&self) -> Option<(&Session, &Subagent)> {
         self.subagents().get(self.subagent_selected).copied()
     }
 
-    /// How many rows the focused list holds.
-    fn len_of(&self, pane: Pane) -> usize {
-        match pane {
-            Pane::Sessions => self.order.len(),
-            Pane::Tools => self.tools().len(),
-            Pane::Subagents => self.subagents().len(),
-            Pane::Detail => self.viewport.detail_lines,
+    fn list_len(&self, page: Page) -> usize {
+        match page {
+            Page::Sessions => self.order.len(),
+            Page::Tools => self.tools().len(),
+            Page::Subagents => self.subagents().len(),
+            Page::Usage => 0,
         }
     }
 
-    fn cursor_mut(&mut self, pane: Pane) -> &mut usize {
-        match pane {
-            Pane::Sessions => &mut self.selected,
-            Pane::Tools => &mut self.tool_selected,
-            Pane::Subagents => &mut self.subagent_selected,
-            Pane::Detail => &mut self.detail_scroll,
+    fn cursor_mut(&mut self, page: Page) -> &mut usize {
+        match page {
+            Page::Sessions => &mut self.selected,
+            Page::Tools => &mut self.tool_selected,
+            Page::Subagents | Page::Usage => &mut self.subagent_selected,
         }
     }
 
     fn clamp(&mut self) {
-        for pane in [Pane::Sessions, Pane::Tools, Pane::Subagents] {
-            let last = self.len_of(pane).saturating_sub(1);
-            let cursor = self.cursor_mut(pane);
+        for page in [Page::Sessions, Page::Tools, Page::Subagents] {
+            let last = self.list_len(page).saturating_sub(1);
+            let cursor = self.cursor_mut(page);
             *cursor = (*cursor).min(last);
         }
     }
 
-    /// Moves the focused pane's cursor (or scrolls the detail pane) to `to`,
-    /// clamped to what the pane holds.
+    /// Moves the list's cursor, or scrolls the detail pane when it has the
+    /// focus, to `to`, clamped to what there is.
     fn move_to(&mut self, to: usize) {
-        let pane = self.focus;
-        let last = match pane {
-            Pane::Detail => self
-                .viewport
-                .detail_lines
-                .saturating_sub(self.viewport.detail_rows),
-            _ => self.len_of(pane).saturating_sub(1),
-        };
-        let to = to.min(last);
-        if *self.cursor_mut(pane) == to {
+        if !self.page.has_list() {
             return;
         }
-        *self.cursor_mut(pane) = to;
-        match pane {
-            Pane::Sessions => {
-                self.tool_selected = 0;
-                self.subagent_selected = 0;
-                self.detail_scroll = 0;
-            }
-            Pane::Tools | Pane::Subagents => self.detail_scroll = 0,
-            Pane::Detail => {}
+        if self.in_detail {
+            let last = self
+                .viewport
+                .detail_lines
+                .saturating_sub(self.viewport.detail_rows);
+            self.detail_scroll = to.min(last);
+            return;
+        }
+        let page = self.page;
+        let to = to.min(self.list_len(page).saturating_sub(1));
+        if *self.cursor_mut(page) != to {
+            *self.cursor_mut(page) = to;
+            self.detail_scroll = 0;
         }
     }
 
     pub fn move_by(&mut self, by: isize) {
-        let at = *self.cursor_mut(self.focus);
+        let at = if self.in_detail {
+            self.detail_scroll
+        } else {
+            *self.cursor_mut(self.page)
+        };
         self.move_to(at.saturating_add_signed(by));
     }
 
@@ -430,50 +463,90 @@ impl App {
 
     /// Half of what the focused pane shows, as `Ctrl+d` / `Ctrl+u` move.
     pub fn half_page(&self) -> isize {
-        let rows = match self.focus {
-            Pane::Detail => self.viewport.detail_rows,
-            _ => self.viewport.list_rows,
+        let rows = if self.in_detail {
+            self.viewport.detail_rows
+        } else {
+            self.viewport.list_rows
         };
         (rows / 2).max(1) as isize
     }
 
-    pub fn focus(&mut self, pane: Pane) {
-        if pane != Pane::Detail && pane != self.detail_of {
-            self.detail_of = pane;
+    pub fn go_to(&mut self, page: Page) {
+        if self.page != page {
+            self.page = page;
+            self.in_detail = false;
             self.detail_scroll = 0;
         }
-        self.focus = pane;
     }
 
-    /// `Tab` / `Shift+Tab`.
-    pub fn cycle_focus(&mut self, by: isize) {
-        self.focus(self.focus.step(by));
+    /// `Tab` / `Shift+Tab`: the page's two panes.
+    pub fn toggle_focus(&mut self) {
+        if self.page.has_list() {
+            self.in_detail = !self.in_detail;
+        }
     }
 
-    /// `h` / `l` among the upper panes; `h` leaves the detail pane.
-    pub fn focus_sideways(&mut self, by: isize) {
-        match self.focus {
-            Pane::Detail if by < 0 => self.focus(self.detail_of),
-            Pane::Detail => {}
-            pane => {
-                let upper = [Pane::Sessions, Pane::Tools, Pane::Subagents];
-                let at = upper.iter().position(|p| *p == pane).unwrap_or(0) as isize;
-                let to = (at + by).clamp(0, upper.len() as isize - 1) as usize;
-                self.focus(upper[to]);
+    /// `i`: into the detail pane.
+    pub fn focus_detail(&mut self) {
+        if self.page.has_list() {
+            self.in_detail = true;
+        }
+    }
+
+    /// `Enter`. On a session: narrow the Tool calls and Subagents pages to it
+    /// and show its tool calls. Elsewhere: into the detail pane.
+    pub fn enter(&mut self) {
+        if self.page != Page::Sessions || self.in_detail {
+            self.focus_detail();
+            return;
+        }
+        let Some(id) = self.order.get(self.selected).cloned() else {
+            return;
+        };
+        self.set_scope(Some(id));
+        self.go_to(Page::Tools);
+    }
+
+    fn set_scope(&mut self, scope: Option<String>) {
+        if self.scope != scope {
+            self.scope = scope;
+            self.tool_selected = 0;
+            self.subagent_selected = 0;
+            if self.page != Page::Sessions {
+                self.detail_scroll = 0;
+            }
+            // A search's matches were rows of the old lists.
+            if self
+                .search
+                .as_ref()
+                .is_some_and(|s| s.page != Page::Sessions)
+            {
+                self.search = None;
             }
         }
     }
 
-    /// `Esc`: out of the detail pane, else drop the search.
+    /// `h` / `Esc`: out of the detail pane. On a list `Esc` drops the search,
+    /// and with no search the narrowing to a session.
     pub fn back(&mut self) {
-        if self.focus == Pane::Detail {
-            self.focus(self.detail_of);
-        } else {
+        if self.in_detail {
+            self.in_detail = false;
+        } else if self.search.as_ref().is_some_and(|s| s.page == self.page) {
             self.search = None;
+        } else {
+            self.set_scope(None);
         }
     }
 
+    /// `h`: out of the detail pane only.
+    pub fn leave_detail(&mut self) {
+        self.in_detail = false;
+    }
+
     pub fn cycle_sort(&mut self) {
+        if self.page != Page::Sessions {
+            return;
+        }
         self.sort = match self.sort {
             Sort::Updated => Sort::Cost,
             Sort::Cost => Sort::Tokens,
@@ -483,6 +556,9 @@ impl App {
     }
 
     pub fn cycle_filter(&mut self) {
+        if self.page != Page::Sessions {
+            return;
+        }
         self.filter = match self.filter {
             Filter::All => Filter::Live,
             Filter::Live => Filter::Open,
@@ -491,10 +567,10 @@ impl App {
         self.arrange(now());
     }
 
-    /// The text a row of `pane` is searched by, lower-cased.
-    fn haystacks(&self, pane: Pane, now: Timestamp) -> Vec<String> {
-        let rows: Vec<String> = match pane {
-            Pane::Sessions => self
+    /// The text each row of `page` is searched by, lower-cased.
+    fn haystacks(&self, page: Page, now: Timestamp) -> Vec<String> {
+        let rows: Vec<String> = match page {
+            Page::Sessions => self
                 .order
                 .iter()
                 .filter_map(|id| self.store.get(id))
@@ -509,34 +585,42 @@ impl App {
                     )
                 })
                 .collect(),
-            Pane::Tools => self
+            Page::Tools => self
                 .tools()
                 .iter()
-                .map(|c| format!("{} {}", c.name, c.summary.as_deref().unwrap_or_default()))
-                .collect(),
-            Pane::Subagents => self
-                .subagents()
-                .iter()
-                .map(|a| {
+                .map(|(s, c)| {
                     format!(
                         "{} {} {}",
-                        a.agent_type.as_deref().unwrap_or_default(),
-                        a.description.as_deref().unwrap_or_default(),
-                        a.agent_id
+                        c.name,
+                        c.summary.as_deref().unwrap_or_default(),
+                        label(s)
                     )
                 })
                 .collect(),
-            Pane::Detail => Vec::new(),
+            Page::Subagents => self
+                .subagents()
+                .iter()
+                .map(|(s, a)| {
+                    format!(
+                        "{} {} {} {}",
+                        a.agent_type.as_deref().unwrap_or_default(),
+                        a.description.as_deref().unwrap_or_default(),
+                        a.agent_id,
+                        label(s)
+                    )
+                })
+                .collect(),
+            Page::Usage => Vec::new(),
         };
         rows.into_iter().map(|row| row.to_lowercase()).collect()
     }
 
-    /// The rows of `pane` the search in force matches.
-    pub fn matches(&self, pane: Pane, now: Timestamp) -> Vec<usize> {
-        let Some(search) = self.search.as_ref().filter(|s| s.pane == pane) else {
+    /// The rows of `page` the search in force matches.
+    pub fn matches(&self, page: Page, now: Timestamp) -> Vec<usize> {
+        let Some(search) = self.search.as_ref().filter(|s| s.page == page) else {
             return Vec::new();
         };
-        self.haystacks(pane, now)
+        self.haystacks(page, now)
             .iter()
             .enumerate()
             .filter(|(_, row)| row.contains(&search.query))
@@ -544,9 +628,9 @@ impl App {
             .collect()
     }
 
-    /// Starts typing a search in the focused list.
+    /// Starts typing a search in the page's list.
     pub fn start_search(&mut self) {
-        if self.focus != Pane::Detail {
+        if self.page.has_list() && !self.in_detail {
             self.typing = Some(String::new());
         }
     }
@@ -562,13 +646,10 @@ impl App {
             self.search = None;
             return;
         }
-        self.search = Some(Search {
-            pane: self.focus,
-            query,
-        });
-        let now = now();
-        let at = *self.cursor_mut(self.focus);
-        let matches = self.matches(self.focus, now);
+        let page = self.page;
+        self.search = Some(Search { page, query });
+        let at = *self.cursor_mut(page);
+        let matches = self.matches(page, now());
         if let Some(to) = matches.iter().find(|m| **m >= at).or(matches.first()) {
             self.move_to(*to);
         }
@@ -576,14 +657,12 @@ impl App {
 
     /// `n` / `N`: the next or the previous match, wrapping around.
     pub fn next_match(&mut self, by: isize) {
-        let Some(pane) = self.search.as_ref().map(|s| s.pane) else {
-            return;
-        };
-        if pane != self.focus {
+        if self.in_detail {
             return;
         }
-        let matches = self.matches(pane, now());
-        let at = *self.cursor_mut(pane);
+        let page = self.page;
+        let matches = self.matches(page, now());
+        let at = *self.cursor_mut(page);
         let to = if by > 0 {
             matches.iter().find(|m| **m > at).or(matches.first())
         } else {
@@ -783,41 +862,75 @@ pub mod tests {
     }
 
     #[test]
-    fn the_lower_lists_belong_to_the_selected_session() {
+    fn the_other_pages_list_every_session_until_one_is_entered() {
         let mut app = fixture_app();
-        // The first session (the damaged transcript) has neither.
+        // Unscoped: everything, the latest first.
+        assert_eq!(app.scope, None);
+        assert_eq!(app.tools().len(), 5);
+        assert_eq!(app.subagents().len(), 2);
+        let (session, call) = app.tools()[4];
+        assert_eq!(
+            (session.id.as_str(), call.name.as_str()),
+            (WITH_SUBAGENTS, "Bash")
+        );
+
+        // Enter on a session narrows the other pages to it and shows its
+        // tool calls.
+        app.enter(); // the damaged transcript: no tool calls at all
+        assert_eq!(app.page, Page::Tools);
+        assert_eq!(app.scope.as_deref(), Some(UNINDEXED));
         assert!(app.tools().is_empty());
         assert!(app.subagents().is_empty());
         assert!(app.selected_tool().is_none());
 
+        app.go_to(Page::Sessions);
         app.move_by(1);
-        let names: Vec<_> = app.tools().iter().map(|c| c.name.as_str()).collect();
-        // The latest first; the main thread's and the subagents' together.
-        assert_eq!(names.len(), 5);
-        assert_eq!(names[4], "Bash");
-        assert_eq!(names[3], "Read");
-        let agents: Vec<_> = app
-            .subagents()
-            .iter()
-            .map(|a| a.agent_id.as_str())
-            .collect();
-        assert_eq!(agents, ["a1b2c3d4e5f60718", "b2c3d4e5f6071829"]);
-
-        // Each list has its own cursor, and moving on to another session
-        // starts them again.
-        app.focus(Pane::Tools);
+        app.enter();
+        assert_eq!(app.scope.as_deref(), Some(WITH_SUBAGENTS));
+        assert_eq!(app.tools().len(), 5);
         app.move_by(3);
-        assert_eq!(app.selected_tool().unwrap().name, "Read");
-        app.focus(Pane::Subagents);
+        assert_eq!(app.selected_tool().unwrap().1.name, "Read");
+        app.go_to(Page::Subagents);
         app.move_by(1);
         assert_eq!(
-            app.selected_subagent().unwrap().agent_id,
+            app.selected_subagent().unwrap().1.agent_id,
             "b2c3d4e5f6071829"
         );
-        app.focus(Pane::Sessions);
-        assert_eq!(app.tool_selected, 3, "changing pane keeps the cursors");
-        app.move_by(1);
+        app.go_to(Page::Tools);
+        assert_eq!(app.tool_selected, 3, "each page keeps its cursor");
+
+        // Esc on a list drops the narrowing, and the cursors start again.
+        app.back();
+        assert_eq!(app.scope, None);
         assert_eq!((app.tool_selected, app.subagent_selected), (0, 0));
+        assert_eq!(app.page, Page::Tools);
+    }
+
+    #[test]
+    fn enter_elsewhere_and_i_go_into_the_detail_pane() {
+        let mut app = fixture_app();
+        app.focus_detail();
+        assert!(app.in_detail);
+        // Enter in the detail pane does not narrow anything.
+        app.enter();
+        assert_eq!((app.page, app.scope.clone()), (Page::Sessions, None));
+        app.back();
+        assert!(!app.in_detail);
+
+        app.go_to(Page::Tools);
+        app.enter();
+        assert!(app.in_detail);
+        app.leave_detail();
+        app.toggle_focus();
+        assert!(app.in_detail);
+        // Changing page starts on its list.
+        app.go_to(Page::Subagents);
+        assert!(!app.in_detail);
+        // The Usage page has no panes to move between.
+        app.go_to(Page::Usage);
+        app.toggle_focus();
+        app.focus_detail();
+        assert!(!app.in_detail);
     }
 
     #[test]
