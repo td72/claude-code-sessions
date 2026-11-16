@@ -42,7 +42,4 @@ pub mod session {
     //! cost, recent activity) are folded once from the transcript offsets.
 }
 
-pub mod pricing {
-    //! Price per token and context window per model, embedded as a snapshot.
-    //! An unknown model prices as `None`, never as zero.
-}
+pub mod pricing;
