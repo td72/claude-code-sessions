@@ -21,20 +21,10 @@ dependencies = [
 [[package]]
 name = "claude-code-sessions-live"
 version = "0.1.0"
-dependencies = [
- "claude-code-sessions",
- "serde",
- "serde_json",
- "thiserror",
-]
 
 [[package]]
 name = "claude-code-sessions-tui"
 version = "0.1.0"
-dependencies = [
- "claude-code-sessions",
- "claude-code-sessions-live",
-]
 
 [[package]]
 name = "inotify"

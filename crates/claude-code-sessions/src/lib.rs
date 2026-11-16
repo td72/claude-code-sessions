@@ -29,12 +29,7 @@
 
 pub mod record;
 
-pub mod discover {
-    //! Sessions and subagents under a projects directory, and the resolution
-    //! of a session's working directory (`sessions-index.json` first, the
-    //! first record's `cwd` otherwise — the directory name flattens `/` and
-    //! `.` to `-` and cannot be decoded).
-}
+pub mod discover;
 
 pub mod tail;
 

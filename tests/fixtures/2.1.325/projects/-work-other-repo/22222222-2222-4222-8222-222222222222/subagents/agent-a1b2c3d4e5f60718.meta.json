@@ -1,0 +1,11 @@
+{
+  "agentType": "Explore",
+  "isBuiltIn": true,
+  "launchedWithDefaults": true,
+  "description": "Synthetic agent task",
+  "toolUseId": "toolu_02",
+  "spawnDepth": 1,
+  "requestShape": "shape-0002",
+  "requestNonInteractive": false,
+  "finished": true
+}

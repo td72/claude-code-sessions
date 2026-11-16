@@ -1,0 +1,1 @@
+SYNTHETIC-TEXT tool output kept on disk
