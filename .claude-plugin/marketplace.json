@@ -1,0 +1,12 @@
+{
+  "name": "iktinos",
+  "description": "Mods for iktinos: live session events for vig and the standalone viewer",
+  "owner": { "name": "td72" },
+  "plugins": [
+    {
+      "name": "iktinos-bridge",
+      "source": "./mods/iktinos-bridge",
+      "description": "Sends live session events to local iktinos consumers (vig, the standalone viewer) over Unix sockets"
+    }
+  ]
+}

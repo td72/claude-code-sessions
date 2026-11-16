@@ -9,13 +9,13 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 authors = ["td72"]
-repository = "https://github.com/td72/claude-code-sessions"
+repository = "https://github.com/td72/iktinos"
 keywords = ["claude-code", "claude", "agents", "sessions", "transcript"]
 categories = ["development-tools", "parser-implementations"]
 
 [workspace.dependencies]
-claude-code-sessions = { path = "crates/claude-code-sessions", version = "0.1.1" }
-claude-code-sessions-live = { path = "crates/claude-code-sessions-live", version = "0.1.0" }
+iktinos = { path = "crates/iktinos", version = "0.1.0" }
+iktinos-live = { path = "crates/iktinos-live", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

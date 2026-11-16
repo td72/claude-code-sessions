@@ -2,12 +2,12 @@
 
 ## Concept
 
-`claude-code-sessions` turns the Claude Code transcripts on this machine
+`iktinos` turns the Claude Code transcripts on this machine
 (`~/.claude/projects/*/<session id>.jsonl`, subagents under
 `<session id>/subagents/`) and, optionally, live events from the
-`claude-code-sessions-bridge` mod into a model of every session: `Session` /
+`iktinos-bridge` mod into a model of every session: `Session` /
 `SessionStore`. It is a library first; [vig](https://github.com/td72/vig)
-renders it as a page (vig issue #222), and `claude-code-sessions-tui` is a
+renders it as a page (vig issue #222), and `iktinos-tui` is a
 small standalone viewer.
 
 Hard rules:
@@ -35,10 +35,10 @@ Hard rules:
 ## Layout
 
 ```
-crates/claude-code-sessions/        core: record, discover, tail, session, pricing
-crates/claude-code-sessions-live/   event protocol, Unix-socket server, merge (unix only)
-crates/claude-code-sessions-tui/    the `claude-code-sessions` binary
-mods/claude-code-sessions-bridge/   the Claude Code mod (JS) that speaks the protocol
+crates/iktinos/        core: record, discover, tail, session, pricing
+crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
+crates/iktinos-tui/    the `iktinos` binary
+mods/iktinos-bridge/               the Claude Code mod (TS) that speaks the protocol
 tests/fixtures/<claude code version>/   synthetic transcripts and event samples
 ```
 
@@ -66,7 +66,7 @@ git checkout -b feat/<name>      # or fix/<name>, chore/<name>
 ## Release
 
 One crate per release pull request, from a branch named
-`release/<crate>-<version>` (for example `release/claude-code-sessions-0.1.1`)
+`release/<crate>-<version>` (for example `release/iktinos-0.1.1`)
 that sets the crate's `version`. Merging it runs `release.yml`: publish to
 crates.io through Trusted Publishing, then the tag and GitHub release
 `<crate>-v<version>`. Several crates: core → live → tui, each in its own pull
@@ -74,7 +74,7 @@ request, each merged after the previous one is on crates.io.
 
 A crate's first version cannot use Trusted Publishing (the crate must exist to
 be configured): publish it by hand, then add the trusted publisher on
-crates.io (repository `td72/claude-code-sessions`, workflow `release.yml`,
+crates.io (repository `td72/iktinos`, workflow `release.yml`,
 environment `release`).
 
 ## Conventions

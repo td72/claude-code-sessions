@@ -1,7 +1,7 @@
 # Publishes one crate when its release pull request is merged.
 #
 # A release pull request comes from a branch named
-#   release/<crate>-<version>      e.g. release/claude-code-sessions-live-0.1.0
+#   release/<crate>-<version>      e.g. release/iktinos-live-0.1.0
 # and sets that crate's `version` in its Cargo.toml. Merging it publishes the
 # crate to crates.io (Trusted Publishing, no stored token) and then creates
 # the tag and GitHub release `<crate>-v<version>`.
@@ -53,7 +53,7 @@ jobs:
         run: |
           name="${BRANCH#release/}"
           # The longest crate name that prefixes the branch name wins, so
-          # `claude-code-sessions-live-0.1.0` is not read as the core crate.
+          # `iktinos-live-0.1.0` is not read as the core crate.
           crate="$(cargo metadata --no-deps --format-version 1 \
             | jq -r --arg name "$name" '
                 [.packages[].name | select(. as $c | $name | startswith($c + "-"))]

@@ -1,6 +1,6 @@
 # Event samples
 
-One file per event of the live protocol (`claude-code-sessions-live`, `event`
+One file per event of the live protocol (`iktinos-live`, `event`
 module), version 1. They are the contract between the bridge mod and the
 crate: the crate's tests parse and re-serialize every file, and the mod's
 tests check that what it sends has these shapes.
