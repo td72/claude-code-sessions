@@ -26,7 +26,4 @@ pub mod event;
 #[cfg(unix)]
 pub mod server;
 
-pub mod merge {
-    //! Apply an [`event::Event`] to a `Session`: freshness fields only,
-    //! last-write-wins by timestamp.
-}
+pub mod merge;
