@@ -10,6 +10,8 @@ authors.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# The integration tests read the workspace fixtures, which are not packaged.
+exclude = ["tests/"]
 
 [dependencies]
 iktinos.workspace = true
