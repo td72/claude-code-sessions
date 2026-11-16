@@ -9,13 +9,13 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           components: clippy, rustfmt
 
-      - uses: j178/prek-action@v1
+      - uses: j178/prek-action@v3.1.0
 
   test:
     strategy:
@@ -27,9 +27,9 @@ jobs:
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           target: ${{ matrix.target }}
 
