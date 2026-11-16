@@ -148,6 +148,21 @@ const API_REQUEST_KEYS: &[&str] = &[
     "version",
 ];
 
+const COST_STATE_KEYS: &[&str] = &[
+    "hasUnknownModelCost",
+    "modelUsage",
+    "sessionId",
+    "startTime",
+    "totalAPIDuration",
+    "totalAPIDurationWithoutRetries",
+    "totalCostUSD",
+    "totalDuration",
+    "totalLinesAdded",
+    "totalLinesRemoved",
+    "totalToolDuration",
+    "type",
+];
+
 const USER_MESSAGE_KEYS: &[&str] = &["content", "role"];
 
 const ASSISTANT_MESSAGE_KEYS: &[&str] = &[
@@ -303,6 +318,7 @@ impl Drift {
             View::Title(_) => self.keys(kind, obj, &[TITLE_KEYS]),
             View::LastPrompt(_) => self.keys(kind, obj, &[LAST_PROMPT_KEYS]),
             View::ApiRequest(_) => self.keys(kind, obj, &[API_REQUEST_KEYS]),
+            View::CostState(_) => self.keys(kind, obj, &[COST_STATE_KEYS]),
             View::Other => {
                 if kind == "attachment" {
                     let attachment = obj

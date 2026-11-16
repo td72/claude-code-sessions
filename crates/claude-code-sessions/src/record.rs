@@ -34,7 +34,6 @@ pub const UNMODELLED_TYPES: &[&str] = &[
     "atis-latch",
     "attachment",
     "bridge-session",
-    "cost-state",
     "file-history-delta",
     "file-history-snapshot",
     "mode",
@@ -168,7 +167,7 @@ impl Common {
 }
 
 /// What a record is, as far as the session model cares.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum View {
     User(User),
@@ -181,6 +180,8 @@ pub enum View {
     /// `api-request`: the bookkeeping record an assistant message's
     /// `requestRef` points at.
     ApiRequest(ApiRequest),
+    /// `cost-state`: Claude Code's own running total, written when it exits.
+    CostState(CostState),
     /// A known type this crate does not model ([`UNMODELLED_TYPES`]).
     Other,
     /// A JSON object whose `type` is missing or has never been seen. Kept for
@@ -215,6 +216,9 @@ impl View {
             Some("api-request") => Self::ApiRequest(ApiRequest {
                 id: string(obj, "id"),
                 query_source: string(obj, "querySource"),
+            }),
+            Some("cost-state") => Self::CostState(CostState {
+                total_cost_usd: obj.get("totalCostUSD").and_then(Value::as_f64),
             }),
             Some(k) if UNMODELLED_TYPES.contains(&k) => Self::Other,
             _ => Self::Unknown,
@@ -339,6 +343,9 @@ pub struct Usage {
     pub cache_creation_5m_input_tokens: Option<u64>,
     /// The share with a 1 hour lifetime (priced higher), when present.
     pub cache_creation_1h_input_tokens: Option<u64>,
+    /// The response ran in fast mode (`speed: "fast"`), which is priced
+    /// higher.
+    pub fast: bool,
 }
 
 impl Usage {
@@ -354,6 +361,7 @@ impl Usage {
             cache_read_input_tokens: count("cache_read_input_tokens").unwrap_or(0),
             cache_creation_5m_input_tokens: split("ephemeral_5m_input_tokens"),
             cache_creation_1h_input_tokens: split("ephemeral_1h_input_tokens"),
+            fast: obj.get("speed").and_then(Value::as_str) == Some("fast"),
         })
     }
 
@@ -427,6 +435,15 @@ pub struct LastPrompt {
     pub text: Option<String>,
     /// The record the conversation ended on when this was written.
     pub leaf_uuid: Option<String>,
+}
+
+/// A `cost-state` record. Claude Code writes one when it exits; the total is
+/// cumulative over the whole session, resumes included, and covers subagents
+/// and requests the transcript does not record. A process that is killed
+/// writes none, so the total can lag far behind what the transcript shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostState {
+    pub total_cost_usd: Option<f64>,
 }
 
 /// An `api-request` record: one call to the API.
