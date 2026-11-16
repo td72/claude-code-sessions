@@ -9,9 +9,9 @@ machine: where it runs, what it is doing, what it has used, which tools and
 subagents it has called. It is a library first; [vig](https://github.com/td72/vig)
 renders it as a page, and a small standalone viewer ships here.
 
-> Status: the transcript layer (`claude-code-sessions` 0.1) is implemented:
-> records, discovery, tailing, the session model and pricing. The live layer,
-> the mod and the viewer are still to come.
+> Status: the transcript layer (`claude-code-sessions`) is published. The live
+> layer and the viewer are implemented here and not published yet; the mod is
+> still to come.
 
 ## Using the crate
 
@@ -59,6 +59,21 @@ for session in store.sessions() {
 | [`claude-code-sessions-live`](crates/claude-code-sessions-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`claude-code-sessions-tui`](crates/claude-code-sessions-tui) | the `claude-code-sessions` binary: a small terminal viewer |
 | [`mods/claude-code-sessions-bridge`](mods/claude-code-sessions-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
+
+## The viewer
+
+```bash
+cargo run -p claude-code-sessions-tui            # the sessions on this machine
+cargo run -p claude-code-sessions-tui -- --projects-dir tests/fixtures/2.1.325/projects --no-live
+```
+
+A session list (title, repository, branch, state, last update, cost) and a
+detail pane for the selected session: tokens and cost by model, the context
+gauge, recent tool calls, subagents, rate limits. It reads the transcripts
+once a second and, unless `--no-live` is given, listens for live events on its
+own socket. A cost shown as `~$1.23` contains an estimate; `$1.23` is Claude
+Code's own figure. It is a small development tool; vig renders the same model
+as a full page.
 
 ## Two inputs, one state
 
