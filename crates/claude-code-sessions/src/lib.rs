@@ -36,10 +36,7 @@ pub mod discover {
     //! `.` to `-` and cannot be decoded).
 }
 
-pub mod tail {
-    //! Offset-based line reading. The initial load reads only what the fold
-    //! needs from the end of a file; afterwards only appended bytes are read.
-}
+pub mod tail;
 
 pub mod session {
     //! `Session` and `SessionStore`: the fold of records into state. Snapshot
