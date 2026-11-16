@@ -568,9 +568,12 @@ pub struct RateLimit {
 
 /// One tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
+    /// One line of the call's input: the command, the file path.
+    pub summary: Option<String>,
     /// The subagent that made the call, if one did.
     pub agent_id: Option<String>,
     pub started_at: Option<Timestamp>,
@@ -778,6 +781,7 @@ impl Entry {
                     session.recent_tools.push_back(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
+                        summary: call.summary.clone(),
                         agent_id: agent.map(str::to_owned),
                         started_at: at,
                         duration_ms: None,

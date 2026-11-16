@@ -169,21 +169,27 @@ fn tool_calls_and_their_results() {
         ]
     );
 
-    let calls: Vec<(&str, &str)> = records
+    let calls: Vec<(&str, &str, &str)> = records
         .iter()
         .filter_map(|r| match r.view() {
             View::Assistant(a) => Some(a),
             _ => None,
         })
         .flat_map(|a| &a.tool_uses)
-        .map(|t| (t.id.as_deref().unwrap(), t.name.as_deref().unwrap()))
+        .map(|t| {
+            (
+                t.id.as_deref().unwrap(),
+                t.name.as_deref().unwrap(),
+                t.summary.as_deref().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         calls,
         [
-            ("toolu_01", "Bash"),
-            ("toolu_02", "Read"),
-            ("toolu_03", "mcp__example__lookup"),
+            ("toolu_01", "Bash", "cargo test --workspace"),
+            ("toolu_02", "Read", "/work/example/README.md"),
+            ("toolu_03", "mcp__example__lookup", "synthetic lookup"),
         ]
     );
 

@@ -283,17 +283,20 @@ fn detail_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'st
                 None => ("…", dim()),
             };
             let took = call.duration_ms.map(format::duration).unwrap_or_default();
-            let who = if call.agent_id.is_some() {
-                " (subagent)"
-            } else {
-                ""
-            };
+            // A subagent's call is marked; the name column is the same width.
+            let name = format!(
+                "{}{}",
+                if call.agent_id.is_some() { "↳ " } else { "" },
+                format::tool_name(&call.name)
+            );
+            // Name, then what the call was about in whatever room is left,
+            // then how long it took and how it ended.
+            let room = width.saturating_sub(2 + 17 + 1 + 7 + 2 + 6);
+            let summary = call.summary.as_deref().unwrap_or_default();
             lines.push(Line::from(vec![
-                Span::raw(format!(
-                    "  {:<28}",
-                    format::truncate(&format!("{}{who}", call.name), 28)
-                )),
-                Span::raw(format!("{took:>8}  ")),
+                Span::raw(format!("  {:<17}", format::truncate(&name, 16))),
+                Span::styled(format!("{:<room$}", format::truncate(summary, room)), dim()),
+                Span::raw(format!(" {took:>7}  ")),
                 Span::styled(mark, style),
             ]));
         }
@@ -445,10 +448,20 @@ mod tests {
         app.select_next(); // the session with subagents
         let screen = screen(&app, 150, 45, "2026-11-02T10:00:20.000Z");
         assert!(screen.contains("recent tool calls"), "{screen}");
-        assert!(screen.contains("Bash"));
-        assert!(screen.contains("1.5s"));
-        assert!(screen.contains("failed"));
-        assert!(screen.contains("Grep (subagent)"));
+        // What each call was about, how long it took and how it ended.
+        let row = |tool: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains(tool))
+                .unwrap_or_else(|| panic!("no row for {tool}\n{screen}"))
+        };
+        assert!(row("  Bash").contains("cargo test --workspace"));
+        assert!(row("  Bash").contains("1.5s"));
+        assert!(row("  Bash").contains("ok"));
+        assert!(row("  Read").contains("/work/example/README.md"));
+        assert!(row("  Read").contains("failed"));
+        assert!(row("example/lookup").contains("synthetic lookup"));
+        assert!(row("↳ Grep").contains("synthetic pattern"));
         assert!(screen.contains("subagents"));
         assert!(screen.contains("Explore"));
         assert!(screen.contains("Synthetic agent task"));

@@ -131,6 +131,20 @@ fn tool_calls_carry_name_duration_and_outcome() {
         ]
     );
     assert!(session.recent_tools.iter().all(|c| c.agent_id.is_none()));
+    // What each call was about: one line of its input.
+    let summaries: Vec<_> = session
+        .recent_tools
+        .iter()
+        .map(|c| c.summary.as_deref())
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            Some("cargo test --workspace"),
+            Some("/work/example/README.md"),
+            Some("synthetic lookup"),
+        ]
+    );
     assert_eq!(session.usage.total().responses, 3);
     assert!(close(session.cost.usd.unwrap(), TOOL_CALLS));
     assert_eq!(session.context.unwrap().tokens, 6716);
