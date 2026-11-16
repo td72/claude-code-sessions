@@ -10,8 +10,7 @@ subagents it has called. It is a library first; [vig](https://github.com/td72/vi
 renders it as a page, and a small standalone viewer ships here.
 
 > Status: the transcript layer (`claude-code-sessions`) is published. The live
-> layer and the viewer are implemented here and not published yet; the mod is
-> still to come.
+> layer, the viewer and the mod are implemented here and not published yet.
 
 ## Using the crate
 
@@ -58,7 +57,7 @@ for session in store.sessions() {
 | [`claude-code-sessions`](crates/claude-code-sessions) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `pricing` (embedded price table) |
 | [`claude-code-sessions-live`](crates/claude-code-sessions-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`claude-code-sessions-tui`](crates/claude-code-sessions-tui) | the `claude-code-sessions` binary: a small terminal viewer |
-| [`mods/claude-code-sessions-bridge`](mods/claude-code-sessions-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
+| [`mods/sessions-bridge`](mods/sessions-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
 
 ## The viewer
 

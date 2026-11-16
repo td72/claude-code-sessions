@@ -5,7 +5,7 @@
 `claude-code-sessions` turns the Claude Code transcripts on this machine
 (`~/.claude/projects/*/<session id>.jsonl`, subagents under
 `<session id>/subagents/`) and, optionally, live events from the
-`claude-code-sessions-bridge` mod into a model of every session: `Session` /
+`sessions-bridge` mod into a model of every session: `Session` /
 `SessionStore`. It is a library first; [vig](https://github.com/td72/vig)
 renders it as a page (vig issue #222), and `claude-code-sessions-tui` is a
 small standalone viewer.
@@ -38,7 +38,7 @@ Hard rules:
 crates/claude-code-sessions/        core: record, discover, tail, session, pricing
 crates/claude-code-sessions-live/   event protocol, Unix-socket server, merge (unix only)
 crates/claude-code-sessions-tui/    the `claude-code-sessions` binary
-mods/claude-code-sessions-bridge/   the Claude Code mod (JS) that speaks the protocol
+mods/sessions-bridge/               the Claude Code mod (TS) that speaks the protocol
 tests/fixtures/<claude code version>/   synthetic transcripts and event samples
 ```
 

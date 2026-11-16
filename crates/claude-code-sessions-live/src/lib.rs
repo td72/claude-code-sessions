@@ -2,7 +2,7 @@
 //!
 //! The transcripts lack, or report late, what a session is doing right now:
 //! the tool running, waiting for input, context fill, rate limits. The
-//! `claude-code-sessions-bridge` Claude Code mod (in this repository under
+//! `sessions-bridge` Claude Code mod (in this repository under
 //! `mods/`) POSTs those as [`event::Event`]s to every Unix socket under the
 //! shared socket directory, so several consumers (vig, the standalone viewer)
 //! receive them at once.
