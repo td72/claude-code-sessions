@@ -66,17 +66,35 @@ for session in store.sessions() {
 ## The viewer
 
 ```bash
-cargo run -p iktinos-tui            # the sessions on this machine
-cargo run -p iktinos-tui -- --projects-dir tests/fixtures/2.1.325/projects --no-live
+cargo install iktinos-tui     # installs the `iktinos` binary
+iktinos                       # the sessions on this machine
+iktinos --projects-dir tests/fixtures/2.1.325/projects --no-live
 ```
 
-A session list (title, repository, branch, state, last update, cost) and a
-detail pane for the selected session: tokens and cost by model, the context
-gauge, recent tool calls, subagents, rate limits. It reads the transcripts
-once a second and, unless `--no-live` is given, listens for live events on its
-own socket. A cost shown as `~$1.23` contains an estimate; `$1.23` is Claude
-Code's own figure. It is a small development tool; vig renders the same model
-as a full page.
+Two pages, in the shape and with the keys of [vig](https://github.com/td72/vig):
+
+- **1:Sessions** — three lists over a detail pane, in fixed proportions. The
+  sessions (title, repository, state, last update, cost); the selected
+  session's recent tool calls (what ran, how long it took, how it ended); its
+  subagents. The detail pane describes the selected row of the focused list:
+  a session's context, tokens and cost by model and by source and its rate
+  limits, a tool call, or a subagent with its own tool calls.
+- **2:Usage** — tokens and estimated cost by model and by source over every
+  session, and sessions, tokens and cost by repository.
+
+| key | |
+| --- | --- |
+| `1` / `2` | switch page |
+| `Tab` / `Shift+Tab`, `h` / `l` | move between panes |
+| `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the focused pane |
+| `i` / `Enter`, then `h` / `Esc` | into the detail pane and back |
+| `/`, `n` / `N` | search the focused list |
+| `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
+| `r`, `?`, `q` | refresh, help, quit |
+
+It reads the transcripts once a second and, unless `--no-live` is given,
+listens for live events on its own socket. A cost shown as `~$1.23` contains
+an estimate; `$1.23` is Claude Code's own figure.
 
 ## Two inputs, one state
 
