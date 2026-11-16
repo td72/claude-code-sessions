@@ -14,8 +14,15 @@ categories = ["command-line-utilities", "development-tools"]
 [[bin]]
 name = "claude-code-sessions"
 path = "src/main.rs"
+# The core library's documentation already lives at `claude_code_sessions`.
+doc = false
 
 [dependencies]
+claude-code-sessions.workspace = true
+ratatui = "0.30"
+
+[target.'cfg(unix)'.dependencies]
+claude-code-sessions-live.workspace = true
 
 [lints]
 workspace = true
