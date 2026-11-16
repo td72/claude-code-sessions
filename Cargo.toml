@@ -14,7 +14,7 @@ keywords = ["claude-code", "claude", "agents", "sessions", "transcript"]
 categories = ["development-tools", "parser-implementations"]
 
 [workspace.dependencies]
-claude-code-sessions = { path = "crates/claude-code-sessions", version = "0.1.0" }
+claude-code-sessions = { path = "crates/claude-code-sessions", version = "0.1.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
