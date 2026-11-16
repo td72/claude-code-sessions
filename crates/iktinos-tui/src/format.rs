@@ -62,6 +62,14 @@ pub fn duration(ms: u64) -> String {
     }
 }
 
+/// A tool's name as shown: an MCP tool `mcp__server__tool` as `server/tool`.
+pub fn tool_name(name: &str) -> String {
+    match name.strip_prefix("mcp__") {
+        Some(rest) => rest.replacen("__", "/", 1),
+        None => name.to_owned(),
+    }
+}
+
 /// `1 turn`, `5 turns`.
 pub fn count(n: u64, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
@@ -141,6 +149,12 @@ mod tests {
         assert_eq!(duration(125_000), "2m05s");
         assert_eq!(percent(0.4249), "42%");
         assert_eq!(count(1, "turn"), "1 turn");
+        assert_eq!(tool_name("Bash"), "Bash");
+        assert_eq!(tool_name("mcp__example__lookup"), "example/lookup");
+        assert_eq!(
+            tool_name("mcp__plugin_a_b__get_item"),
+            "plugin_a_b/get_item"
+        );
         assert_eq!(count(0, "tool call"), "0 tool calls");
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("a longer line", 8), "a longe…");

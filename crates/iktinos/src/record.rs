@@ -305,6 +305,7 @@ impl Assistant {
             .map(|b| ToolUse {
                 id: string(b, "id"),
                 name: string(b, "name"),
+                summary: b.get("input").and_then(summarize_input),
             })
             .collect();
         Self {
@@ -323,11 +324,50 @@ impl Assistant {
     }
 }
 
-/// A tool call: which tool, and the id its result will carry.
+/// A tool call: which tool, the id its result will carry, and a line saying
+/// what it is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ToolUse {
     pub id: Option<String>,
     pub name: Option<String>,
+    /// One line of the call's input: the command, the file path, the search
+    /// pattern. See [`summarize_input`].
+    pub summary: Option<String>,
+}
+
+/// The longest summary of a tool input, in characters.
+pub const SUMMARY_CHARS: usize = 120;
+
+/// The input fields a summary is taken from, in order of preference.
+const SUMMARY_KEYS: &[&str] = &[
+    "command",
+    "file_path",
+    "notebook_path",
+    "pattern",
+    "url",
+    "query",
+    "description",
+];
+
+/// One line saying what a tool call is about: the first of the input's
+/// `command`, `file_path`, `notebook_path`, `pattern`, `url`, `query` or
+/// `description` that holds text, cut to its first line and to
+/// [`SUMMARY_CHARS`]. `None` for an input with none of them. The bridge mod
+/// summarises a running call the same way.
+pub fn summarize_input(input: &Value) -> Option<String> {
+    let text = SUMMARY_KEYS
+        .iter()
+        .filter_map(|key| input.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|text| !text.is_empty())?;
+    let line = text.lines().next().unwrap_or_default().trim_end();
+    if line.chars().count() <= SUMMARY_CHARS {
+        return Some(line.to_owned());
+    }
+    let mut cut: String = line.chars().take(SUMMARY_CHARS - 1).collect();
+    cut.push('…');
+    Some(cut)
 }
 
 /// `message.usage` of one API response.
@@ -642,6 +682,45 @@ mod tests {
         assert_eq!(record.view(), &View::Assistant(Assistant::default()));
         let record = Record::parse(r#"{"type":"user","message":{"content":7}}"#);
         assert_eq!(record.view(), &View::User(User::default()));
+    }
+
+    #[test]
+    fn a_tool_input_is_summarised_in_one_short_line() {
+        let summary = |input: &str| summarize_input(&serde_json::from_str(input).unwrap());
+        assert_eq!(
+            summary(r#"{"command":"cargo test","description":"runs the tests"}"#).as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            summary(r#"{"file_path":"/work/a.rs","old_string":"x","new_string":"y"}"#).as_deref(),
+            Some("/work/a.rs")
+        );
+        assert_eq!(
+            summary(r#"{"pattern":"fn main","path":"/work"}"#).as_deref(),
+            Some("fn main")
+        );
+        assert_eq!(
+            summary(r#"{"description":"Explore the repo","prompt":"long instructions"}"#)
+                .as_deref(),
+            Some("Explore the repo")
+        );
+        // The first line only, and an empty field is passed over.
+        assert_eq!(
+            summary(r#"{"command":"  ","url":"https://example.com/a\nsecond line"}"#).as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(
+            summary(r#"{"command":"echo one\necho two"}"#).as_deref(),
+            Some("echo one")
+        );
+        // Cut to the limit, counting characters, not bytes.
+        let long = summary(&format!(r#"{{"command":"{}"}}"#, "あ".repeat(300))).unwrap();
+        assert_eq!(long.chars().count(), SUMMARY_CHARS);
+        assert!(long.ends_with('…'));
+        // Nothing to summarise.
+        assert_eq!(summary(r#"{"content":"a whole file"}"#), None);
+        assert_eq!(summary(r#"{"command":7}"#), None);
+        assert_eq!(summary("[]"), None);
     }
 
     #[test]
