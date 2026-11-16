@@ -26,10 +26,7 @@
 //! | [`session`] | the fold of records into `Session` / `SessionStore` |
 //! | [`pricing`] | the embedded price table and context windows |
 
-pub mod record {
-    //! Typed views of transcript lines. Unknown `type`s and keys are kept,
-    //! never dropped, and reported through the drift survey.
-}
+pub mod record;
 
 pub mod discover {
     //! Sessions and subagents under a projects directory, and the resolution
