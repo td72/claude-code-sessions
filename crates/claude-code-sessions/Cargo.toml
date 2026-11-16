@@ -1,0 +1,26 @@
+[package]
+name = "claude-code-sessions"
+version = "0.1.0"
+description = "Claude Code sessions as data: read the local transcripts (~/.claude/projects) into a model of every session on the machine"
+readme = "../../README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# Follow transcript appends with filesystem notifications instead of polling.
+watch = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

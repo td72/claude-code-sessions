@@ -1,0 +1,41 @@
+//! Live events for `claude-code-sessions`.
+//!
+//! The transcripts lack, or report late, what a session is doing right now:
+//! the tool running, waiting for input, context fill, rate limits. The
+//! `claude-code-sessions-bridge` Claude Code mod (in this repository under
+//! `mods/`) POSTs those as [`event::Event`]s to every Unix socket under the
+//! shared socket directory, so several consumers (vig, the standalone viewer)
+//! receive them at once.
+//!
+//! This crate is the receiving end only: it listens, parses a minimal
+//! HTTP/1.1 `POST /events`, replies `200`, and never sends anything to Claude
+//! Code. Events overwrite freshness fields of a `Session`; tokens, cost and
+//! history stay with the transcripts, so nothing is counted twice.
+//!
+//! Unix only: the server is compiled out on other platforms and the crate then
+//! exposes the protocol types alone.
+//!
+//! | module | role |
+//! | --- | --- |
+//! | [`event`] | the versioned (`v: 1`) event types; unknown types are ignored |
+//! | [`server`] | the Unix-socket listener and the minimal HTTP parser, events out through an `mpsc` channel |
+//! | [`merge`] | applying an event to a `Session` |
+
+pub mod event {
+    //! The protocol. `session.start`, `turn.start` / `turn.complete`, the start
+    //! and end of `tool.call` (tool name only), `tool.check` verdicts,
+    //! `session.measure` (context, rate limits, cost), `agent.spawn`,
+    //! `session.end`. Prompt text and tool input have no place in the schema.
+}
+
+#[cfg(unix)]
+pub mod server {
+    //! `<state dir>/sockets/<pid>.sock`: created on start, removed on exit,
+    //! stale sockets cleaned on start. One request per connection, body
+    //! capped, anything malformed is dropped without touching the state.
+}
+
+pub mod merge {
+    //! Apply an [`event::Event`] to a `Session`: freshness fields only,
+    //! last-write-wins by timestamp.
+}

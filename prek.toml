@@ -1,0 +1,18 @@
+[[repos]]
+repo = "builtin"
+hooks = [
+  # Recorded transcripts must stay byte-for-byte what Claude Code wrote.
+  { id = "trailing-whitespace", exclude = "^tests/fixtures/" },
+  { id = "end-of-file-fixer", exclude = "^tests/fixtures/" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "cargo-fmt", name = "cargo fmt", language = "system", entry = "cargo fmt", args = ["--all", "--check"], files = "\\.rs$", pass_filenames = false },
+  { id = "cargo-clippy", name = "cargo clippy", language = "system", entry = "cargo clippy", args = ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"], files = "\\.rs$", pass_filenames = false },
+]

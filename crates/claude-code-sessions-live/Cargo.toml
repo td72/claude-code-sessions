@@ -1,0 +1,22 @@
+[package]
+name = "claude-code-sessions-live"
+version = "0.1.0"
+description = "Live events for claude-code-sessions: the event protocol spoken by the claude-code-sessions-bridge mod and the Unix-socket server that receives it"
+readme = "../../README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+claude-code-sessions.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
