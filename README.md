@@ -12,9 +12,9 @@ renders it as a page, and a small standalone viewer ships here.
 *Iktinos* (ἴκτινος) is ancient Greek for the kite, a bird that circles high
 and watches the ground; it was also the name of an architect of the Parthenon.
 
-> Status: the project was renamed from `claude-code-sessions` (whose 0.1
-> releases on crates.io hold the transcript layer only). The crates, the
-> viewer and the mod are implemented here; `iktinos` is not on crates.io yet.
+> Status: the crates (`iktinos`, `iktinos-live`, `iktinos-tui`) and the mod are
+> implemented and at 0.1. The project was renamed from `claude-code-sessions`;
+> that crate on crates.io is no longer updated.
 
 ## Using the crate
 
