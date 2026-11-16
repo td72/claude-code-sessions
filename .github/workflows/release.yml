@@ -36,6 +36,16 @@ jobs:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           persist-credentials: false
 
+      # The actions below are named by tag and pinned in actions.lock. Check
+      # the pins before any of them runs with the right to publish: a tag
+      # that was moved since the lockfile was written stops the release here.
+      - name: Verify the locked actions
+        run: |
+          gh extension install github/gh-actions-lock --pin v0.4.1
+          gh actions-lock --verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
 
       - name: Read the crate and version from the branch name
