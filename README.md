@@ -38,6 +38,21 @@ Text is modelled where a view needs it (a title, the last prompt, a subagent's
 description). The crates never log record contents themselves, and a session
 keeps bounded recent activity, not its whole history.
 
+## Prices
+
+`pricing` embeds a snapshot of Anthropic's first-party price list
+(`crates/claude-code-sessions/assets/pricing.json`: input, output, 5 minute and
+1 hour cache writes, cache reads and the context window per model, plus fast
+mode and Claude Haiku 5.5's long-prompt prices). A model the table does not
+know has no price; it is shown as `—`, never as `$0`.
+
+To refresh the snapshot, copy the rows of the
+[pricing page](https://platform.claude.com/docs/en/about-claude/pricing) into
+the JSON, set `as_of`, and run `cargo test -p claude-code-sessions pricing`:
+the tests reject a table whose rates break the published multipliers (cache
+writes at 1.25× and 2× the input price, output at 5×). Automatic refresh is
+future work.
+
 ## Why a crate
 
 The popular tools in this space (ccusage, Claude-Code-Usage-Monitor,
