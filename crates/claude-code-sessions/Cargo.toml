@@ -14,12 +14,13 @@ categories.workspace = true
 [features]
 default = []
 # Follow transcript appends with filesystem notifications instead of polling.
-watch = []
+watch = ["dep:notify"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+notify = { version = "8", optional = true }
 
 [lints]
 workspace = true
