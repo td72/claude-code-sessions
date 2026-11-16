@@ -8,8 +8,9 @@ use claude_code_sessions::record::{
     Assistant, Record, Timestamp, TitleSource, Usage, View, KNOWN_CLAUDE_CODE_VERSION,
 };
 
-/// Every free-text field in the fixtures carries this marker, so a test can
-/// assert that no transcript text reaches a view, a `Debug` or a report.
+/// Every text field the views do not model (responses, tool inputs and
+/// outputs, prompts in `user` records) carries this marker, so a test can
+/// assert that only modelled text reaches a view, a `Debug` or a report.
 const TEXT_MARKER: &str = "SYNTHETIC-TEXT";
 
 fn fixture_dir() -> PathBuf {
@@ -141,6 +142,7 @@ fn plain_turn() {
         unreachable!()
     };
     assert_eq!(last.leaf_uuid.as_deref(), Some("a2"));
+    assert_eq!(last.text.as_deref(), Some("Synthetic last prompt"));
 }
 
 #[test]
@@ -325,7 +327,7 @@ fn the_drift_survey_reports_what_was_planted() {
 }
 
 #[test]
-fn no_transcript_text_reaches_a_view_or_a_report() {
+fn unmodelled_text_stays_in_the_raw_value() {
     let mut seen_in_raw = false;
     for entry in fs::read_dir(fixture_dir()).unwrap() {
         let path = entry.unwrap().path();

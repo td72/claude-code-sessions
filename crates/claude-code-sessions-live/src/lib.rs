@@ -25,7 +25,7 @@ pub mod event {
     //! The protocol. `session.start`, `turn.start` / `turn.complete`, the start
     //! and end of `tool.call` (tool name only), `tool.check` verdicts,
     //! `session.measure` (context, rate limits, cost), `agent.spawn`,
-    //! `session.end`. Prompt text and tool input have no place in the schema.
+    //! `session.end`. Events stay small: names, ids, numbers and short summaries.
 }
 
 #[cfg(unix)]

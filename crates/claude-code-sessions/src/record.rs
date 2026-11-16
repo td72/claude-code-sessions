@@ -7,9 +7,11 @@
 //! never seen is [`View::Unknown`], and a modelled record that lacks a key
 //! simply has `None` there — the consumer skips what it cannot use.
 //!
-//! Never extracted: prompt text, response text, tool inputs and outputs,
-//! `api-request-blob`, environment variables. They stay inside the raw value,
-//! which [`Record`]'s `Debug` deliberately leaves out.
+//! The views carry what the session model reads today: identifiers, numbers,
+//! names, the title and the last prompt. Everything else (responses, tool
+//! inputs and outputs) stays reachable through [`Record::raw`], which
+//! [`Record`]'s `Debug` deliberately leaves out so that a stray `{:?}` never
+//! writes a conversation to a log.
 //!
 //! [`drift`] surveys a corpus for the shapes these views do not know.
 
@@ -107,15 +109,15 @@ impl Record {
     }
 
     /// The raw JSON value (`Null` for a line that did not parse). It contains
-    /// everything Claude Code wrote, including text this crate never models;
-    /// do not log or display it.
+    /// everything Claude Code wrote, whole conversations included: read what
+    /// you need from it, do not log it.
     pub fn raw(&self) -> &Value {
         &self.raw
     }
 }
 
-/// `Debug` shows the typed side only. The raw value holds prompt and response
-/// text and must not reach a log through a stray `{:?}`.
+/// `Debug` shows the typed side only. The raw value holds the whole
+/// conversation and must not reach a log through a stray `{:?}`.
 impl fmt::Debug for Record {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Record")
@@ -174,7 +176,7 @@ pub enum View {
     System(System),
     /// `ai-title`, `custom-title` or the older `summary`.
     Title(Title),
-    /// `last-prompt`. Only the leaf it points at; the prompt text is not read.
+    /// `last-prompt`: the prompt the user typed last.
     LastPrompt(LastPrompt),
     /// `api-request`: the bookkeeping record an assistant message's
     /// `requestRef` points at.
@@ -207,6 +209,7 @@ impl View {
                 source: TitleSource::Summary,
             }),
             Some("last-prompt") => Self::LastPrompt(LastPrompt {
+                text: string(obj, "lastPrompt"),
                 leaf_uuid: string(obj, "leafUuid"),
             }),
             Some("api-request") => Self::ApiRequest(ApiRequest {
@@ -219,8 +222,7 @@ impl View {
     }
 }
 
-/// A `user` record: a prompt, or the results of tool calls. The text of
-/// neither is read.
+/// A `user` record: a prompt, or the results of tool calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct User {
     /// One entry per `tool_result` block in the message.
@@ -248,7 +250,7 @@ impl User {
     }
 }
 
-/// The outcome of one tool call. No content.
+/// The outcome of one tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
     /// The `tool_use` block this answers.
@@ -317,7 +319,7 @@ impl Assistant {
     }
 }
 
-/// A tool call: which tool, and the id its result will carry. No input.
+/// A tool call: which tool, and the id its result will carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolUse {
     pub id: Option<String>,
@@ -421,6 +423,9 @@ pub enum TitleSource {
 /// A `last-prompt` record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastPrompt {
+    /// The prompt as typed. Absent on records that only move the leaf.
+    pub text: Option<String>,
+    /// The record the conversation ended on when this was written.
     pub leaf_uuid: Option<String>,
 }
 

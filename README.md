@@ -34,8 +34,9 @@ Both feed a `SessionStore` incrementally. Snapshot fields are last-write-wins by
 timestamp; accumulated fields are folded once from the transcript offsets. No
 field is written by both inputs, so arrival order never changes the result.
 
-Never modelled: prompt text, response text, tool inputs and outputs,
-environment variables.
+Text is modelled where a view needs it (a title, the last prompt, a subagent's
+description). The crates never log record contents themselves, and a session
+keeps bounded recent activity, not its whole history.
 
 ## Why a crate
 
