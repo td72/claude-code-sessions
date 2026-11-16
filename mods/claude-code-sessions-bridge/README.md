@@ -11,9 +11,11 @@ so both ends change together.
   and POSTs the event to each socket with
   `$.http.fetch("http://claude-code-sessions/events", { method: "POST", socketPath })`.
   Sockets that refuse the connection are ignored.
-- Events: `session.start`, `turn.start` / `turn.complete`, `tool.call` start and
-  end (tool name only), `tool.check`, `session.measure`, `agent.spawn`,
-  `session.end`. Events go to local Unix sockets only and stay small: names, ids, numbers and short summaries.
+- Events (protocol version 1): `session.start`, `session.end`, `turn.start`,
+  `turn.complete`, `tool.call` (start and end), `tool.check`,
+  `session.measure`, `agent.spawn`. Their shapes are the samples under
+  `tests/fixtures/events/`. Events go to local Unix sockets only and stay
+  small: names, ids, numbers and short summaries.
 - Without the mod the transcripts alone drive the model; the mod only adds
   freshness.
 

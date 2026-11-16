@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "session.start",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "ts": 1793613600000,
+  "cwd": "/work/other.repo",
+  "model": "claude-fable-5-2",
+  "interactive": true
+}

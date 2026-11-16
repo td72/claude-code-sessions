@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "type": "session.end",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "ts": 1793613609000,
+  "reason": "prompt_input_exit"
+}

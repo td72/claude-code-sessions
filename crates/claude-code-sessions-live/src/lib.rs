@@ -21,12 +21,7 @@
 //! | [`server`] | the Unix-socket listener and the minimal HTTP parser, events out through an `mpsc` channel |
 //! | [`merge`] | applying an event to a `Session` |
 
-pub mod event {
-    //! The protocol. `session.start`, `turn.start` / `turn.complete`, the start
-    //! and end of `tool.call` (tool name only), `tool.check` verdicts,
-    //! `session.measure` (context, rate limits, cost), `agent.spawn`,
-    //! `session.end`. Events stay small: names, ids, numbers and short summaries.
-}
+pub mod event;
 
 #[cfg(unix)]
 pub mod server {

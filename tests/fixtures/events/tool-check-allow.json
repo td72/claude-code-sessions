@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "tool.check",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "ts": 1793613601900,
+  "tool": "Bash",
+  "tool_use_id": "toolu_01",
+  "decision": "allow"
+}
