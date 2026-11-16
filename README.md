@@ -85,13 +85,15 @@ Each list page is a list over a detail pane, in fixed proportions:
   session, and sessions, tokens and cost by repository.
 
 Pages 2 and 3 cover every session until `Enter` is pressed on one in the
-Sessions page; then they are narrowed to it, until `Esc`.
+Sessions page; then they are narrowed to it. `Enter` on a subagent narrows the
+Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 
 | key | |
 | --- | --- |
 | `1` – `4` | switch page |
 | `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the list (or scroll the detail pane) |
 | `Enter` on a session | narrow pages 2 and 3 to it and show its tool calls |
+| `Enter` on a subagent | narrow page 2 to it and show its tool calls |
 | `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |

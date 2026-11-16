@@ -115,6 +115,13 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
                 format::truncate(app::label(session), 40)
             ));
         }
+        if let (Page::Tools, Some(agent)) = (app.page, app.scoped_subagent()) {
+            title.push_str(&format!(
+                " › {}: {}",
+                agent.agent_type.as_deref().unwrap_or("agent"),
+                format::truncate(subagent_name(agent), 40)
+            ));
+        }
     }
     if let Some(search) = app.search.as_ref().filter(|s| s.page == app.page) {
         title.push_str(&format!("  /{} ({matches})", search.query));
@@ -141,9 +148,29 @@ fn session_cell(session: &Session) -> Cell<'static> {
     )
 }
 
-fn draw_session_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
+/// Draws a list page's table, keeping its scroll position between draws: the
+/// list moves only when the cursor would leave it.
+fn draw_list(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    index: usize,
+    table: Table<'static>,
+    selected: Option<usize>,
+) {
+    let table = table
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .column_spacing(2);
+    let mut state = TableState::default()
+        .with_offset(app.offsets[index])
+        .with_selected(selected);
+    frame.render_stateful_widget(table, area, &mut state);
+    app.offsets[index] = state.offset();
+}
+
+fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let matches = app.matches(Page::Sessions, now);
-    let rows = app
+    let rows: Vec<Row<'static>> = app
         .order
         .iter()
         .filter_map(|id| app.store.get(id))
@@ -167,7 +194,8 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
                 Cell::from(Line::from(format::cost(&session.cost)).right_aligned()),
             ])
             .style(row_style(&matches, index))
-        });
+        })
+        .collect();
     let title = list_title(
         app,
         format!("Sessions ({} · {} ↓)", app.filter.label(), app.sort.label()),
@@ -177,12 +205,12 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
         rows,
         [
             Constraint::Length(1),
-            Constraint::Fill(4),
+            Constraint::Fill(5),
             Constraint::Fill(2),
             Constraint::Fill(2),
-            Constraint::Length(16),
+            Constraint::Length(15),
             Constraint::Length(7),
-            Constraint::Length(8),
+            Constraint::Length(7),
             Constraint::Length(9),
         ],
     )
@@ -199,11 +227,9 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
         ])
         .style(dim()),
     )
-    .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
     .block(pane_block(title, !app.in_detail));
-    let mut state =
-        TableState::default().with_selected((!app.order.is_empty()).then_some(app.selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    let selected = (!app.order.is_empty()).then_some(app.selected);
+    draw_list(frame, area, app, 0, table, selected);
 }
 
 fn outcome(call: &ToolCall) -> (&'static str, Style) {
@@ -214,57 +240,61 @@ fn outcome(call: &ToolCall) -> (&'static str, Style) {
     }
 }
 
-fn draw_tool_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
+fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let matches = app.matches(Page::Tools, now);
-    let calls = app.tools();
     // The session column says nothing once the page is narrowed to one.
     let scoped = app.scope.is_some();
-    let rows = calls.iter().enumerate().map(|(index, (session, call))| {
-        let (mark, style) = outcome(call);
-        let name = format!(
-            "{}{}",
-            if call.agent_id.is_some() { "↳ " } else { "" },
-            format::tool_name(&call.name)
-        );
-        let when = call
-            .started_at
-            .map_or("—".to_owned(), |at| format::ago(now, at));
-        let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
-        if !scoped {
-            cells.push(session_cell(session));
-        }
-        cells.extend([
-            Cell::from(name),
-            Cell::from(call.summary.clone().unwrap_or_default()).style(dim()),
-            Cell::from(
-                Line::from(call.duration_ms.map(format::duration).unwrap_or_default())
-                    .right_aligned(),
-            ),
-            Cell::from(mark).style(style),
-        ]);
-        Row::new(cells).style(row_style(&matches, index))
-    });
-    let mut widths = vec![Constraint::Length(5)];
+    let calls = app.tools();
+    let count = calls.len();
+    let rows: Vec<Row<'static>> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (session, call))| {
+            let (mark, style) = outcome(call);
+            let name = format!(
+                "{}{}",
+                if call.agent_id.is_some() { "↳ " } else { "" },
+                format::tool_name(&call.name)
+            );
+            let when = call
+                .started_at
+                .map_or("—".to_owned(), |at| format::ago(now, at));
+            let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
+            if !scoped {
+                cells.push(session_cell(session));
+            }
+            cells.extend([
+                Cell::from(name),
+                Cell::from(call.summary.clone().unwrap_or_default()),
+                Cell::from(
+                    Line::from(call.duration_ms.map(format::duration).unwrap_or_default())
+                        .right_aligned(),
+                ),
+                Cell::from(mark).style(style),
+            ]);
+            Row::new(cells).style(row_style(&matches, index))
+        })
+        .collect();
+    // What the call was about gets every column the others can spare.
+    let mut widths = vec![Constraint::Length(4)];
     let mut header = vec!["when"];
     if !scoped {
-        widths.push(Constraint::Fill(2));
+        widths.push(Constraint::Max(22));
         header.push("session");
     }
     widths.extend([
-        Constraint::Length(22),
-        Constraint::Fill(5),
-        Constraint::Length(7),
+        Constraint::Max(18),
+        Constraint::Fill(1),
+        Constraint::Length(6),
         Constraint::Length(7),
     ]);
     header.extend(["tool", "what", "took", ""]);
-    let title = list_title(app, format!("Tool calls ({})", calls.len()), matches.len());
+    let title = list_title(app, format!("Tool calls ({count})"), matches.len());
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(dim()))
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .block(pane_block(title, !app.in_detail));
-    let mut state =
-        TableState::default().with_selected((!calls.is_empty()).then_some(app.tool_selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    let selected = (count > 0).then_some(app.tool_selected);
+    draw_list(frame, area, app, 1, table, selected);
 }
 
 fn subagent_name(subagent: &Subagent) -> &str {
@@ -275,11 +305,12 @@ fn subagent_name(subagent: &Subagent) -> &str {
         .unwrap_or(&subagent.agent_id)
 }
 
-fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
+fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let matches = app.matches(Page::Subagents, now);
-    let subagents = app.subagents();
     let scoped = app.scope.is_some();
-    let rows = subagents
+    let subagents = app.subagents();
+    let count = subagents.len();
+    let rows: Vec<Row<'static>> = subagents
         .iter()
         .enumerate()
         .map(|(index, (session, subagent))| {
@@ -294,15 +325,22 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) 
             if !scoped {
                 cells.push(session_cell(session));
             }
+            let entered = app.agent_scope.as_deref() == Some(subagent.agent_id.as_str())
+                && app.scope.as_deref() == Some(session.id.as_str());
             cells.extend([
+                Cell::from(format!(
+                    "{}{}",
+                    if entered { "● " } else { "" },
+                    subagent.agent_type.as_deref().unwrap_or("agent")
+                )),
+                Cell::from(subagent_name(subagent).to_owned()),
                 Cell::from(
                     subagent
-                        .agent_type
-                        .clone()
-                        .unwrap_or_else(|| "agent".to_owned()),
-                ),
-                Cell::from(subagent_name(subagent).to_owned()),
-                Cell::from(subagent.model.clone().unwrap_or_else(|| "—".to_owned())).style(dim()),
+                        .model
+                        .as_deref()
+                        .map_or("—".to_owned(), format::model_name),
+                )
+                .style(dim()),
                 Cell::from(
                     Line::from(format::tokens(subagent.usage.total_tokens())).right_aligned(),
                 ),
@@ -320,34 +358,73 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) 
                 Cell::from(done),
             ]);
             Row::new(cells).style(row_style(&matches, index))
-        });
-    let mut widths = vec![Constraint::Length(5)];
+        })
+        .collect();
+    // The task gets every column the others can spare.
+    let mut widths = vec![Constraint::Length(4)];
     let mut header = vec!["when"];
     if !scoped {
-        widths.push(Constraint::Fill(2));
+        widths.push(Constraint::Max(22));
         header.push("session");
     }
     widths.extend([
-        Constraint::Length(16),
-        Constraint::Fill(4),
-        Constraint::Length(18),
-        Constraint::Length(8),
+        Constraint::Max(15),
+        Constraint::Fill(1),
+        Constraint::Length(10),
+        Constraint::Length(6),
         Constraint::Length(9),
         Constraint::Length(7),
     ]);
     header.extend(["type", "task", "model", "tokens", "cost", ""]);
-    let title = list_title(
-        app,
-        format!("Subagents ({})", subagents.len()),
-        matches.len(),
-    );
+    let title = list_title(app, format!("Subagents ({count})"), matches.len());
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(dim()))
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .block(pane_block(title, !app.in_detail));
-    let mut state = TableState::default()
-        .with_selected((!subagents.is_empty()).then_some(app.subagent_selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    let selected = (count > 0).then_some(app.subagent_selected);
+    draw_list(frame, area, app, 2, table, selected);
+}
+
+/// `text` broken into lines of at most `width` columns, at spaces where
+/// there are any.
+fn wrap(text: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        let mut used = 0;
+        for word in paragraph.split_inclusive(' ') {
+            let mut word = word;
+            // A word wider than a line is cut wherever it has to be.
+            while Span::raw(word).width() > width.saturating_sub(used) {
+                if used > 0 {
+                    lines.push(Line::raw(std::mem::take(&mut line)));
+                    used = 0;
+                    if Span::raw(word).width() <= width {
+                        break;
+                    }
+                }
+                let mut cut = 0;
+                let mut columns = 0;
+                for (at, c) in word.char_indices() {
+                    let w = Span::raw(c.to_string()).width();
+                    if columns + w > width {
+                        break;
+                    }
+                    columns += w;
+                    cut = at + c.len_utf8();
+                }
+                if cut == 0 {
+                    break;
+                }
+                lines.push(Line::raw(word[..cut].to_owned()));
+                word = &word[cut..];
+            }
+            line.push_str(word);
+            used += Span::raw(word).width();
+        }
+        lines.push(Line::raw(line));
+    }
+    lines
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
@@ -357,7 +434,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         Page::Tools => (
             "Tool call",
             match app.selected_tool() {
-                Some((session, call)) => tool_lines(session, call, now),
+                Some((session, call)) => tool_lines(session, call, now, width),
                 None => empty("no tool calls"),
             },
         ),
@@ -479,10 +556,11 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     let mut lines = Vec::new();
     let status = app::status(session, now);
 
-    lines.push(Line::styled(
-        format::truncate(app::label(session), width),
-        Style::new().add_modifier(Modifier::BOLD),
-    ));
+    lines.extend(
+        wrap(app::label(session), width)
+            .into_iter()
+            .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD))),
+    );
     lines.push(Line::from(vec![
         Span::styled(format!("{:<10}", "state"), dim()),
         Span::styled(status.text, style_of(status.kind)),
@@ -566,7 +644,12 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     lines
 }
 
-fn tool_lines(session: &Session, call: &ToolCall, now: Timestamp) -> Vec<Line<'static>> {
+fn tool_lines(
+    session: &Session,
+    call: &ToolCall,
+    now: Timestamp,
+    width: usize,
+) -> Vec<Line<'static>> {
     let (mark, style) = outcome(call);
     let mut lines = vec![
         Line::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
@@ -604,7 +687,7 @@ fn tool_lines(session: &Session, call: &ToolCall, now: Timestamp) -> Vec<Line<'s
     lines.push(field("id", call.id.clone()));
     if let Some(summary) = &call.summary {
         lines.push(Line::raw(""));
-        lines.push(Line::raw(summary.clone()));
+        lines.extend(wrap(summary, width));
     }
     lines
 }
@@ -615,10 +698,10 @@ fn subagent_lines(
     now: Timestamp,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::styled(
-        format::truncate(subagent_name(subagent), width),
-        Style::new().add_modifier(Modifier::BOLD),
-    )];
+    let mut lines: Vec<Line> = wrap(subagent_name(subagent), width)
+        .into_iter()
+        .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD)))
+        .collect();
     if let Some(kind) = &subagent.agent_type {
         lines.push(field("type", kind.clone()));
     }
@@ -836,7 +919,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         Line::styled(
-            " 1-4 page  j/k move  Enter open session  i detail  / search  s sort  f filter  ? help  q quit",
+            " 1-4 page  j/k move  Enter open  i detail  Esc back  / search  s sort  f filter  ? help  q quit",
             dim(),
         )
     };
@@ -858,7 +941,10 @@ const HELP: &[(&str, &str)] = &[
         "switch between the list and the detail pane",
     ),
     ("h / Esc", "back to the list"),
-    ("Esc (list)", "clear the search, then the narrowing"),
+    (
+        "Esc (list)",
+        "clear the search, then the narrowing, step by step",
+    ),
     ("/", "search the list"),
     ("n / N", "next / previous match"),
     ("s", "sort sessions: updated, cost, tokens"),
@@ -869,7 +955,7 @@ const HELP: &[(&str, &str)] = &[
 ];
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let width = 70.min(area.width);
+    let width = 76.min(area.width);
     let height = (HELP.len() as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
@@ -1076,7 +1162,7 @@ mod tests {
         let explore = row(&screen, "Synthetic agent task");
         assert!(explore.contains("Explore"));
         assert!(explore.contains("22222222"));
-        assert!(explore.contains("claude-haiku-5-5"));
+        assert!(explore.contains("haiku-5-5"));
         assert!(explore.contains("1.8k"));
         assert!(explore.contains("~$0.0002"));
         assert!(explore.contains("done"));
@@ -1088,6 +1174,74 @@ mod tests {
         assert!(detail.contains("tool calls (1 in all, the latest 1)"));
         assert!(detail.contains("Grep"));
         assert!(detail.contains("synthetic pattern"));
+    }
+
+    #[test]
+    fn entering_a_subagent_shows_its_tool_calls_and_their_detail() {
+        let mut app = fixture_app();
+        app.go_to(Page::Subagents);
+        app.enter();
+        let screen = screen(&mut app, 150, 40, LATER);
+        assert!(
+            screen.contains("Tool calls (1) of 22222222 › Explore: Synthetic agent task"),
+            "{screen}"
+        );
+        assert!(row(&screen, "synthetic pattern").contains("↳ Grep"));
+        let detail = &screen[screen.find("┌ Tool call ").unwrap()..];
+        assert!(detail.contains("by        subagent Explore (Synthetic agent task)"));
+        assert!(detail.contains("took      400ms"));
+
+        // Its page marks it.
+        app.go_to(Page::Subagents);
+        let subagents = super::tests::screen(&mut app, 150, 40, LATER);
+        assert!(row(&subagents, "Synthetic agent task").contains("● Explore"));
+    }
+
+    #[test]
+    fn a_list_scrolls_only_when_the_cursor_leaves_it() {
+        let mut app = fixture_app();
+        app.go_to(Page::Tools);
+        // 12 rows: a list pane of 2 visible rows (45% of 10, less the border
+        // and the header).
+        screen(&mut app, 120, 12, LATER);
+        assert_eq!(app.viewport.list_rows, 1.max(app.viewport.list_rows));
+        let visible = app.viewport.list_rows;
+        assert!(visible < 5, "the list must not fit: {visible}");
+        app.move_last();
+        screen(&mut app, 120, 12, LATER);
+        let bottom = app.offsets[1];
+        assert_eq!(bottom, 5 - visible);
+        // Moving up within what is visible does not scroll.
+        if visible > 1 {
+            app.move_by(-1);
+            screen(&mut app, 120, 12, LATER);
+            assert_eq!(app.offsets[1], bottom);
+        }
+        app.move_first();
+        screen(&mut app, 120, 12, LATER);
+        assert_eq!(app.offsets[1], 0);
+    }
+
+    #[test]
+    fn long_text_is_wrapped_in_the_detail_pane_not_cut() {
+        let text =
+            |lines: Vec<Line>| -> Vec<String> { lines.iter().map(|l| l.to_string()).collect() };
+        assert_eq!(
+            text(wrap("cargo test --workspace --all-features", 16)),
+            ["cargo test ", "--workspace ", "--all-features"]
+        );
+        // A word wider than the pane is cut where it has to be.
+        assert_eq!(
+            text(wrap("/a/very/long/path/to/a/file.rs", 10)),
+            ["/a/very/lo", "ng/path/to", "/a/file.rs"]
+        );
+        // Wide characters count for two columns.
+        assert_eq!(text(wrap("日本語のテキスト", 8)), ["日本語の", "テキスト"]);
+        assert_eq!(text(wrap("short", 80)), ["short"]);
+        assert_eq!(text(wrap("", 10)), Vec::<String>::new());
+        for width in 0..4 {
+            wrap("anything at all", width);
+        }
     }
 
     #[test]
