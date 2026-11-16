@@ -5,7 +5,7 @@ use claude_code_sessions::session::{LiveState, ModelUsage, Session};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
 use crate::app::{self, App, LiveStatus, StatusKind};
@@ -26,7 +26,11 @@ pub fn draw(frame: &mut Frame, app: &App, now: Timestamp) {
     let [list, detail] = if body.width >= SIDE_BY_SIDE_FROM {
         Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(body)
     } else {
-        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
+        // Stacked: the detail pane takes what its content needs, up to three
+        // fifths of the height, and the list gets the rest.
+        let wanted = detail_height(app, now, body.width);
+        let height = wanted.min(body.height * 3 / 5).max(3);
+        Layout::vertical([Constraint::Min(4), Constraint::Length(height)]).areas(body)
     };
     draw_list(frame, list, app, now);
     draw_detail(frame, detail, app, now);
@@ -134,6 +138,16 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
     );
 }
 
+/// The rows the detail pane needs to show the selected session whole.
+fn detail_height(app: &App, now: Timestamp, width: u16) -> u16 {
+    let lines = app.selected_session().map_or(1, |session| {
+        // The context line, then the text.
+        1 + detail_lines(session, now, width.saturating_sub(2) as usize).len()
+    });
+    // And the border.
+    u16::try_from(lines + 2).unwrap_or(u16::MAX)
+}
+
 fn draw_context(frame: &mut Frame, area: Rect, session: &Session) {
     let Some(context) = session.current_context() else {
         frame.render_widget(Line::styled("context —", dim()), area);
@@ -152,17 +166,24 @@ fn draw_context(frame: &mut Frame, area: Rect, session: &Session) {
         f if f >= 0.7 => Color::Yellow,
         _ => Color::Green,
     };
+    // The numbers as plain text, then a bar in what is left of the line: a
+    // label drawn over the bar is unreadable where the two overlap.
     let label = format!(
-        "context {} of {} ({})",
+        "context  {} of {} ({})  ",
         format::tokens(context.tokens),
         format::tokens(context.window.unwrap_or_default()),
         format::percent(fill)
     );
-    let gauge = Gauge::default()
-        .ratio(fill.clamp(0.0, 1.0))
-        .label(label)
-        .gauge_style(Style::new().fg(color));
-    frame.render_widget(gauge, area);
+    let room = (area.width as usize)
+        .saturating_sub(label.chars().count())
+        .min(40);
+    let filled = ((fill.clamp(0.0, 1.0) * room as f64).round() as usize).min(room);
+    let line = Line::from(vec![
+        Span::raw(label),
+        Span::styled("█".repeat(filled), Style::new().fg(color)),
+        Span::styled("░".repeat(room - filled), dim()),
+    ]);
+    frame.render_widget(line, area);
 }
 
 fn detail_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'static>> {
@@ -415,7 +436,7 @@ mod tests {
         assert!(screen.contains("/work/example"));
         assert!(screen.contains("1 turn, 0 tool calls"));
         assert!(screen.contains("Synthetic last prompt"));
-        assert!(screen.contains("context 4.3k of 1.0M (0%)"));
+        assert!(screen.contains("context  4.3k of 1.0M (0%)"));
         assert!(screen.contains("estimated from the price table"));
         assert!(screen.contains("q quit"));
     }
@@ -458,6 +479,33 @@ mod tests {
         app.select_next();
         println!("{}", screen(&app, 150, 40, "2026-11-02T10:00:20.000Z"));
         println!("{}", screen(&app, 80, 36, "2026-11-02T10:00:20.000Z"));
+    }
+
+    #[test]
+    fn a_stacked_detail_pane_takes_only_the_rows_it_needs() {
+        let mut app = fixture_app();
+        app.select_last(); // the plain turn: a short detail pane
+        let screen = screen(&app, 80, 60, "2026-11-03T12:00:00.000Z");
+        let rows: Vec<&str> = screen.lines().collect();
+        let detail_top = rows.iter().position(|r| r.contains("┌ session ")).unwrap();
+        let detail_bottom = rows.iter().rposition(|r| r.starts_with('└')).unwrap();
+        // 1 context line + 11 lines of text + 2 border rows.
+        assert_eq!(detail_bottom - detail_top + 1, 14, "{screen}");
+        // The pane is full: its last inner row is the cost line.
+        assert!(rows[detail_bottom - 1].contains("estimated from the price table"));
+        // The list has everything above it.
+        assert!(detail_top > 40);
+    }
+
+    #[test]
+    fn the_context_bar_grows_with_the_fill() {
+        let mut app = fixture_app();
+        app.select_last();
+        let screen = screen(&app, 150, 40, "2026-11-03T12:00:00.000Z");
+        let line = screen.lines().find(|l| l.contains("context  ")).unwrap();
+        // Nearly empty: all track, no fill.
+        assert!(line.contains('░'), "{line}");
+        assert!(!line.contains('█'), "{line}");
     }
 
     #[test]
