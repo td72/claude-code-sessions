@@ -38,6 +38,7 @@ fn kinds(records: &[Record]) -> Vec<&'static str> {
             View::Title(_) => "title",
             View::LastPrompt(_) => "last-prompt",
             View::ApiRequest(_) => "api-request",
+            View::CostState(_) => "cost-state",
             View::Other => "other",
             View::Unknown => "unknown",
             View::Invalid => "invalid",
@@ -121,6 +122,7 @@ fn plain_turn() {
             cache_read_input_tokens: 4000,
             cache_creation_5m_input_tokens: Some(0),
             cache_creation_1h_input_tokens: Some(300),
+            fast: false,
         }
     );
     assert_eq!(usage.context_tokens(), 4312);

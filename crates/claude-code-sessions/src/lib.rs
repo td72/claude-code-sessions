@@ -33,10 +33,6 @@ pub mod discover;
 
 pub mod tail;
 
-pub mod session {
-    //! `Session` and `SessionStore`: the fold of records into state. Snapshot
-    //! fields are last-write-wins by timestamp, accumulated fields (tokens,
-    //! cost, recent activity) are folded once from the transcript offsets.
-}
+pub mod session;
 
 pub mod pricing;

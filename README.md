@@ -38,6 +38,17 @@ Text is modelled where a view needs it (a title, the last prompt, a subagent's
 description). The crates never log record contents themselves, and a session
 keeps bounded recent activity, not its whole history.
 
+## Cost
+
+Claude Code writes its own running total into the transcript when it exits.
+That total includes requests the transcript never records, so it is used where
+it exists. But it stops at the last clean exit, and a process that was killed
+leaves it far behind what the transcript shows. A session's cost is therefore
+the larger of "reported total plus the price-table estimate of everything after
+it" and "the estimate of everything", and it carries its source: reported,
+reported plus estimate, or estimate. Token counts always come from the
+transcript, one count per API response.
+
 ## Prices
 
 `pricing` embeds a snapshot of Anthropic's first-party price list
