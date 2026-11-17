@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iktinos::discover::{discover, SessionFiles};
+use iktinos::output::{read_tool_output, WholeOutput};
 use iktinos::record::{Record, Timestamp};
 use iktinos::session::{Activity, LiveState, Session, SessionStore, Subagent, ToolCall};
 use iktinos::tail::Tail;
@@ -228,6 +229,11 @@ pub struct App {
     pub store: SessionStore,
     /// A tail per transcript, with the session it belongs to.
     tails: BTreeMap<PathBuf, (String, Tail)>,
+    /// The files of each session, by id: where a call's whole output is
+    /// read from.
+    files: BTreeMap<String, SessionFiles>,
+    /// The whole output of one call, read when it was asked for (`o`).
+    pub whole: Option<Loaded>,
     pub page: Page,
     /// The detail pane has the focus, not the list above it.
     pub in_detail: bool,
@@ -284,6 +290,19 @@ pub struct App {
 
 /// How many recent tool calls per session the viewer keeps.
 const RECENT_TOOLS: usize = 200;
+
+/// How many characters of a tool's output each call keeps to show. The
+/// whole is read when it is asked for.
+const TOOL_OUTPUT: usize = 2000;
+
+/// The whole output of one call, as it was read on demand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loaded {
+    pub session: String,
+    pub call: String,
+    /// `Ok(None)`: the session's files hold no result of the call.
+    pub output: Result<Option<WholeOutput>, String>,
+}
 
 /// How many rows the Tool calls page lists at most.
 const TOOL_ROWS: usize = 500;
@@ -393,8 +412,12 @@ impl TraceRow<'_> {
 impl App {
     pub fn new(config: Config) -> Self {
         let mut app = Self {
-            store: SessionStore::new().with_recent_tools(RECENT_TOOLS),
+            store: SessionStore::new()
+                .with_recent_tools(RECENT_TOOLS)
+                .with_tool_output(TOOL_OUTPUT),
             tails: BTreeMap::new(),
+            files: BTreeMap::new(),
+            whole: None,
             page: Page::Sessions,
             in_detail: false,
             sort: Sort::Updated,
@@ -547,6 +570,7 @@ impl App {
 
     fn track(&mut self, files: &SessionFiles) {
         self.store.discovered(files);
+        self.files.insert(files.id.clone(), files.clone());
         let transcripts = std::iter::once(&files.transcript)
             .chain(files.subagents.iter().map(|subagent| &subagent.transcript));
         for transcript in transcripts {
@@ -1260,6 +1284,59 @@ impl App {
             style: self.time,
             ago_within: self.config.ago_within,
         }
+    }
+
+    /// The tool call the page's detail is about, with its session.
+    fn shown_call(&self) -> Option<(String, String)> {
+        match self.page {
+            Page::Tools => self
+                .selected_tool()
+                .map(|(session, call)| (session.id.clone(), call.id.clone())),
+            Page::Subagents => {
+                let (session, _) = self.selected_subagent()?;
+                Some((session.id.clone(), self.selected_call()?.id.clone()))
+            }
+            Page::Trace if self.in_tree() => {
+                let row = self.selected_span()?;
+                match row.item {
+                    TraceItem::Span(span) => match &span.kind {
+                        SpanKind::Tool(call) => Some((row.session.id.clone(), call.id.clone())),
+                        _ => None,
+                    },
+                    TraceItem::Subagent(_) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `o`: reads the whole output of the call shown, from the session's
+    /// files, and shows it in place of the excerpt; again, the excerpt.
+    /// One call's at a time: the text is dropped when another is asked for.
+    pub fn load_output(&mut self) {
+        let Some((session, call)) = self.shown_call() else {
+            return;
+        };
+        if self.whole_for(&session, &call).is_some() {
+            self.whole = None;
+            return;
+        }
+        let output = match self.files.get(&session) {
+            Some(files) => read_tool_output(files, &call).map_err(|e| e.to_string()),
+            None => Ok(None),
+        };
+        self.whole = Some(Loaded {
+            session,
+            call,
+            output,
+        });
+    }
+
+    /// The whole output of a call, if it is the one that was read.
+    pub fn whole_for(&self, session: &str, call: &str) -> Option<&Loaded> {
+        self.whole
+            .as_ref()
+            .filter(|loaded| loaded.session == session && loaded.call == call)
     }
 
     /// `T`: the lists' times as a date and time, or as how long ago.

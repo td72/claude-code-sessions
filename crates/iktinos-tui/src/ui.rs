@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 use ratatui::Frame;
 
 use crate::app::{
-    self, App, InteractionRow, LiveStatus, Page, StatusKind, TimeStyle, Times, TraceItem, TraceRow,
-    TREE,
+    self, App, InteractionRow, LiveStatus, Loaded, Page, StatusKind, TimeStyle, Times, TraceItem,
+    TraceRow, TREE,
 };
 use crate::format;
 use crate::highlight;
@@ -680,7 +680,7 @@ fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
     let chosen = app.selected_span().filter(|_| app.in_tree());
     let (title, lines) = match (chosen, app.selected_interaction()) {
-        (Some(row), _) => ("Span", trace_lines(&row, now, width)),
+        (Some(row), _) => ("Span", trace_lines(app, &row, now, width)),
         (
             None,
             Some(InteractionRow {
@@ -876,10 +876,15 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
 }
 
 /// The detail of a row of the interaction's tree.
-fn trace_lines(row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static>> {
+fn trace_lines(app: &App, row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     match row.item {
         TraceItem::Span(span) => match &span.kind {
-            SpanKind::Tool(call) => tool_lines(row.session, call, now, width),
+            SpanKind::Tool(call) => {
+                let mut lines = tool_lines(row.session, call, now, width);
+                let whole = app.whole_for(&row.session.id, &call.id);
+                lines.extend(output_lines(call, whole, width));
+                lines
+            }
             SpanKind::LlmRequest(request) => {
                 llm_request_lines(request, span.started_at, span.duration_ms(), now)
             }
@@ -1133,7 +1138,12 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         Page::Tools => (
             "Tool call",
             match app.selected_tool() {
-                Some((session, call)) => tool_lines(session, call, now, width),
+                Some((session, call)) => {
+                    let mut lines = tool_lines(session, call, now, width);
+                    let whole = app.whole_for(&session.id, &call.id);
+                    lines.extend(output_lines(call, whole, width));
+                    lines
+                }
                 None => empty("no tool calls"),
             },
         ),
@@ -1203,7 +1213,14 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
 fn draw_call(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
     let lines = match app.selected_call() {
-        Some(call) => call_lines(call, now, width),
+        Some(call) => {
+            let mut lines = call_lines(call, now, width);
+            let whole = app
+                .selected_subagent()
+                .and_then(|(session, _)| app.whole_for(&session.id, &call.id));
+            lines.extend(output_lines(call, whole, width));
+            lines
+        }
         None => vec![Line::styled("no tool calls", dim())],
     };
     let rows = area.height.saturating_sub(2) as usize;
@@ -1252,6 +1269,109 @@ fn command_lines(call: &ToolCall, width: usize) -> Vec<Line<'static>> {
                 last = Some(style);
             }
             lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+/// The most of a whole output that is laid out to be shown, in characters:
+/// more than anyone scrolls through, and cheap to wrap again on every draw.
+const WHOLE_SHOWN: usize = 200_000;
+
+/// What a tool call returned: the excerpt the session keeps, or the whole
+/// output where it was read on demand. Empty for a call without any.
+fn output_lines(call: &ToolCall, whole: Option<&Loaded>, width: usize) -> Vec<Line<'static>> {
+    let heading = |text: String| Line::styled(text, label());
+    let note = |text: String| Line::styled(text, dim());
+    let stderr = |lines: &mut Vec<Line<'static>>, text: &str| {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("stderr", Style::new().fg(Color::Red)));
+        lines.extend(wrap(text, width));
+    };
+    let mut lines = vec![Line::raw("")];
+    match whole.map(|loaded| &loaded.output) {
+        Some(Err(reason)) => {
+            lines.push(Line::styled(
+                format!("output    could not be read: {reason}"),
+                Style::new().fg(Color::Red),
+            ));
+        }
+        Some(Ok(None)) => lines.push(note(
+            "output    the session's files hold no result of this call".to_owned(),
+        )),
+        Some(Ok(Some(output))) => {
+            let chars = output.text.chars().count();
+            // The file it was moved to, by its place in the session's
+            // directory.
+            let from = match &output.file {
+                Some(path) => {
+                    let tail: Vec<_> = path.iter().rev().take(2).collect();
+                    let tail: std::path::PathBuf = tail.into_iter().rev().collect();
+                    format!(", from {}", tail.display())
+                }
+                None => String::new(),
+            };
+            lines.push(heading(format!(
+                "output    all of it: {}, {}{from}  (o: the excerpt)",
+                format::count(output.text.lines().count() as u64, "line"),
+                format::count(chars as u64, "character"),
+            )));
+            let shown = match output.text.char_indices().nth(WHOLE_SHOWN) {
+                Some((end, _)) => &output.text[..end],
+                None => &output.text,
+            };
+            lines.extend(wrap(shown, width));
+            if chars > WHOLE_SHOWN {
+                lines.push(note(format!(
+                    "… the first {WHOLE_SHOWN} characters are shown"
+                )));
+            }
+            if output.truncated {
+                lines.push(note("… cut where reading stopped".to_owned()));
+            }
+            if let Some(text) = &output.stderr {
+                stderr(&mut lines, text);
+            }
+            if output.interrupted {
+                lines.push(Line::styled("interrupted", running()));
+            }
+            if output.other_blocks > 0 {
+                lines.push(note(format!(
+                    "and {} that is not text",
+                    format::count(output.other_blocks as u64, "block")
+                )));
+            }
+        }
+        None => {
+            let Some(output) = &call.output else {
+                return Vec::new();
+            };
+            let size = format!(
+                "{}, {}",
+                format::count(output.lines as u64, "line"),
+                format::count(output.chars as u64, "character")
+            );
+            lines.push(heading(if output.truncated {
+                format!("output    {size}; the start is shown  (o: all of it)")
+            } else {
+                format!("output    {size}")
+            }));
+            lines.extend(wrap(&output.text, width));
+            if output.truncated {
+                lines.push(note("…".to_owned()));
+            }
+            if let Some(text) = &output.stderr {
+                stderr(&mut lines, text);
+            }
+            if output.interrupted {
+                lines.push(Line::styled("interrupted", running()));
+            }
+            if output.other_blocks > 0 {
+                lines.push(note(format!(
+                    "and {} that is not text",
+                    format::count(output.other_blocks as u64, "block")
+                )));
+            }
         }
     }
     lines
@@ -1789,6 +1909,7 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("Enter", "unfold or fold a session in the trace by session"),
     ("T", "times as a date and time, or as how long ago"),
+    ("o", "a tool call's whole output, or its excerpt again"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
     ("r", "refresh now"),
@@ -2555,6 +2676,157 @@ mod tests {
         assert_eq!(took_style(None).fg, None);
     }
 
+    /// An app on the fixture session whose calls return every kind of
+    /// output, on the Tool calls page with the cursor on one call.
+    fn on_call(id: &str) -> App {
+        let mut app = App::new(Config {
+            projects_dir: crate::app::tests::fixtures()
+                .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                .join("output"),
+            live: false,
+            socket_dir: None,
+            time: TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
+        });
+        app.go_to(Page::Tools);
+        let at = app
+            .tools()
+            .iter()
+            .position(|(_, call)| call.id == id)
+            .unwrap();
+        app.move_by(at as isize);
+        app
+    }
+
+    #[test]
+    fn a_tool_calls_detail_shows_what_it_returned() {
+        let detail = |id: &str| -> String {
+            let screen = screen(&mut on_call(id), 150, 60, LATER);
+            pane_text(&screen, "┌ Tool call ")
+        };
+        // A success: under the command, the output.
+        let ok = detail("toolu_o1");
+        assert!(ok.contains("output    2 lines, 36 characters"), "{ok}");
+        assert!(ok.contains("Synthetic output: 3 passed") && ok.contains("all green"));
+        assert!(!ok.contains("stderr") && !ok.contains("(o:"));
+        // An error, stderr, an interruption, a block that is not text.
+        assert!(detail("toolu_o2").contains("Error: synthetic failure, no such file"));
+        let warned = detail("toolu_o3");
+        assert!(warned.contains("stderr"), "{warned}");
+        assert!(warned.contains("synthetic warning: deprecated flag"));
+        assert!(warned.contains("second line of stderr"));
+        assert!(detail("toolu_o7").contains("interrupted"));
+        let shot = detail("toolu_o5");
+        assert!(shot.contains("Synthetic caption of a screenshot"), "{shot}");
+        assert!(shot.contains("and 1 block that is not text"));
+
+        // Over what is kept: the start, and how much there is.
+        let long = detail("toolu_o4");
+        assert!(
+            long.contains(
+                "output    201 lines, 6029 characters; the start is shown  (o: all of it)"
+            ),
+            "{long}"
+        );
+        assert!(long.contains("line 0001 of synthetic output"));
+        assert!(!long.contains("SYNTHETIC-TEXT"));
+    }
+
+    #[test]
+    fn o_reads_the_whole_output_and_shows_it_in_place_of_the_excerpt() {
+        let mut app = on_call("toolu_o4");
+        app.load_output();
+        let whole = app.whole.clone().unwrap();
+        assert_eq!(whole.call, "toolu_o4");
+        let text = whole.output.unwrap().unwrap().text;
+        assert!(text.ends_with("SYNTHETIC-TEXT past the limit"));
+        // The detail has it all: its last line is reached by scrolling.
+        app.focus_detail();
+        screen(&mut app, 150, 40, LATER);
+        app.move_last();
+        let end = screen(&mut app, 150, 40, LATER);
+        let detail = pane_text(&end, "┌ Tool call ");
+        assert!(detail.contains("line 0200 of synthetic output"), "{end}");
+        assert!(detail.contains("past the limit"));
+        app.move_first();
+        let top = screen(&mut app, 150, 60, LATER);
+        assert!(
+            top.contains("output    all of it: 201 lines, 6029 characters  (o: the excerpt)"),
+            "{top}"
+        );
+        // Again: the excerpt.
+        app.load_output();
+        assert_eq!(app.whole, None);
+        assert!(screen(&mut app, 150, 60, LATER).contains("the start is shown"));
+
+        // An output that was moved to a file is read from the file.
+        let mut app = on_call("toolu_o6");
+        let before = screen(&mut app, 150, 60, LATER);
+        assert!(before.contains("Synthetic preview of an output moved to a file"));
+        app.load_output();
+        let moved = screen(&mut app, 150, 60, LATER);
+        assert!(moved.contains("output    all of it: 400 lines"), "{moved}");
+        assert!(moved.contains("tool-results/toolu_o6.txt"));
+        assert!(moved.contains("whole line 0001 of the moved synthetic output"));
+        assert!(!moved.contains("Synthetic preview"));
+        // Another call's output replaces it: one is held at a time.
+        app.leave_detail();
+        app.move_by(1);
+        app.load_output();
+        assert_ne!(app.whole.as_ref().unwrap().call, "toolu_o6");
+
+        // Nothing to read where no call is shown.
+        app.go_to(Page::Usage);
+        app.whole = None;
+        app.load_output();
+        assert_eq!(app.whole, None);
+    }
+
+    #[test]
+    fn the_output_is_beside_a_subagents_call_and_a_traces_span_too() {
+        let mut app = fixture_app();
+        // A subagent's call, in the pane beside the subagent.
+        app.go_to(Page::Subagents);
+        let subagents = screen(&mut app, 150, 44, LATER);
+        assert!(
+            pane_text(&subagents, "┌ Tool call ").contains("Synthetic output of toolu_s1"),
+            "{subagents}"
+        );
+        app.focus_detail();
+        app.load_output();
+        assert_eq!(app.whole.as_ref().unwrap().call, "toolu_s1");
+        assert!(screen(&mut app, 150, 44, LATER).contains("output    all of it: 1 line"));
+
+        // A span of the trace, in the pane beside the list.
+        app.go_to(Page::Trace);
+        app.by_session = false;
+        app.move_by(1);
+        app.load_output();
+        assert_eq!(
+            app.whole.as_ref().unwrap().call,
+            "toolu_s1",
+            "no span is chosen yet"
+        );
+        app.enter();
+        app.move_by(1);
+        let span = screen(&mut app, 150, 44, LATER);
+        assert!(
+            pane_text(&span, "┌ Span ").contains("Synthetic output of toolu_01"),
+            "{span}"
+        );
+        // Its whole output was moved to a file.
+        app.load_output();
+        let whole = screen(&mut app, 150, 44, LATER);
+        assert!(
+            pane_text(&whole, "┌ Span ").contains("Synthetic whole output of toolu_01"),
+            "{whole}"
+        );
+        // An LLM request has no output to read.
+        app.move_by(-1);
+        app.load_output();
+        assert_eq!(app.whole.as_ref().unwrap().call, "toolu_01");
+    }
+
     #[test]
     fn times_are_a_date_and_time_or_how_long_ago() {
         let with = |ago_within: std::time::Duration| {
@@ -2932,6 +3204,7 @@ mod tests {
         assert!(screen.contains("Sessions / Tool calls / Subagents / Trace / Usage"));
         assert!(screen.contains("unfold or fold a subagent"));
         assert!(screen.contains("interactions by session, or latest first"));
+        assert!(screen.contains("a tool call's whole output"));
         assert!(screen.contains("the pane on the right, and back"));
     }
 

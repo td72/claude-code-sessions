@@ -16,10 +16,14 @@ Hard rules:
   write to Claude Code's directories and never send anything to Claude Code.
 - **The crates do not log what they read, and do not hoard it.** The
   transcripts are the user's own files, so a view may model the text it needs
-  (the last prompt, a subagent's description, later a tool call's command or
-  path). But no crate writes record contents to a log by itself — `Record`'s
-  `Debug` leaves the raw value out — and a `Session` keeps bounded recent
-  activity, never the full history.
+  (the last prompt, the first line of a prompt, a subagent's description, a
+  tool call's command or path, the start of what a tool call returned). But no
+  crate writes record contents to a log by itself — `Record`'s `Debug` leaves
+  the raw value out, and the `Debug` of a tool's output says how much there
+  is, not what — and a `Session` keeps bounded recent activity, never the full
+  history. The whole of a tool call's output is read again from the
+  transcript on demand (`output::read_tool_output`) and kept nowhere; a store
+  keeps even the excerpt only when it is asked to.
 - **The format is undocumented and changes with every Claude Code release.**
   Keep the raw record, treat unknown `type`s and keys as data for the drift
   survey, skip records that lack a needed key, and never fail a whole file on
@@ -35,7 +39,7 @@ Hard rules:
 ## Layout
 
 ```
-crates/iktinos/        core: record, discover, tail, session, pricing
+crates/iktinos/        core: record, discover, tail, session, trace, output, pricing
 crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
 crates/iktinos-tui/    the `iktinos` binary
 mods/iktinos-bridge/               the Claude Code mod (TS) that speaks the protocol

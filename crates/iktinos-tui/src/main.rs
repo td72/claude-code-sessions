@@ -163,6 +163,7 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Char('t') => app.toggle_by_session(),
         KeyCode::Char('T') => app.toggle_time(),
+        KeyCode::Char('o') => app.load_output(),
         KeyCode::Char('f') => app.cycle_filter(),
         _ => {}
     }
@@ -414,6 +415,12 @@ mod tests {
         assert_eq!(app.time, app::TimeStyle::Relative);
         press(&mut app, "T");
         assert_eq!(app.time, app::TimeStyle::Clock);
+
+        // `o` reads the whole output of the call shown, and drops it again.
+        press(&mut app, "2o");
+        assert!(app.whole.is_some());
+        press(&mut app, "o");
+        assert!(app.whole.is_none());
 
         // Help.
         press(&mut app, "1?");
