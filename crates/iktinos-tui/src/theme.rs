@@ -43,7 +43,8 @@ pub struct Theme {
     pub waiting: Color,
     /// What matters least: captions, what is absent or unknown.
     pub dim: Color,
-    /// A row a search matches, and the search being typed.
+    /// The word a search found, the mark beside a row whose match does
+    /// not show, and the search being typed.
     pub search: Color,
 }
 

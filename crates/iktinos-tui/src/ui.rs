@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use ratatui::buffer::Buffer;
+use unicode_width::UnicodeWidthStr;
+
 use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
 use iktinos::trace::{between, Interaction, Item, LlmRequest, SpanKind};
@@ -231,7 +234,11 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
             ));
         }
     }
-    if let Some(search) = app.search.as_ref().filter(|s| s.page == app.page) {
+    if let Some(search) = app
+        .search
+        .as_ref()
+        .filter(|s| s.page == app.page && !s.tree)
+    {
         title.push_str(&format!("  /{} ({matches})", search.query));
     }
     title
@@ -272,15 +279,6 @@ fn when_width(times: Times) -> u16 {
     }
 }
 
-/// The style of a row the search matches.
-fn row_style(matches: &[usize], index: usize) -> Style {
-    if matches.contains(&index) {
-        Style::new().fg(theme::current().search)
-    } else {
-        Style::new()
-    }
-}
-
 fn session_cell(session: &Session) -> Cell<'static> {
     Cell::from(
         app::label(session)
@@ -300,6 +298,7 @@ fn draw_list(
     index: usize,
     table: Table<'static>,
     selected: Option<usize>,
+    found: Found,
 ) {
     let table = table
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
@@ -309,6 +308,84 @@ fn draw_list(
         .with_selected(selected);
     frame.render_stateful_widget(table, area, &mut state);
     app.offsets[index] = state.offset();
+
+    // The rows a search matches. Where the word shows on the row, it is
+    // painted over whatever colour its cell has; where it does not (it is
+    // in a later line of a command, or cut off), the frame beside the row
+    // is marked. The rows start under the frame and the header, and end
+    // above the footer and the frame.
+    let first = area.y.saturating_add(2);
+    let end = area.bottom().saturating_sub(1 + found.footer);
+    let inside = area.x.saturating_add(1)..area.right().saturating_sub(1);
+    for at in found.matches.iter().filter(|at| **at >= state.offset()) {
+        let Ok(down) = u16::try_from(at - state.offset()) else {
+            continue;
+        };
+        let y = first.saturating_add(down);
+        if y >= end {
+            break;
+        }
+        mark_found(frame.buffer_mut(), area.x, inside.clone(), y, found.query);
+    }
+}
+
+/// Paints the cells of row `y` between `columns` that spell `query`
+/// (lower-cased; the match ignores case), or, where none does, marks the
+/// frame's cell at `frame_x`.
+fn mark_found(
+    buffer: &mut Buffer,
+    frame_x: u16,
+    columns: std::ops::Range<u16>,
+    y: u16,
+    query: &str,
+) {
+    let colour = theme::current().search;
+    // The row as text, and the column each of its characters starts at. A
+    // wide character takes two cells: the second holds nothing of its own.
+    let mut text = String::new();
+    let mut starts: Vec<(usize, u16)> = Vec::new();
+    let mut x = columns.start;
+    while x < columns.end {
+        let symbol = buffer[(x, y)].symbol();
+        starts.push((text.len(), x));
+        text.push_str(&symbol.to_lowercase());
+        x = x.saturating_add(symbol.width().max(1) as u16);
+    }
+    let mut seen = false;
+    if !query.is_empty() {
+        let word = Style::new()
+            .fg(colour)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        for (from, found) in text.match_indices(query) {
+            let to = from + found.len();
+            for (index, (at, x)) in starts.iter().enumerate() {
+                if *at < from || *at >= to {
+                    continue;
+                }
+                // To the next character's column: both cells of a wide one.
+                let next = starts.get(index + 1).map_or(columns.end, |(_, x)| *x);
+                for x in *x..next {
+                    buffer[(x, y)].set_style(word);
+                }
+                seen = true;
+            }
+        }
+    }
+    if !seen {
+        buffer[(frame_x, y)]
+            .set_symbol("▌")
+            .set_style(Style::new().fg(colour));
+    }
+}
+
+/// The rows of a list a search matches, and how many rows its table ends
+/// with that are not rows of the list.
+#[derive(Clone, Copy, Default)]
+struct Found<'a> {
+    matches: &'a [usize],
+    /// What was searched for, lower-cased.
+    query: &'a str,
+    footer: u16,
 }
 
 fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
@@ -317,8 +394,7 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         .order
         .iter()
         .filter_map(|id| app.store.get(id))
-        .enumerate()
-        .map(|(index, session)| {
+        .map(|session| {
             let status = app.status(session, now);
             let updated = app::latest(session).map_or("—".to_owned(), |at| format::ago(now, at));
             // The session the other pages are narrowed to.
@@ -338,7 +414,6 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
                 ),
                 Cell::from(Line::from(format::cost(&session.cost)).right_aligned()),
             ])
-            .style(row_style(&matches, index))
         })
         .collect();
     let title = list_title(
@@ -386,7 +461,13 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
     .footer(totals_row(&app.totals(now)))
     .block(pane_block(title, !app.in_detail));
     let selected = (!app.order.is_empty()).then_some(app.selected);
-    draw_list(frame, area, app, 0, table, selected);
+    let query = app.list_query();
+    let found = Found {
+        matches: &matches,
+        query: &query,
+        footer: 1,
+    };
+    draw_list(frame, area, app, 0, table, selected, found);
 }
 
 fn outcome(call: &ToolCall) -> (&'static str, Style) {
@@ -406,8 +487,7 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
     let count = calls.len();
     let rows: Vec<Row<'static>> = calls
         .iter()
-        .enumerate()
-        .map(|(index, (session, call))| {
+        .map(|(session, call)| {
             let (mark, style) = outcome(call);
             let name = format!(
                 "{}{}",
@@ -431,7 +511,7 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
                 .style(took_style(app.config.slow, call.duration_ms)),
                 Cell::from(mark).style(style),
             ]);
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
     // What the call was about gets every column the others can spare.
@@ -453,7 +533,13 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.tool_selected);
-    draw_list(frame, area, app, 1, table, selected);
+    let query = app.list_query();
+    let found = Found {
+        matches: &matches,
+        query: &query,
+        footer: 0,
+    };
+    draw_list(frame, area, app, 1, table, selected, found);
 }
 
 /// A status in the one word a narrow column has room for: `running` for
@@ -514,8 +600,7 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
     let count = subagents.len();
     let rows: Vec<Row<'static>> = subagents
         .iter()
-        .enumerate()
-        .map(|(index, (session, subagent))| {
+        .map(|(session, subagent)| {
             let done = match subagent.finished {
                 Some(true) => Span::styled("done", done()),
                 _ => Span::styled("running", running()),
@@ -559,7 +644,7 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
                 ),
                 Cell::from(done),
             ]);
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
     // The task gets every column the others can spare.
@@ -583,7 +668,13 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.subagent_selected);
-    draw_list(frame, area, app, 2, table, selected);
+    let query = app.list_query();
+    let found = Found {
+        matches: &matches,
+        query: &query,
+        footer: 0,
+    };
+    draw_list(frame, area, app, 2, table, selected, found);
 }
 
 /// Whether an interaction is still going: it has no end, it is its session's latest
@@ -704,8 +795,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
     let count = listed.len();
     let rows: Vec<Row<'static>> = listed
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
+        .map(|row| {
             let session = row.session;
             let Some(InteractionRow {
                 interaction, end, ..
@@ -736,8 +826,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     number(session.trace.iter().map(|i| counts(i).1).sum()),
                     Cell::from(""),
                     Cell::from(status_word(&status)).style(style_of(status.kind)),
-                ])
-                .style(row_style(&matches, index));
+                ]);
             };
             let end = if interaction_runs(app, session, interaction, now) {
                 Some(now)
@@ -789,7 +878,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 .style(took_style(app.config.slow, took)),
                 Cell::from(state).style(style),
             ]);
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
     let mut widths = vec![Constraint::Length(when_width(time))];
@@ -828,7 +917,21 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.trace_selected);
-    draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
+    let query = app.list_query();
+    let found = Found {
+        matches: &matches,
+        query: &query,
+        footer: 0,
+    };
+    draw_list(
+        frame,
+        area,
+        app,
+        Page::Trace.list_index(),
+        table,
+        selected,
+        found,
+    );
 }
 
 /// The pane beside the interactions: the interaction or the session under the cursor, or,
@@ -1066,12 +1169,16 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         })
         .collect();
 
-    let title = match app.selected_interaction() {
+    let found = app.tree_matches();
+    let mut title = match app.selected_interaction() {
         Some(InteractionRow { interaction, .. }) => {
             format!("Interaction: {}", interaction_summary(interaction))
         }
         None => "Interaction".to_owned(),
     };
+    if let Some(search) = app.tree_search() {
+        title.push_str(&format!("  /{} ({})", search.query, found.len()));
+    }
     let block = pane_block(title, app.choosing_span());
     if count == 0 {
         let text = if app.selected_interaction().is_some() {
@@ -1100,7 +1207,16 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         .block(block);
     // The cursor shows once the tree has been entered.
     let selected = app.in_tree().then_some(app.span_selected.min(count - 1));
-    draw_list(frame, area, app, TREE, table, selected);
+    let query = app
+        .tree_search()
+        .map(|search| search.query.clone())
+        .unwrap_or_default();
+    let found = Found {
+        matches: &found,
+        query: &query,
+        footer: 0,
+    };
+    draw_list(frame, area, app, TREE, table, selected, found);
 }
 
 /// The detail of a row of the interaction's tree.
@@ -2245,7 +2361,7 @@ const HELP: &[(&str, &str)] = &[
         "Esc (list)",
         "clear the search, then the narrowing, step by step",
     ),
-    ("/", "search the list"),
+    ("/", "search the list; in an interaction's tree, the tree"),
     ("n / N", "next / previous match"),
     (
         "t",
@@ -3547,10 +3663,261 @@ mod tests {
         // Esc clears the search first.
         app.back();
         assert_eq!(app.search, None);
-        // There is no searching from inside the detail pane.
+        // From the detail pane, `/` is the list's search: the focus goes
+        // back to the list.
         app.focus_detail();
+        assert!(app.in_detail);
         app.start_search();
-        assert_eq!(app.typing, None);
+        assert_eq!(app.typing.as_deref(), Some(""));
+        assert!(!app.in_detail);
+    }
+
+    /// The row of the screen that shows `needle`: the text of its cells
+    /// that are drawn as a found word (reversed and bold), and what the
+    /// frame's cell at its left shows.
+    fn found_on(app: &mut App, needle: &str, now: &str) -> (String, String) {
+        let now = Timestamp::parse(now).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        terminal.draw(|frame| draw(frame, app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..44u16 {
+            let text: String = (0..150u16).map(|x| buffer[(x, y)].symbol()).collect();
+            if let Some(at) = text.find(needle) {
+                // The pane the row is in starts at the frame left of it.
+                let at = text[..at].chars().count() as u16;
+                let frame = (0..=at)
+                    .rev()
+                    .find(|x| ["│", "▌"].contains(&buffer[(*x, y)].symbol()))
+                    .unwrap();
+                let word = Modifier::REVERSED | Modifier::BOLD;
+                let found: String = (frame + 1..150)
+                    .take_while(|x| buffer[(*x, y)].symbol() != "│")
+                    .filter(|x| buffer[(*x, y)].modifier.contains(word))
+                    .inspect(|x| assert_eq!(buffer[(*x, y)].fg, Color::Yellow))
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                return (found, buffer[(frame, y)].symbol().to_owned());
+            }
+        }
+        panic!("no {needle} on the screen");
+    }
+
+    #[test]
+    fn the_word_a_search_found_is_what_stands_out_on_its_row() {
+        let mut app = fixture_app();
+        app.typing = Some("SESSION title".to_owned());
+        app.submit_search();
+        // The cursor is on the match: move it off, so that the row is not
+        // reversed as a whole.
+        app.move_first();
+        // The word, as the row spells it; the rest of the row is as it was.
+        assert_eq!(
+            found_on(&mut app, "Synthetic session title", SOON),
+            ("session title".to_owned(), "│".to_owned())
+        );
+        // A row that does not match, the totals and the header: nothing.
+        for other in ["other.repo", "1 matching of 3 sessions", "repository"] {
+            assert_eq!(found_on(&mut app, other, SOON).0, "", "{other}");
+        }
+
+        // Every place the word shows on the row.
+        app.search = None;
+        app.typing = Some("example".to_owned());
+        app.submit_search();
+        app.move_last();
+        let (found, _) = found_on(&mut app, "Synthetic title after the damage", SOON);
+        assert_eq!(found, "example");
+
+        // The other lists.
+        app.go_to(Page::Tools);
+        app.typing = Some("cargo".to_owned());
+        app.submit_search();
+        app.move_last();
+        assert_eq!(
+            found_on(&mut app, "cargo test --workspace", SOON).0,
+            "cargo"
+        );
+    }
+
+    #[test]
+    fn a_match_that_does_not_show_on_its_row_marks_the_frame_beside_it() {
+        use crate::app::tests::{append_call, scratch_projects};
+        let projects = scratch_projects("search-hidden");
+        // The row of a command of several lines shows the first.
+        append_call(
+            &projects,
+            "toolu_hidden",
+            5,
+            "Bash",
+            r#"{"command":"cd /work/other.repo\nmake synthetic-target"}"#,
+        );
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            ..crate::app::tests::fixture_config()
+        });
+        app.go_to(Page::Tools);
+        app.typing = Some("synthetic-target".to_owned());
+        app.submit_search();
+        assert_eq!(
+            found_on(&mut app, "cd /work/other.repo", LATER),
+            (String::new(), "▌".to_owned())
+        );
+        // The rows that do not match have the frame as it is.
+        assert_eq!(found_on(&mut app, "cargo test --workspace", LATER).1, "│");
+
+        // A word that is cut off at the edge of its column.
+        app.search = None;
+        app.go_to(Page::Sessions);
+        app.typing = Some("after the damage".to_owned());
+        app.submit_search();
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        let now = Timestamp::parse(LATER).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let marked = (0..30u16)
+            .filter(|y| buffer[(0, *y)].symbol() == "▌")
+            .count();
+        assert_eq!(marked, 1);
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn a_search_finds_what_the_rows_stand_for() {
+        use crate::app::tests::{append_call, scratch_projects};
+        let projects = scratch_projects("search");
+        // A command of several lines: the row shows the first.
+        append_call(
+            &projects,
+            "toolu_search",
+            5,
+            "Bash",
+            r#"{"command":"cd /work/other.repo\nmake synthetic-target"}"#,
+        );
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            ..crate::app::tests::fixture_config()
+        });
+        let search = |app: &mut App, page: Page, query: &str| {
+            app.go_to(page);
+            app.search = None;
+            app.typing = Some(query.to_owned());
+            app.submit_search();
+            app.matches(page, Timestamp::parse(LATER).unwrap())
+        };
+
+        // A tool call: by a later line of its command.
+        assert_eq!(search(&mut app, Page::Tools, "synthetic-target").len(), 1);
+        assert_eq!(app.selected_tool().unwrap().1.id, "toolu_search");
+
+        // The trace by session: a session's name finds the session, not
+        // every interaction under it.
+        assert!(app.by_session);
+        let named = search(&mut app, Page::Trace, "22222222");
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert!(app.selected_list_row().unwrap().interaction.is_none());
+        // A row is found by what it shows. What an interaction called and
+        // what was answered are not on its row, nor is the word
+        // "interaction".
+        for hidden in ["synthetic answer", "synthetic-target", "interaction"] {
+            assert!(search(&mut app, Page::Trace, hidden).is_empty(), "{hidden}");
+        }
+
+        // A folded session is unfolded by a search: what it holds is
+        // found.
+        app.search = None;
+        app.move_first();
+        while app.selected_list_row().unwrap().interaction.is_some()
+            || app.selected_list_row().unwrap().session.id != WITH_SUBAGENTS
+        {
+            app.move_by(1);
+        }
+        app.enter();
+        assert_eq!(app.closed_sessions.len(), 1);
+        let asked = search(&mut app, Page::Trace, "run the checks");
+        assert!(app.closed_sessions.is_empty());
+        assert!(asked
+            .iter()
+            .any(|at| app.trace_list()[*at].session.id == WITH_SUBAGENTS));
+
+        // All together, the session is on the row and finds it.
+        app.toggle_by_session();
+        let flat = search(&mut app, Page::Trace, "22222222");
+        assert!(!flat.is_empty());
+        assert!(flat
+            .iter()
+            .all(|at| app.trace_list()[*at].session.id == WITH_SUBAGENTS));
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn a_search_from_the_tree_is_of_the_tree() {
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        app.enter();
+        app.go_to(Page::Trace);
+        app.by_session = false;
+        app.enter();
+        assert!(app.choosing_span());
+
+        // `/` with the focus on the tree searches its rows, and the focus
+        // stays there.
+        app.start_search();
+        assert!(app.in_detail && app.typing.is_some());
+        app.typing = Some("LOOKUP".to_owned());
+        app.submit_search();
+        assert!(app.choosing_span());
+        let found = app.tree_matches();
+        assert_eq!(found.len(), 1);
+        assert_eq!(app.span_selected, found[0]);
+        // The list above has no match of its own.
+        assert!(app
+            .matches(Page::Trace, Timestamp::parse(SOON).unwrap())
+            .is_empty());
+
+        let shown = screen(&mut app, 150, 44, SOON);
+        assert!(
+            shown.contains("┌ Interaction: 3 LLM requests, 3 tool calls  /lookup (1)"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("Trace (1 interaction · latest first) of 22222222  /"),
+            "{shown}"
+        );
+        // The word stands out on its row, in both places it shows.
+        app.move_by(-1);
+        assert_eq!(
+            found_on(&mut app, "example/lookup  synthetic lookup", SOON).0,
+            "lookuplookup"
+        );
+        app.move_by(1);
+
+        // What a folded subagent did is found: the search unfolds it.
+        app.typing = Some("synthetic pattern".to_owned());
+        app.submit_search();
+        let found = app.tree_matches();
+        // Both subagents searched for it; neither was unfolded before.
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&app.span_selected));
+        assert!(app.selected_span().unwrap().depth > 0);
+
+        // What a response said, and `n` / `N` between the matches.
+        app.typing = Some("cargo".to_owned());
+        app.submit_search();
+        let found = app.tree_matches();
+        assert!(!found.is_empty());
+        let first = app.span_selected;
+        app.next_match(1);
+        app.next_match(-1);
+        assert_eq!(app.span_selected, first);
+
+        // Esc clears the tree's search first, then leaves the tree.
+        app.back();
+        assert_eq!(app.search, None);
+        assert!(app.choosing_span());
+        app.back();
+        assert!(!app.in_detail);
     }
 
     #[test]
