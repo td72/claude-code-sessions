@@ -10,7 +10,7 @@ subagents it has called. It is a library first (`iktinos-core`);
 [vig](https://github.com/td72/vig) renders it as a page, and the `iktinos`
 command is a terminal viewer over it.
 
-![demo](assets/demo.gif)
+![demo](https://raw.githubusercontent.com/td72/iktinos/main/assets/demo.gif)
 
 (Recorded from invented sessions: see `tape/`.)
 
@@ -114,7 +114,7 @@ Each list page is a list over a detail pane, in fixed proportions:
   session's row the pane beside the list describes the session, and there
   is no tree.
 
-  ![trace demo](assets/demo-trace.gif)
+  ![trace demo](https://raw.githubusercontent.com/td72/iktinos/main/assets/demo-trace.gif)
 
 - **2:Sessions** — every session: title, repository, branch, state, last
   update, tokens, cost, and under them a row with what the sessions listed
@@ -126,13 +126,13 @@ Each list page is a list over a detail pane, in fixed proportions:
   of it, a shell command in colour, and under it the start of what the call
   returned (`o` reads all of it).
 
-  ![tool calls demo](assets/demo-tools.gif)
+  ![tool calls demo](https://raw.githubusercontent.com/td72/iktinos/main/assets/demo-tools.gif)
 
 - **4:Subagents** — subagents with their type, task, model, tokens and cost;
   the detail is two panes, the subagent with its own tool calls and, beside
   it, the call chosen there with its whole command.
 
-  ![subagents demo](assets/demo-subagents.gif)
+  ![subagents demo](https://raw.githubusercontent.com/td72/iktinos/main/assets/demo-subagents.gif)
 
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
@@ -299,7 +299,7 @@ Both feed a `SessionStore` incrementally. Snapshot fields are last-write-wins by
 timestamp; accumulated fields are folded once from the transcript offsets. No
 field is written by both inputs, so arrival order never changes the result.
 
-![live demo](assets/demo-live.gif)
+![live demo](https://raw.githubusercontent.com/td72/iktinos/main/assets/demo-live.gif)
 
 In the viewer, what only the events can say: the tool that runs now, and a
 permission that is waited for.
