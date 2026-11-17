@@ -36,6 +36,12 @@ Hard rules:
 - **Two inputs, one state.** Transcripts own existence, tokens, cost and
   history. Live events own freshness (running tool, waiting for input, context
   fill, rate limits). No field is written by both.
+- **serve is local, read-only, and returns modelled shapes only.** It
+  listens on `127.0.0.1` and has no option to listen elsewhere; it answers
+  only its own `Host`, only `GET`, and only with the cookie its token was
+  exchanged for. Its JSON is built from the model, never from a raw record.
+  What reads a file again takes ids, never a path. Keep every one of these
+  when adding to it.
 - **No async runtime.** Threads and `mpsc`, like vig. No tokio, no hyper; the
   socket server parses its minimal HTTP/1.1 itself.
 - **Fixtures are synthetic.** Nothing under `tests/fixtures/` may come from a
@@ -47,6 +53,7 @@ Hard rules:
 crates/iktinos-core/   the library: record, discover, tail, session, follow, trace, output, place, pricing
 crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
 crates/iktinos-tui/    the terminal viewer, as a library
+crates/iktinos-web/    the page and the local server behind `iktinos serve`, as a library
 crates/iktinos/        the `iktinos` command: the way in, and nothing else
 mods/iktinos-bridge/               the Claude Code mod (TS) that speaks the protocol
 tests/fixtures/<claude code version>/   synthetic transcripts and event samples
@@ -54,7 +61,7 @@ tape/, assets/                     demo tapes (recorded in a container) and thei
 ```
 
 Crates are versioned independently (core stays stable while live follows the
-mod API). Publish order: core → live → tui → iktinos.
+mod API). Publish order: core → live → tui → web → iktinos.
 
 The crate named after the project is the command, so that
 `cargo install iktinos` installs it. What the command does belongs in the
@@ -64,7 +71,8 @@ crate it starts (`iktinos-tui`, later others behind subcommands), never in
 ## Build & Test
 
 ```bash
-cargo build --workspace
+mise run web:build       # the page of `iktinos serve`, into web/dist (needs Node, from mise)
+cargo build --workspace  # embeds web/dist if it is there, a placeholder if not
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
@@ -85,7 +93,7 @@ One crate per release pull request, from a branch named
 `release/<crate>-<version>` (for example `release/iktinos-core-0.3.1`)
 that sets the crate's `version`. Merging it runs `release.yml`: publish to
 crates.io through Trusted Publishing, then the tag and GitHub release
-`<crate>-v<version>`. Several crates: core → live → tui → iktinos, each in its own pull
+`<crate>-v<version>`. Several crates: core → live → tui → web → iktinos, each in its own pull
 request, each merged after the previous one is on crates.io.
 
 A crate's first version cannot use Trusted Publishing (the crate must exist to

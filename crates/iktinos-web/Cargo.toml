@@ -1,0 +1,31 @@
+[package]
+name = "iktinos-web"
+version = "0.1.0"
+description = "The Claude Code sessions on this machine in a browser: the page and the local server behind `iktinos serve`, as a library"
+readme = "../../README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "development-tools"]
+# The page built in `web/` is packaged though git does not track it; its
+# sources and the integration tests (which read the workspace fixtures) are
+# not.
+include = ["Cargo.toml", "build.rs", "src/**", "assets/**", "web/dist/**"]
+
+[dependencies]
+getrandom = "0.3"
+iktinos-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+iktinos-live.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

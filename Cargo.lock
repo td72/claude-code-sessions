@@ -603,6 +603,7 @@ name = "iktinos"
 version = "0.3.0"
 dependencies = [
  "iktinos-tui",
+ "iktinos-web",
 ]
 
 [[package]]
@@ -637,6 +638,17 @@ dependencies = [
  "syntect",
  "toml",
  "unicode-width",
+]
+
+[[package]]
+name = "iktinos-web"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "iktinos-core",
+ "iktinos-live",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

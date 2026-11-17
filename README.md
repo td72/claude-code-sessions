@@ -57,7 +57,8 @@ know yet.
 | [`iktinos-core`](crates/iktinos-core) | the library: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`, and what is derived from a session: its status, its name, where it runs), `follow` (the loop that keeps a store current), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the terminal viewer, as a library |
-| [`iktinos`](crates/iktinos) | the `iktinos` command: the way in. Without a subcommand it starts the viewer |
+| [`iktinos-web`](crates/iktinos-web) | the sessions in a browser, as a library: the page, and the local server `iktinos serve` starts |
+| [`iktinos`](crates/iktinos) | the `iktinos` command: the way in. Without a subcommand it starts the viewer; `iktinos serve` starts the server |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
 
 ## The viewer
@@ -171,6 +172,67 @@ turned away: the signs of a mod and a viewer that do not match.
 
 A cost shown as `~$1.23` contains
 an estimate; `$1.23` is Claude Code's own figure.
+
+## In a browser
+
+```bash
+iktinos serve                 # prints the URL to open
+iktinos serve --port 8080 --cwd
+```
+
+`iktinos serve` shows the sessions in a browser **on the same machine**. It
+is one more consumer of the model, like the viewer; what it adds is a way
+out, and that is kept narrow:
+
+- **Local only.** It listens on `127.0.0.1`, and no option makes it listen
+  anywhere else. A request whose `Host` is not the server's own address is
+  refused, so a page elsewhere cannot reach it under a name that resolves to
+  this machine.
+- **A token.** The URL it prints carries one, new on every run. The first
+  visit exchanges it for a cookie (`HttpOnly`, `SameSite=Strict`) and is
+  redirected to the same address without it, which keeps the token out of the
+  address bar and the history. Without the cookie nothing is answered.
+- **Read-only.** `GET` and nothing else. What reads a file again (the whole
+  output of a tool call) is asked for by a session id and a call id; the
+  path is the server's to find, and nothing in an address is ever part of
+  one.
+- **Modelled shapes only.** The JSON is built from the model, never from a
+  raw record, and the page may load and run only what the server itself
+  serves (a Content-Security-Policy without inline scripts and without
+  connections elsewhere).
+
+The port is 4747 unless `--port` names another (`0` picks a free one); a port
+in use is an error. `--projects-dir`, `--socket-dir`, `--no-live` and `--cwd`
+mean what they mean for the viewer.
+
+The page shows the sessions on the left and, for the one chosen, its latest
+interactions on the right: each a tree with a bar per row on a time axis, and
+the row chosen in full below it (a command and what it returned, a request's
+tokens and what its response said, read whole on demand). The session that is
+shown is also copied to the top of the list, where it stays while the others
+move. So far the page has the sessions and the trace; a session's detail,
+the tool calls, the subagents and the usage are to come.
+
+The page is drawn from JSON the server returns (`/api/sessions`,
+`/api/sessions/<id>`, `/api/sessions/<id>/trace`, a call's whole output, a
+response's whole text) and reads it again when the server says something
+changed (server-sent events, `/api/events`).
+
+### Building the page
+
+The page (`crates/iktinos-web/web`) is built with Vite+, TypeScript and
+React. Node comes from mise and Vite+ from the page's own `package.json`,
+through npm:
+
+```bash
+mise run web:build    # type-check and build into web/dist
+mise run web:check    # format, lint and type-check
+mise run serve        # build the page, then run `iktinos serve`
+```
+
+`cargo build` embeds `web/dist` in the binary if it is there, and a
+placeholder page if it is not: cargo never runs npm, and a checkout without
+Node still builds. The crate published to crates.io holds the built page.
 
 ## Configuration
 

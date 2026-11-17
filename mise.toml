@@ -1,4 +1,5 @@
 [tools]
+node = "26"
 prek = "latest"
 
 # The demo GIFs are recorded in a container (tape/record.sh), never on this
@@ -27,3 +28,37 @@ description = "Record the live events demo GIF"
 [tasks."demo:all"]
 depends = ["demo", "demo:trace", "demo:tools", "demo:subagents", "demo:live"]
 description = "Record all demo GIFs"
+
+# The page of `iktinos serve` (crates/iktinos-web/web) is built with Vite+.
+# Node comes from mise and Vite+ from the page's own package.json, through
+# npm: no globally installed `vp` is used, so everyone builds with the same
+# versions. What is built, `web/dist`, is embedded in the binary by the
+# crate's build script; cargo itself never runs npm.
+
+[tasks."web:install"]
+dir = "{{config_root}}/crates/iktinos-web/web"
+run = "npm ci"
+description = "Install the dependencies of the page of `iktinos serve`, as the lockfile has them"
+
+[tasks."web:build"]
+depends = ["web:install"]
+dir = "{{config_root}}/crates/iktinos-web/web"
+run = "npm run build"
+description = "Type-check and build the page of `iktinos serve` into web/dist"
+
+[tasks."web:check"]
+depends = ["web:install"]
+dir = "{{config_root}}/crates/iktinos-web/web"
+run = "npm run check"
+description = "Format, lint and type-check the page of `iktinos serve`"
+
+[tasks."web:fmt"]
+depends = ["web:install"]
+dir = "{{config_root}}/crates/iktinos-web/web"
+run = "npm run fmt"
+description = "Format the sources of the page of `iktinos serve`"
+
+[tasks.serve]
+depends = ["web:build"]
+run = "cargo run -p iktinos -- serve"
+description = "Build the page, then run `iktinos serve` on this machine's sessions"
