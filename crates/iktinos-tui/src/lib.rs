@@ -34,6 +34,7 @@ const USAGE: &str = "\
 A small viewer for the Claude Code sessions on this machine.
 
 Usage: iktinos [OPTIONS]
+       iktinos serve [OPTIONS]   The same in a browser: see `iktinos serve --help`
 
 Options:
       --projects-dir <DIR>  Read transcripts from DIR instead of ~/.claude/projects

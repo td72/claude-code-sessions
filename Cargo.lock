@@ -602,6 +602,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 name = "iktinos"
 version = "0.3.0"
 dependencies = [
+ "iktinos-serve",
  "iktinos-tui",
 ]
 
@@ -623,6 +624,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "iktinos-serve"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "iktinos-core",
+ "iktinos-live",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>iktinos</title>
+  </head>
+  <body>
+    <h1>iktinos</h1>
+    <p>The server is running. The page that shows the sessions is not built into this version yet.</p>
+    <p>What it will be drawn from is already served, as JSON:</p>
+    <ul>
+      <li><a href="/api/sessions">/api/sessions</a>: every session, the latest first</li>
+      <li><code>/api/sessions/&lt;id&gt;</code>: one session, with its usage, its recent tool calls and its subagents</li>
+      <li><code>/api/sessions/&lt;id&gt;/trace</code>: its latest interactions, each as a tree</li>
+      <li><code>/api/sessions/&lt;id&gt;/calls/&lt;call id&gt;/output</code>: the whole output of one tool call</li>
+      <li><code>/api/sessions/&lt;id&gt;/responses/&lt;message id&gt;</code>: the whole text of one response</li>
+      <li><code>/api/events</code>: server-sent events, one each time something changed</li>
+    </ul>
+  </body>
+</html>

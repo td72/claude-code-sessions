@@ -12,6 +12,7 @@ keywords.workspace = true
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+iktinos-serve.workspace = true
 iktinos-tui.workspace = true
 
 [lints]
