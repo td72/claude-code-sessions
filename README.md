@@ -82,22 +82,11 @@ repository the viewer reads the repository's `.git` (a directory, or a
 worktree's file and the `commondir` it leads to); it starts no `git` and
 writes nothing.
 
-Four pages, in the shape and with the keys of [vig](https://github.com/td72/vig).
+Five pages, in the shape and with the keys of [vig](https://github.com/td72/vig).
+The viewer starts on the first.
 Each list page is a list over a detail pane, in fixed proportions:
 
-- **1:Sessions** — every session: title, repository, branch, state, last
-  update, tokens, cost, and under them a row with what the sessions listed
-  add up to (those a search matches, where there is one). The detail pane
-  shows the selected session's context, its tokens and cost by model and by
-  source, and its rate limits.
-- **2:Tool calls** — recent tool calls, the latest first: what ran, how long
-  it took, how it ended. The detail pane shows the whole command, every line
-  of it, a shell command in colour, and under it the start of what the call
-  returned (`o` reads all of it).
-- **3:Subagents** — subagents with their type, task, model, tokens and cost;
-  the detail is two panes, the subagent with its own tool calls and, beside
-  it, the call chosen there with its whole command.
-- **4:Trace** — three panes. The latest interactions (a prompt and
+- **1:Trace** — three panes. The latest interactions (a prompt and
   everything done to answer it), the latest first; under them the
   interaction under the cursor as a tree: its LLM requests and tool calls,
   the subagents the calls spawned and what they did, each with a bar on a
@@ -116,19 +105,31 @@ Each list page is a list over a detail pane, in fixed proportions:
   or, where the prompt is not known, the tools that were used. On a
   session's row the pane beside the list describes the session, and there
   is no tree.
+- **2:Sessions** — every session: title, repository, branch, state, last
+  update, tokens, cost, and under them a row with what the sessions listed
+  add up to (those a search matches, where there is one). The detail pane
+  shows the selected session's context, its tokens and cost by model and by
+  source, and its rate limits.
+- **3:Tool calls** — recent tool calls, the latest first: what ran, how long
+  it took, how it ended. The detail pane shows the whole command, every line
+  of it, a shell command in colour, and under it the start of what the call
+  returned (`o` reads all of it).
+- **4:Subagents** — subagents with their type, task, model, tokens and cost;
+  the detail is two panes, the subagent with its own tool calls and, beside
+  it, the call chosen there with its whole command.
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
-Pages 2, 3 and 4 cover every session until `Enter` is pressed on one in the
-Sessions page; then they are narrowed to it. `Enter` on a subagent narrows the
+The Trace, Tool calls and Subagents pages cover every session until `Enter`
+is pressed on one in the Sessions page; then they are narrowed to it. `Enter` on a subagent narrows the
 Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 
 | key | |
 | --- | --- |
 | `1` – `5` | switch page |
 | `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the list (or scroll the detail pane) |
-| `Enter` on a session | narrow pages 2, 3 and 4 to it and show its tool calls |
-| `Enter` on a subagent | narrow page 2 to it and show its tool calls |
+| `Enter` on a session | narrow the Trace, Tool calls and Subagents pages to it and show its tool calls |
+| `Enter` on a subagent | narrow the Tool calls page to it and show its tool calls |
 | `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
 | `j` / `k` in a subagent's detail, or in an interaction's tree; then `i` / `Enter` | choose a tool call, or a span; into the pane that shows it |
 | `t` in the trace | list the interactions all together, the latest first, or under their sessions again |

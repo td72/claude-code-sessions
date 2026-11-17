@@ -388,7 +388,7 @@ mod tests {
         // Enter on any other list is the detail pane.
         press(&mut app, "\n");
         assert!(app.in_detail);
-        press(&mut app, "\x1b3");
+        press(&mut app, "\x1b4");
         assert_eq!((app.page, app.in_detail), (Page::Subagents, false));
         assert!(app.scope.is_some(), "the narrowing holds across pages");
         // Esc on a list clears it.
@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(app.scope, None);
 
         // Search: typed keys are text until Enter.
-        press(&mut app, "1/sq1\n");
+        press(&mut app, "2/sq1\n");
         assert_eq!(app.search.as_ref().unwrap().query, "sq1");
         assert_eq!(
             app.page,
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(app.sort, app::Sort::Cost);
         press(&mut app, "f");
         assert_eq!(app.filter, app::Filter::Live);
-        press(&mut app, "ff2sf");
+        press(&mut app, "ff3sf");
         assert_eq!(
             (app.page, app.sort, app.filter),
             (Page::Tools, app::Sort::Cost, app::Filter::All)
@@ -424,7 +424,7 @@ mod tests {
         // The Trace page: `l` and `h` are the pane on the right and back,
         // `t` the list by session, Enter a fold.
         app.by_session = false;
-        press(&mut app, "4l");
+        press(&mut app, "1l");
         assert!(app.in_call() && app.from_list);
         press(&mut app, "h");
         assert!(!app.in_detail);
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(app.time, app::TimeStyle::Clock);
 
         // `o` reads the whole output of the call shown, and drops it again.
-        press(&mut app, "2o");
+        press(&mut app, "3o");
         assert!(app.whole.is_some());
         press(&mut app, "o");
         assert!(app.whole.is_none());
