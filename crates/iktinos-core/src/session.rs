@@ -39,7 +39,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -340,6 +340,86 @@ impl Session {
             Activity::Active { quiet }
         } else {
             Activity::Idle
+        }
+    }
+
+    /// The name to show for the session: its title, else its last prompt,
+    /// else the start of its id.
+    pub fn label(&self) -> &str {
+        self.title
+            .as_deref()
+            .or(self.last_prompt.as_deref())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| self.id.get(..8).unwrap_or(&self.id))
+    }
+
+    /// Where the session runs: its project, else the directory of its
+    /// latest record, else what its live start reported.
+    pub fn location(&self) -> Option<&Path> {
+        let live_cwd = self.live.as_ref().and_then(|live| live.cwd.as_ref());
+        self.project_path
+            .as_ref()
+            .or(self.cwd.as_ref())
+            .or(live_cwd)
+            .map(PathBuf::as_path)
+    }
+
+    /// The last component of [`location`](Self::location): what a list
+    /// names the session's repository by.
+    pub fn location_name(&self) -> Option<String> {
+        self.location()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    /// When the session was last heard of: its latest record, or its latest
+    /// live event if that is later.
+    pub fn last_seen(&self) -> Option<Timestamp> {
+        let live = self
+            .live
+            .as_ref()
+            .and_then(|live| live.state_at.max(live.measured_at));
+        self.last_activity.max(live)
+    }
+
+    /// What the session is doing at `now`: from live events when they say,
+    /// from the transcript otherwise, where a record newer than
+    /// `active_within` makes it active.
+    pub fn status(&self, now: Timestamp, active_within: Duration) -> Status {
+        let status = |kind, text: &str| Status {
+            kind,
+            text: text.to_owned(),
+        };
+        // A transcript that ends with the exit bookkeeping outranks older
+        // events: the mod's `session.end` may never have been delivered.
+        let live = self
+            .live
+            .as_ref()
+            .filter(|live| !(self.exited && live.state_at <= self.last_activity));
+        if let Some(live) = live {
+            match live.state() {
+                LiveState::Ended => return status(StatusKind::Exited, "exited"),
+                LiveState::AwaitingApproval(pending) => {
+                    return Status {
+                        kind: StatusKind::NeedsApproval,
+                        text: format!("approve {}?", pending.name),
+                    }
+                }
+                LiveState::RunningTool(tool) => {
+                    return Status {
+                        kind: StatusKind::Busy,
+                        text: format!("running {}", tool.name),
+                    }
+                }
+                LiveState::Working => return status(StatusKind::Busy, "working"),
+                LiveState::WaitingForInput => return status(StatusKind::Waiting, "waiting"),
+                LiveState::Unknown => {}
+            }
+        }
+        match self.activity(now, active_within) {
+            Activity::Active { .. } => status(StatusKind::Busy, "active"),
+            Activity::Idle => status(StatusKind::Idle, "idle"),
+            Activity::Exited => status(StatusKind::Exited, "exited"),
         }
     }
 
@@ -662,6 +742,29 @@ pub struct RateLimit {
     pub percent_used: f64,
     /// When it resets, as an RFC 3339 timestamp.
     pub resets_at: Option<String>,
+}
+
+/// One line of what a session is doing, and how much attention it wants
+/// ([`Session::status`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    pub kind: StatusKind,
+    /// In words: `approve Write?`, `running Bash`, `working`, `idle`, …
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// Working: an interaction in progress, a tool running, or a fresh record.
+    Busy,
+    /// Blocked on a person: a permission prompt.
+    NeedsApproval,
+    /// At the prompt, waiting for its user.
+    Waiting,
+    /// Nothing recent.
+    Idle,
+    /// The process exited.
+    Exited,
 }
 
 /// One tool call.

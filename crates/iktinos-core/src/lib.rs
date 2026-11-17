@@ -26,47 +26,36 @@
 //! # Example
 //!
 //! ```no_run
-//! use iktinos_core::discover::{default_projects_dir, discover};
-//! use iktinos_core::record::Record;
+//! use iktinos_core::discover::default_projects_dir;
+//! use iktinos_core::follow::Follower;
 //! use iktinos_core::session::SessionStore;
-//! use iktinos_core::tail::Tail;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let projects = default_projects_dir().ok_or("no home directory")?;
 //! let mut store = SessionStore::new();
-//! let mut tails = Vec::new();
+//! let mut follower = Follower::new(default_projects_dir().ok_or("no home directory")?);
 //!
-//! for files in discover(&projects)? {
-//!     store.discovered(&files);
-//!     tails.push((files.id.clone(), Tail::from_start(&files.transcript.path)));
-//!     for subagent in &files.subagents {
-//!         tails.push((files.id.clone(), Tail::from_start(&subagent.transcript.path)));
-//!     }
-//! }
-//!
-//! // Call this again whenever the files may have grown: each poll reads only
-//! // what was appended.
-//! for (id, tail) in &mut tails {
-//!     let polled = tail.poll_each(|line, _| store.apply(id, &Record::parse_bytes(line)))?;
-//!     if polled.restarted {
-//!         // The file was replaced: forget the session and read its files again.
-//!         store.reset(id);
-//!     }
-//! }
+//! // Call this again whenever the files may have grown: the first poll
+//! // reads everything, each one after it only what was appended.
+//! follower.poll(&mut store)?;
 //!
 //! for session in store.sessions() {
-//!     println!("{} {:?} {:?}", session.id, session.model, session.cost.usd);
+//!     println!("{} {:?} {:?}", session.label(), session.model, session.cost.usd);
 //! }
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [`follow::Follower`] is the loop every consumer runs. The parts it is
+//! made of ([`discover`], [`tail::Tail`], [`session::SessionStore::apply`])
+//! are there for a consumer that wants its own.
 //!
 //! | module | role |
 //! | --- | --- |
 //! | [`record`] | one transcript line as a typed view, raw JSON kept, unknown shapes collected by `drift` |
 //! | [`discover`] | sessions and subagents under a projects directory, `sessions-index.json`, cwd resolution |
 //! | [`tail`] | offset-based line reading: load what is needed from the end, then follow appends |
-//! | [`session`] | the fold of records into `Session` / `SessionStore` |
+//! | [`session`] | the fold of records into `Session` / `SessionStore`, and what is derived from a session: its status, its name, where it runs |
+//! | [`follow`] | the loop that keeps a `SessionStore` current: discover, tail, fold, start over |
 //! | [`trace`] | a session's latest interactions as trees of spans: LLM requests, tool calls, subagents |
 //! | [`output`] | the whole output of one tool call, and the whole text of one response, read again from the transcript on demand |
 //! | [`place`] | where a session runs against a directory: below it, or in a worktree of the same git repository |
@@ -79,6 +68,8 @@ pub mod discover;
 pub mod tail;
 
 pub mod session;
+
+pub mod follow;
 
 pub mod place;
 

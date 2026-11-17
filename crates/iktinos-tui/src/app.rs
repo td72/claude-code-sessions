@@ -5,14 +5,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use iktinos_core::discover::{discover, SessionFiles};
+use iktinos_core::follow::Follower;
 use iktinos_core::output::{read_response, read_tool_output, WholeOutput, WholeResponse};
 use iktinos_core::place::Place;
-use iktinos_core::record::{Record, Timestamp};
-use iktinos_core::session::{
-    Activity, CostSource, LiveState, Session, SessionStore, Subagent, ToolCall,
-};
-use iktinos_core::tail::Tail;
+use iktinos_core::record::Timestamp;
+use iktinos_core::session::{CostSource, Session, SessionStore, Subagent, ToolCall};
+pub use iktinos_core::session::{Status, StatusKind};
 use iktinos_core::trace::{Interaction, Item, Span, SpanKind};
 
 use crate::theme::Theme;
@@ -165,27 +163,6 @@ pub struct Received {
     pub last_at: Option<Timestamp>,
     /// The same for each session that sent one.
     pub sessions: BTreeMap<String, Timestamp>,
-}
-
-/// One line of what a session is doing, and how much attention it wants.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Status {
-    pub kind: StatusKind,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusKind {
-    /// Working: an interaction in progress, a tool running, or a fresh record.
-    Busy,
-    /// Blocked on a person: a permission prompt.
-    NeedsApproval,
-    /// At the prompt, waiting for its user.
-    Waiting,
-    /// Nothing recent.
-    Idle,
-    /// The process exited.
-    Exited,
 }
 
 /// The pages, in header order.
@@ -341,11 +318,8 @@ pub struct Viewport {
 pub struct App {
     pub config: Config,
     pub store: SessionStore,
-    /// A tail per transcript, with the session it belongs to.
-    tails: BTreeMap<PathBuf, (String, Tail)>,
-    /// The files of each session, by id: where a call's whole output is
-    /// read from.
-    files: BTreeMap<String, SessionFiles>,
+    /// The transcripts, and how far each was read.
+    follower: Follower,
     /// The whole output of one call, read when it was asked for (`o`).
     pub whole: Option<Loaded>,
     /// The whole text of one response, read the same way. One of the two
@@ -462,8 +436,8 @@ impl ListRow<'_> {
             Some(interaction) => interaction.text(!by_session),
             None => format!(
                 "{} {}",
-                label(self.session),
-                project(self.session).unwrap_or_default()
+                self.session.label(),
+                self.session.location_name().unwrap_or_default()
             ),
         }
     }
@@ -503,9 +477,9 @@ impl InteractionRow<'_> {
         };
         if with_session {
             text.push(' ');
-            text.push_str(label(self.session));
+            text.push_str(self.session.label());
             text.push(' ');
-            text.push_str(&project(self.session).unwrap_or_default());
+            text.push_str(&self.session.location_name().unwrap_or_default());
         }
         text
     }
@@ -580,8 +554,7 @@ impl App {
                 .with_recent_tools(config.recent_tools)
                 .with_tool_output(config.output_chars)
                 .with_trace_interactions(config.interactions),
-            tails: BTreeMap::new(),
-            files: BTreeMap::new(),
+            follower: Follower::new(&config.projects_dir),
             whole: None,
             said: None,
             page: config.start,
@@ -726,58 +699,18 @@ impl App {
     }
 
     fn load(&mut self, now: Timestamp) {
-        match discover(&self.config.projects_dir) {
-            Ok(found) => {
-                self.notice = None;
-                for files in &found {
-                    self.track(files);
-                }
-            }
-            Err(e) => self.notice = Some(e.to_string()),
-        }
-        self.read_appended();
+        // Whatever is known is read even when the directory cannot be
+        // listed: the notice says so.
+        self.notice = self
+            .follower
+            .poll(&mut self.store)
+            .err()
+            .map(|e| e.to_string());
         #[cfg(unix)]
         if let Some(listener) = &self.listener {
             listener.drain(&mut self.store, &mut self.received, now);
         }
         self.arrange(now);
-    }
-
-    fn track(&mut self, files: &SessionFiles) {
-        self.store.discovered(files);
-        self.files.insert(files.id.clone(), files.clone());
-        let transcripts = std::iter::once(&files.transcript)
-            .chain(files.subagents.iter().map(|subagent| &subagent.transcript));
-        for transcript in transcripts {
-            self.tails
-                .entry(transcript.path.clone())
-                .or_insert_with(|| (files.id.clone(), Tail::from_start(&transcript.path)));
-        }
-    }
-
-    fn read_appended(&mut self) {
-        let mut restarted = Vec::new();
-        for (id, tail) in self.tails.values_mut() {
-            let store = &mut self.store;
-            let polled = tail.poll_each(|line, _| store.apply(id, &Record::parse_bytes(line)));
-            // A transcript that vanished or cannot be read is skipped; it is
-            // tried again on the next refresh.
-            if polled.is_ok_and(|polled| polled.restarted) {
-                restarted.push(id.clone());
-            }
-        }
-        // A replaced file invalidates what was folded from it: forget the
-        // session and read all of its files again.
-        for id in restarted {
-            self.store.reset(&id);
-            for (owner, tail) in self.tails.values_mut() {
-                if *owner == id {
-                    *tail = Tail::from_start(tail.path());
-                    let store = &mut self.store;
-                    let _ = tail.poll_each(|line, _| store.apply(&id, &Record::parse_bytes(line)));
-                }
-            }
-        }
     }
 
     /// Rebuilds the session list for the filter and the sort in force,
@@ -788,7 +721,7 @@ impl App {
             self.outside = self
                 .store
                 .sessions()
-                .filter(|session| !location(session).is_some_and(|path| place.holds(path)))
+                .filter(|session| !session.location().is_some_and(|path| place.holds(path)))
                 .map(|session| session.id.clone())
                 .collect();
         }
@@ -799,7 +732,7 @@ impl App {
             .filter(|s| {
                 self.repository
                     .as_ref()
-                    .is_none_or(|repository| project(s).as_ref() == Some(repository))
+                    .is_none_or(|repository| s.location_name().as_ref() == Some(repository))
             })
             .collect();
         sessions.sort_by(|a, b| {
@@ -817,7 +750,7 @@ impl App {
                     .total_tokens()
                     .cmp(&a.usage.total().total_tokens()),
             };
-            by.then_with(|| latest(b).cmp(&latest(a)))
+            by.then_with(|| b.last_seen().cmp(&a.last_seen()))
                 .then_with(|| a.id.cmp(&b.id))
         });
         self.order = sessions.into_iter().map(|s| s.id.clone()).collect();
@@ -868,7 +801,7 @@ impl App {
 
     /// What a session is doing, as this viewer is set to judge it.
     pub fn status(&self, session: &Session, now: Timestamp) -> Status {
-        status_within(session, now, self.config.active_within)
+        session.status(now, self.config.active_within)
     }
 
     /// The page a key shows: `0` for the key `1`. `None` past the pages
@@ -1541,7 +1474,7 @@ impl App {
                 self.said = None;
                 return;
             }
-            let text = match self.files.get(&session) {
+            let text = match self.follower.files(&session) {
                 Some(files) => read_response(files, &message).map_err(|e| e.to_string()),
                 None => Ok(None),
             };
@@ -1560,7 +1493,7 @@ impl App {
             self.whole = None;
             return;
         }
-        let output = match self.files.get(&session) {
+        let output = match self.follower.files(&session) {
             Some(files) => read_tool_output(files, &call).map_err(|e| e.to_string()),
             None => Ok(None),
         };
@@ -1643,7 +1576,7 @@ impl App {
         }
         self.repository = match self.repository {
             Some(_) => None,
-            None => self.selected_session().and_then(project),
+            None => self.selected_session().and_then(Session::location_name),
         };
         self.arrange(now());
     }
@@ -1691,8 +1624,8 @@ impl App {
                 .map(|s| {
                     format!(
                         "{} {} {} {} {}",
-                        label(s),
-                        project(s).unwrap_or_default(),
+                        s.label(),
+                        s.location_name().unwrap_or_default(),
                         s.git_branch.as_deref().unwrap_or_default(),
                         self.status(s, now).text,
                         s.id
@@ -1710,7 +1643,7 @@ impl App {
                         c.name,
                         c.summary.as_deref().unwrap_or_default(),
                         c.input.as_deref().unwrap_or_default(),
-                        label(s)
+                        s.label()
                     )
                 })
                 .collect(),
@@ -1723,7 +1656,7 @@ impl App {
                         a.agent_type.as_deref().unwrap_or_default(),
                         a.description.as_deref().unwrap_or_default(),
                         a.agent_id,
-                        label(s)
+                        s.label()
                     )
                 })
                 .collect(),
@@ -1888,15 +1821,6 @@ fn interaction_row<'a>(session: &'a Session, interaction: &'a Interaction) -> In
     }
 }
 
-/// The time of the last thing known about a session, from either input.
-pub fn latest(session: &Session) -> Option<Timestamp> {
-    let live = session
-        .live
-        .as_ref()
-        .and_then(|l| l.state_at.max(l.measured_at));
-    session.last_activity.max(live)
-}
-
 /// The current time.
 pub fn now() -> Timestamp {
     let millis = SystemTime::now()
@@ -1905,82 +1829,11 @@ pub fn now() -> Timestamp {
     Timestamp::from_millis(millis)
 }
 
-/// [`status_within`] with the default for how recent a record makes a
-/// session active.
+/// A session's status with the default for how recent a record makes it
+/// active.
 #[cfg(test)]
 pub fn status(session: &Session, now: Timestamp) -> Status {
-    status_within(session, now, ACTIVE_WITHIN)
-}
-
-/// What a session is doing: from live events when they say, from the
-/// transcript otherwise, where a record newer than `active_within` makes
-/// it active.
-pub fn status_within(session: &Session, now: Timestamp, active_within: Duration) -> Status {
-    let status = |kind, text: &str| Status {
-        kind,
-        text: text.to_owned(),
-    };
-    // A transcript that ends with the exit bookkeeping outranks older events:
-    // the mod's `session.end` may never have been delivered.
-    let live = session
-        .live
-        .as_ref()
-        .filter(|live| !(session.exited && live.state_at <= session.last_activity));
-    if let Some(live) = live {
-        match live.state() {
-            LiveState::Ended => return status(StatusKind::Exited, "exited"),
-            LiveState::AwaitingApproval(pending) => {
-                return Status {
-                    kind: StatusKind::NeedsApproval,
-                    text: format!("approve {}?", pending.name),
-                }
-            }
-            LiveState::RunningTool(tool) => {
-                return Status {
-                    kind: StatusKind::Busy,
-                    text: format!("running {}", tool.name),
-                }
-            }
-            LiveState::Working => return status(StatusKind::Busy, "working"),
-            LiveState::WaitingForInput => return status(StatusKind::Waiting, "waiting"),
-            LiveState::Unknown => {}
-        }
-    }
-    match session.activity(now, active_within) {
-        Activity::Active { .. } => status(StatusKind::Busy, "active"),
-        Activity::Idle => status(StatusKind::Idle, "idle"),
-        Activity::Exited => status(StatusKind::Exited, "exited"),
-    }
-}
-
-/// The name to show for a session: its title, else its last prompt, else the
-/// start of its id.
-pub fn label(session: &Session) -> &str {
-    session
-        .title
-        .as_deref()
-        .or(session.last_prompt.as_deref())
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| session.id.get(..8).unwrap_or(&session.id))
-}
-
-/// Where the session runs: its project, else the directory of its latest
-/// record, else what its live start reported.
-pub fn location(session: &Session) -> Option<&Path> {
-    let live_cwd = session.live.as_ref().and_then(|l| l.cwd.as_ref());
-    session
-        .project_path
-        .as_ref()
-        .or(session.cwd.as_ref())
-        .or(live_cwd)
-        .map(PathBuf::as_path)
-}
-
-/// The last component of where the session runs.
-pub fn project(session: &Session) -> Option<String> {
-    location(session)
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
+    session.status(now, ACTIVE_WITHIN)
 }
 
 #[cfg(unix)]
@@ -2096,10 +1949,10 @@ pub mod tests {
         let session = app.store.get(WITH_SUBAGENTS).unwrap();
         assert_eq!(session.usage.total().responses, 7);
         assert_eq!(session.subagents.len(), 2);
-        assert_eq!(project(session).as_deref(), Some("other.repo"));
-        assert_eq!(label(session), "22222222");
+        assert_eq!(session.location_name().as_deref(), Some("other.repo"));
+        assert_eq!(session.label(), "22222222");
         assert_eq!(
-            label(app.store.get(INDEXED).unwrap()),
+            app.store.get(INDEXED).unwrap().label(),
             "Synthetic session title"
         );
     }

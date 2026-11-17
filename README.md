@@ -26,46 +26,35 @@ and watches the ground; it was also the name of an architect of the Parthenon.
 ## Using the crate
 
 ```rust
-use iktinos_core::discover::{default_projects_dir, discover};
-use iktinos_core::record::Record;
+use iktinos_core::discover::default_projects_dir;
+use iktinos_core::follow::Follower;
 use iktinos_core::session::SessionStore;
-use iktinos_core::tail::Tail;
 
-let projects = default_projects_dir().ok_or("no home directory")?;
 let mut store = SessionStore::new();
-let mut tails = Vec::new();
+let mut follower = Follower::new(default_projects_dir().ok_or("no home directory")?);
 
-for files in discover(&projects)? {
-    store.discovered(&files);
-    tails.push((files.id.clone(), Tail::from_start(&files.transcript.path)));
-    for subagent in &files.subagents {
-        tails.push((files.id.clone(), Tail::from_start(&subagent.transcript.path)));
-    }
-}
-
-// Call this again whenever the files may have grown: each poll reads only
-// what was appended.
-for (id, tail) in &mut tails {
-    let polled = tail.poll_each(|line, _| store.apply(id, &Record::parse_bytes(line)))?;
-    if polled.restarted {
-        // The file was replaced: forget the session and read its files again.
-        store.reset(id);
-    }
-}
+// Call this again whenever the files may have grown: the first poll reads
+// everything, each one after it only what was appended.
+follower.poll(&mut store)?;
 
 for session in store.sessions() {
-    println!("{} {:?} {:?}", session.id, session.model, session.cost.usd);
+    println!("{} {:?} {:?}", session.label(), session.model, session.cost.usd);
 }
 ```
 
-`crates/iktinos-core/examples/sessions.rs` is the same loop with a table at
-the end, and `examples/drift.rs` beside it reports transcript shapes the crate does not know yet.
+`Follower` is the loop every consumer runs: it finds the sessions, reads what
+was appended to each transcript, and makes a session start over when one of
+its files was replaced. The parts it is made of (`discover`, `Tail`,
+`SessionStore::apply`) are there for a consumer that wants its own loop:
+`crates/iktinos-core/examples/sessions.rs` is one, with a table at the end,
+and `examples/drift.rs` beside it reports transcript shapes the crate does not
+know yet.
 
 ## Crates
 
 | crate | role |
 | --- | --- |
-| [`iktinos-core`](crates/iktinos-core) | the library: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
+| [`iktinos-core`](crates/iktinos-core) | the library: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`, and what is derived from a session: its status, its name, where it runs), `follow` (the loop that keeps a store current), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the terminal viewer, as a library |
 | [`iktinos`](crates/iktinos) | the `iktinos` command: the way in. Without a subcommand it starts the viewer |
