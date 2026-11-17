@@ -15,6 +15,8 @@ use iktinos::session::{
 use iktinos::tail::Tail;
 use iktinos::trace::{Interaction, Item, Span, SpanKind};
 
+use crate::theme::Theme;
+
 /// How recent a record makes a session "active" when no live event says more.
 const ACTIVE_WITHIN: Duration = Duration::from_secs(60);
 
@@ -60,6 +62,8 @@ pub struct Config {
     pub recent_tools: usize,
     /// How much of a tool call's output a session keeps, in characters.
     pub output_chars: usize,
+    /// The colour of each role.
+    pub colors: Theme,
 }
 
 impl Config {
@@ -84,6 +88,7 @@ impl Config {
             slow: [Duration::from_secs(10), Duration::from_secs(60)],
             recent_tools: 200,
             output_chars: 2000,
+            colors: Theme::default(),
         }
     }
 }

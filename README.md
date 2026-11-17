@@ -241,10 +241,45 @@ output_chars = 2000
 A length of time is written as `90s`, `30m`, `1h` or `2d`. A leading `~` in a
 path is the home directory.
 
-A key the viewer does not know, a value of the wrong type, a length of time
-or a name it cannot read, a page listed twice, an empty list of pages: each
-stops the viewer at startup, with the file, the line and what is wrong. A
-setting that is silently ignored is one nobody notices was misspelt.
+### Colours
+
+The viewer draws in the terminal's own sixteen colours, so it follows the
+terminal's palette. `[colors]` gives a role another colour; a role that is
+not set keeps its own.
+
+```toml
+[colors]
+warn = "light-red"
+error = "#ff5555"
+dim = "gray"
+```
+
+| role | default | what is drawn in it |
+| --- | --- | --- |
+| `label` | `cyan` | the names of fields, the headings inside a pane, the keys in the help |
+| `headline` | `yellow` | the first line of a detail |
+| `focus` | `cyan` | the frame of the pane that has the focus |
+| `session` | `cyan` | a session's name over its interactions; the mark of the session the lists are narrowed to |
+| `cwd` | `yellow` | where a session runs |
+| `tool` | `cyan` | a tool's name |
+| `agent` | `magenta` | a subagent |
+| `request` | `light-blue` | an LLM request |
+| `ok` | `green` | finished and well, working, plenty of room |
+| `warn` | `yellow` | running, slow, waiting for approval, nearly full |
+| `error` | `red` | failed, very slow, full, cannot be read |
+| `waiting` | `cyan` | a session that waits for its user |
+| `dim` | `dark-gray` | captions, what is absent or unknown |
+| `search` | `yellow` | a row a search matches, and the search being typed |
+
+A colour is `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
+`gray`, `dark-gray`, `white`, the `light-` form of the six in the middle,
+`default` (the terminal's own foreground), or `#rrggbb`. The colours of a
+shell command's syntax are not roles and cannot be set.
+
+A key the viewer does not know, a value of the wrong type, a length of time,
+a name or a colour it cannot read, a page listed twice, an empty list of
+pages: each stops the viewer at startup, with the file, the line and what is
+wrong. A setting that is silently ignored is one nobody notices was misspelt.
 
 ## Two inputs, one state
 

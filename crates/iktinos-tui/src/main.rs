@@ -12,6 +12,7 @@ mod app;
 mod config;
 mod format;
 mod highlight;
+mod theme;
 mod ui;
 
 use std::env;
