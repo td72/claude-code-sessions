@@ -92,7 +92,10 @@ pub const WHEN_WIDTH: u16 = 11;
 
 /// When something started, and how long ago that is: `10:00:08 (12s ago)`.
 pub fn started(now: Timestamp, then: Timestamp) -> String {
-    format!("{} ({} ago)", when(now, then), ago(now, then))
+    match ago(now, then).as_str() {
+        "now" => format!("{} (now)", when(now, then)),
+        ago => format!("{} ({ago} ago)", when(now, then)),
+    }
 }
 
 /// `850ms`, `1.5s`, `2m05s`.
