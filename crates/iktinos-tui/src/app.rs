@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iktinos::discover::{discover, SessionFiles};
 use iktinos::output::{read_tool_output, WholeOutput};
 use iktinos::record::{Record, Timestamp};
-use iktinos::session::{Activity, LiveState, Session, SessionStore, Subagent, ToolCall};
+use iktinos::session::{
+    Activity, CostSource, LiveState, Session, SessionStore, Subagent, ToolCall,
+};
 use iktinos::tail::Tail;
 use iktinos::trace::{Interaction, Item, Span, SpanKind};
 
@@ -219,6 +221,24 @@ impl Filter {
     }
 }
 
+/// What the listed sessions add up to.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Totals {
+    /// The sessions the list shows.
+    pub listed: usize,
+    /// With a search, how many of them it matches: the ones added up.
+    pub matching: Option<usize>,
+    pub tokens: u64,
+    /// `None` when no session has a known cost.
+    pub usd: Option<f64>,
+    /// Some of the cost is an estimate.
+    pub estimated: bool,
+    /// Some of a session could not be priced.
+    pub incomplete: bool,
+    /// Sessions left out of the cost because theirs is not known.
+    pub without_cost: usize,
+}
+
 /// A search within one page's list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Search {
@@ -256,6 +276,9 @@ pub struct App {
     pub in_detail: bool,
     pub sort: Sort,
     pub filter: Filter,
+    /// The repository the Sessions page is narrowed to (`F`): the name
+    /// [`project`] gives its sessions.
+    pub repository: Option<String>,
     pub time: TimeStyle,
     /// The ids of the sessions the Sessions page lists, in display order.
     pub order: Vec<String>,
@@ -441,6 +464,7 @@ impl App {
             in_detail: false,
             sort: Sort::Updated,
             filter: Filter::All,
+            repository: None,
             time: config.time,
             order: Vec::new(),
             scope: None,
@@ -638,6 +662,11 @@ impl App {
             .store
             .sessions()
             .filter(|s| self.filter.admits(status(s, now).kind))
+            .filter(|s| {
+                self.repository
+                    .as_ref()
+                    .is_none_or(|repository| project(s).as_ref() == Some(repository))
+            })
             .collect();
         sessions.sort_by(|a, b| {
             let by = match self.sort {
@@ -1265,6 +1294,9 @@ impl App {
         }
         if self.search.as_ref().is_some_and(|s| s.page == self.page) {
             self.search = None;
+        } else if self.page == Page::Sessions && self.repository.is_some() {
+            self.repository = None;
+            self.arrange(now());
         } else if self.agent_scope.is_some() {
             self.narrow(self.scope.clone(), None);
         } else {
@@ -1394,6 +1426,52 @@ impl App {
             Filter::Open => Filter::All,
         };
         self.arrange(now());
+    }
+
+    /// `F`: only the sessions of the repository of the one under the
+    /// cursor; again, or `Esc`, every repository.
+    pub fn toggle_repository(&mut self) {
+        if self.page != Page::Sessions {
+            return;
+        }
+        self.repository = match self.repository {
+            Some(_) => None,
+            None => self.selected_session().and_then(project),
+        };
+        self.arrange(now());
+    }
+
+    /// What the sessions the Sessions page lists add up to: those the
+    /// search matches where there is one, all of them otherwise.
+    pub fn totals(&self, now: Timestamp) -> Totals {
+        let searching = self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.page == Page::Sessions);
+        let matches = self.matches(Page::Sessions, now);
+        let mut totals = Totals {
+            listed: self.order.len(),
+            matching: searching.then_some(matches.len()),
+            ..Totals::default()
+        };
+        let sessions = self
+            .order
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !searching || matches.contains(index))
+            .filter_map(|(_, id)| self.store.get(id));
+        for session in sessions {
+            totals.tokens += session.usage.total().total_tokens();
+            match session.cost.usd {
+                Some(usd) => {
+                    *totals.usd.get_or_insert(0.0) += usd;
+                    totals.estimated |= !matches!(session.cost.source, CostSource::Reported);
+                    totals.incomplete |= session.cost.incomplete;
+                }
+                None => totals.without_cost += 1,
+            }
+        }
+        totals
     }
 
     /// The text each row of `page` is searched by, lower-cased.

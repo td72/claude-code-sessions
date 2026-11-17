@@ -14,7 +14,7 @@ use ratatui::Frame;
 
 use crate::app::{
     self, App, InteractionRow, LiveStatus, Loaded, Page, Status, StatusKind, TimeStyle, Times,
-    TraceItem, TraceRow, TREE,
+    Totals, TraceItem, TraceRow, TREE,
 };
 use crate::format;
 use crate::highlight;
@@ -318,7 +318,14 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         .collect();
     let title = list_title(
         app,
-        format!("Sessions ({} · {} ↓)", app.filter.label(), app.sort.label()),
+        match &app.repository {
+            Some(repository) => format!(
+                "Sessions ({} · {repository} · {} ↓)",
+                app.filter.label(),
+                app.sort.label()
+            ),
+            None => format!("Sessions ({} · {} ↓)", app.filter.label(), app.sort.label()),
+        },
         matches.len(),
     );
     let table = Table::new(
@@ -347,6 +354,7 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         ])
         .style(dim()),
     )
+    .footer(totals_row(&app.totals(now)))
     .block(pane_block(title, !app.in_detail));
     let selected = (!app.order.is_empty()).then_some(app.selected);
     draw_list(frame, area, app, 0, table, selected);
@@ -426,6 +434,39 @@ fn status_word(status: &Status) -> String {
         StatusKind::NeedsApproval => "approve?".to_owned(),
         _ => status.text.split(' ').next().unwrap_or_default().to_owned(),
     }
+}
+
+/// The row under the session list: what the sessions listed add up to.
+fn totals_row(totals: &Totals) -> Row<'static> {
+    let mut what = match totals.matching {
+        Some(matching) => format!(
+            "{matching} matching of {}",
+            format::count(totals.listed as u64, "session")
+        ),
+        None => format::count(totals.listed as u64, "session"),
+    };
+    if totals.without_cost > 0 {
+        what.push_str(&format!(", {} without a cost", totals.without_cost));
+    }
+    let cost = totals.usd.map_or("—".to_owned(), |usd| {
+        format!(
+            "{}{}{}",
+            if totals.estimated { "~" } else { "" },
+            format::usd_amount(usd),
+            if totals.incomplete { "+" } else { "" }
+        )
+    });
+    Row::new([
+        Cell::from(""),
+        Cell::from(what),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(Line::from("total").right_aligned()),
+        Cell::from(Line::from(format::tokens(totals.tokens)).right_aligned()),
+        Cell::from(Line::from(cost).right_aligned()),
+    ])
+    .style(label())
 }
 
 fn subagent_name(subagent: &Subagent) -> &str {
@@ -2006,6 +2047,10 @@ const HELP: &[(&str, &str)] = &[
     ("o", "a tool call's whole output, or its excerpt again"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
+    (
+        "F",
+        "only the sessions of this one's repository, or all again",
+    ),
     ("r", "refresh now"),
     ("?", "this help"),
     ("q / Ctrl+c", "quit"),
@@ -3514,6 +3559,82 @@ mod tests {
         assert!(header.contains("1 busy  live off"), "{header}");
         assert!(listed.contains("exited"), "{listed}");
         assert!(trace.contains("exited"), "{trace}");
+    }
+
+    #[test]
+    fn the_session_list_ends_with_what_its_sessions_add_up_to() {
+        let mut app = fixture_app();
+        let all = screen(&mut app, 150, 44, SOON);
+        // Under the list, in its columns: the tokens and the cost of the
+        // sessions listed. One of the three has no cost to add.
+        let total = row(&all, "3 sessions, 1 without a cost");
+        assert!(total.contains("total"), "{all}");
+        assert!(total.contains("28.0k"), "{all}");
+        assert!(total.trim_end_matches('│').ends_with("~$0.03"), "{all}");
+        let tops = pane_tops(&all);
+        let last = all.lines().nth(tops[1] - 2).unwrap();
+        assert!(last.contains("3 sessions, 1 without a cost"), "{all}");
+
+        // With a search, what it matches.
+        app.typing = Some("other.repo".to_owned());
+        app.submit_search();
+        let searched = screen(&mut app, 150, 44, SOON);
+        let total = row(&searched, "1 matching of 3 sessions");
+        assert!(
+            total.contains("23.6k") && total.contains("~$0.02"),
+            "{searched}"
+        );
+    }
+
+    #[test]
+    fn the_session_list_is_narrowed_to_a_repository() {
+        let mut app = fixture_app();
+        select(&mut app, INDEXED);
+        app.toggle_repository();
+        let narrowed = screen(&mut app, 150, 44, SOON);
+        assert!(
+            narrowed.contains("Sessions (all · example · updated ↓)"),
+            "{narrowed}"
+        );
+        assert!(narrowed.contains("Synthetic session title"));
+        assert!(narrowed.contains("Synthetic title after the damage"));
+        assert!(!narrowed.contains("other.repo"), "{narrowed}");
+        // The totals are of what is listed.
+        let total = row(&narrowed, "2 sessions, 1 without a cost");
+        assert!(
+            total.contains("4.4k") && total.contains("~$0.0089"),
+            "{narrowed}"
+        );
+        // The cursor stays on its session.
+        assert_eq!(app.selected_session().unwrap().id, INDEXED);
+
+        // With the other filter and the sort.
+        app.cycle_sort();
+        app.cycle_filter();
+        app.cycle_filter();
+        assert_eq!(app.order.len(), 2);
+        assert_eq!(app.repository.as_deref(), Some("example"));
+
+        // Esc takes the search first, then the repository.
+        app.typing = Some("damage".to_owned());
+        app.submit_search();
+        app.back();
+        assert!(app.search.is_none());
+        assert_eq!(app.repository.as_deref(), Some("example"));
+        app.back();
+        assert_eq!(app.repository, None);
+        assert_eq!(app.order.len(), 3);
+
+        // The key again does the same.
+        app.toggle_repository();
+        assert!(app.repository.is_some());
+        app.toggle_repository();
+        assert_eq!(app.repository, None);
+
+        // On another page the key does nothing.
+        app.go_to(Page::Tools);
+        app.toggle_repository();
+        assert_eq!(app.repository, None);
     }
 
     #[test]
