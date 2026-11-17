@@ -23,3 +23,4 @@ without the marker.
 | `unknown-model.jsonl` | the plain turn answered by a model the price table does not know |
 | `resumed.jsonl` | a session that exited (`cost-state`) and was resumed for one more turn |
 | `projects/` | a projects directory: an indexed and an unindexed session in one project, a session with two subagents (one without metadata) in another |
+| `trace/` | a projects directory with one session of three turns: a tool call; a subagent spawned by a tool call (its metadata names the call); a turn cut off while a tool runs |

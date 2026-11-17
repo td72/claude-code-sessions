@@ -235,6 +235,9 @@ pub struct User {
     pub is_meta: bool,
     /// The summary that replaces the conversation after a compaction.
     pub is_compact_summary: bool,
+    /// `promptId`: the prompt this record belongs to. A prompt and the
+    /// results of the tool calls made to answer it share one.
+    pub prompt_id: Option<String>,
 }
 
 impl User {
@@ -250,6 +253,7 @@ impl User {
             tool_results,
             is_meta: flag(obj, "isMeta"),
             is_compact_summary: flag(obj, "isCompactSummary"),
+            prompt_id: string(obj, "promptId"),
         }
     }
 }
