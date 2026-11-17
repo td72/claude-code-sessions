@@ -71,7 +71,8 @@ crate it starts (`iktinos-tui`, later others behind subcommands), never in
 ## Build & Test
 
 ```bash
-cargo build --workspace
+mise run web:build       # the page of `iktinos serve`, into web/dist (needs Node, from mise)
+cargo build --workspace  # embeds web/dist if it is there, a placeholder if not
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check

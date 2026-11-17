@@ -205,10 +205,34 @@ The port is 4747 unless `--port` names another (`0` picks a free one); a port
 in use is an error. `--projects-dir`, `--socket-dir`, `--no-live` and `--cwd`
 mean what they mean for the viewer.
 
-The page that draws the sessions is not built in yet: what it will be drawn
-from is served as JSON (`/api/sessions`, `/api/sessions/<id>`,
-`/api/sessions/<id>/trace`, a call's whole output, a response's whole text),
-with server-sent events (`/api/events`) for "something changed".
+The page shows the sessions on the left and, for the one chosen, its latest
+interactions on the right: each a tree with a bar per row on a time axis, and
+the row chosen in full below it (a command and what it returned, a request's
+tokens and what its response said, read whole on demand). The session that is
+shown is also copied to the top of the list, where it stays while the others
+move. So far the page has the sessions and the trace; a session's detail,
+the tool calls, the subagents and the usage are to come.
+
+The page is drawn from JSON the server returns (`/api/sessions`,
+`/api/sessions/<id>`, `/api/sessions/<id>/trace`, a call's whole output, a
+response's whole text) and reads it again when the server says something
+changed (server-sent events, `/api/events`).
+
+### Building the page
+
+The page (`crates/iktinos-web/web`) is built with Vite+, TypeScript and
+React. Node comes from mise and Vite+ from the page's own `package.json`,
+through npm:
+
+```bash
+mise run web:build    # type-check and build into web/dist
+mise run web:check    # format, lint and type-check
+mise run serve        # build the page, then run `iktinos serve`
+```
+
+`cargo build` embeds `web/dist` in the binary if it is there, and a
+placeholder page if it is not: cargo never runs npm, and a checkout without
+Node still builds. The crate published to crates.io holds the built page.
 
 ## Configuration
 
