@@ -75,8 +75,10 @@ Four pages, in the shape and with the keys of [vig](https://github.com/td72/vig)
 Each list page is a list over a detail pane, in fixed proportions:
 
 - **1:Sessions** — every session: title, repository, branch, state, last
-  update, tokens, cost. The detail pane shows the selected session's context,
-  its tokens and cost by model and by source, and its rate limits.
+  update, tokens, cost, and under them a row with what the sessions listed
+  add up to (those a search matches, where there is one). The detail pane
+  shows the selected session's context, its tokens and cost by model and by
+  source, and its rate limits.
 - **2:Tool calls** — recent tool calls, the latest first: what ran, how long
   it took, how it ended. The detail pane shows the whole command, every line
   of it, a shell command in colour, and under it the start of what the call
@@ -116,10 +118,11 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `Enter` on a session in that list, or on a subagent in an interaction's tree | unfold it, fold it |
 | `l`, `h` in the trace | the pane on the right, and back (`h` in the tree or under a session goes to the row above first) |
 | `/`, `n` / `N` | search the list |
-| `Esc` on a list | clear the search, then the narrowing |
+| `Esc` on a list | clear the search, then the repository, then the narrowing |
 | `o` on a tool call | read its whole output from the transcript and show it; again, the excerpt |
 | `T` | show times as a local date and time, or as how long ago (`--time clock` or `--time relative` sets which to start with; with `clock`, what is newer than `--ago`, an hour unless told otherwise, is still shown as how long ago) |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
+| `F` on a session | list only the sessions of its repository; again, or `Esc`, all of them |
 | `r`, `?`, `q` | refresh, help, quit |
 
 It reads the transcripts once a second and, unless `--no-live` is given,

@@ -165,6 +165,7 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('T') => app.toggle_time(),
         KeyCode::Char('o') => app.load_output(),
         KeyCode::Char('f') => app.cycle_filter(),
+        KeyCode::Char('F') => app.toggle_repository(),
         _ => {}
     }
     Handled::Done
