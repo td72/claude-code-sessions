@@ -192,6 +192,14 @@ header h1 {
   background: var(--chosen);
 }
 
+/* The session that is shown stays under the header while the list scrolls. */
+.sessions tbody tr.selected td {
+  position: sticky;
+  top: 1.9rem;
+  background: var(--chosen);
+  border-bottom: 2px solid var(--line);
+}
+
 .sessions .label {
   overflow-wrap: anywhere;
 }

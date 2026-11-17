@@ -125,6 +125,11 @@ function SessionList(props: {
   onSelect: (id: string) => void;
   now: number;
 }) {
+  // The session that is shown stays first: the others move as they are
+  // heard of, the latest first, and the one being read must not move with
+  // them.
+  const shown = props.sessions.filter((session) => session.id === props.selected);
+  const others = props.sessions.filter((session) => session.id !== props.selected);
   return (
     <nav className="sessions">
       <table>
@@ -138,7 +143,7 @@ function SessionList(props: {
           </tr>
         </thead>
         <tbody>
-          {props.sessions.map((session) => (
+          {[...shown, ...others].map((session) => (
             <tr
               key={session.id}
               className={session.id === props.selected ? "selected" : undefined}
