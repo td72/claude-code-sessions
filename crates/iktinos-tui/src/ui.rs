@@ -9,7 +9,7 @@ use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
 use iktinos::trace::{between, Interaction, Item, LlmRequest, SpanKind};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
@@ -20,8 +20,10 @@ use crate::app::{
 };
 use crate::format;
 use crate::highlight;
+use crate::theme;
 
 pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
+    theme::set(app.config.colors);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -121,10 +123,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
 /// The header's live part: whether the viewer listens, and what it has
 /// heard. An open socket alone says nothing about a mod that sends.
 fn live_span(app: &App, now: Timestamp, busy: bool) -> Span<'static> {
-    let warn = Style::new().fg(Color::Yellow);
+    let warn = Style::new().fg(theme::current().warn);
     match &app.live {
         LiveStatus::Off => Span::styled("live off", dim()),
-        LiveStatus::Failed(_) => Span::styled("live failed", Style::new().fg(Color::Red)),
+        LiveStatus::Failed(_) => {
+            Span::styled("live failed", Style::new().fg(theme::current().error))
+        }
         LiveStatus::Listening(_) => match app.received.last_at {
             None => Span::styled("live on, no events yet", warn),
             Some(at) => {
@@ -140,7 +144,7 @@ fn live_span(app: &App, now: Timestamp, busy: bool) -> Span<'static> {
                     if quiet {
                         warn
                     } else {
-                        Style::new().fg(Color::Green)
+                        Style::new().fg(theme::current().ok)
                     },
                 )
             }
@@ -195,7 +199,9 @@ fn live_lines(app: &App) -> Vec<String> {
 /// A pane's frame: its title and whether it has the focus.
 fn pane_block(title: String, focused: bool) -> Block<'static> {
     let style = if focused {
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::new()
+            .fg(theme::current().focus)
+            .add_modifier(Modifier::BOLD)
     } else {
         dim()
     };
@@ -269,7 +275,7 @@ fn when_width(times: Times) -> u16 {
 /// The style of a row the search matches.
 fn row_style(matches: &[usize], index: usize) -> Style {
     if matches.contains(&index) {
-        Style::new().fg(Color::Yellow)
+        Style::new().fg(theme::current().search)
     } else {
         Style::new()
     }
@@ -318,7 +324,8 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
             // The session the other pages are narrowed to.
             let scoped = app.scope.as_deref() == Some(session.id.as_str());
             Row::new([
-                Cell::from(if scoped { "●" } else { "" }).style(Style::new().fg(Color::Cyan)),
+                Cell::from(if scoped { "●" } else { "" })
+                    .style(Style::new().fg(theme::current().session)),
                 session_cell(session),
                 Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned()))
                     .style(cwd_style()),
@@ -384,8 +391,8 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
 
 fn outcome(call: &ToolCall) -> (&'static str, Style) {
     match call.success {
-        Some(true) => ("ok", Style::new().fg(Color::Green)),
-        Some(false) => ("failed", Style::new().fg(Color::Red)),
+        Some(true) => ("ok", Style::new().fg(theme::current().ok)),
+        Some(false) => ("failed", Style::new().fg(theme::current().error)),
         None => ("running", running()),
     }
 }
@@ -723,7 +730,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                             cwd_style(),
                         ),
                         Span::raw("  "),
-                        Span::styled(name.to_owned(), Style::new().fg(Color::Cyan)),
+                        Span::styled(name.to_owned(), Style::new().fg(theme::current().session)),
                     ])),
                     number(session.trace.iter().map(|i| counts(i).0).sum()),
                     number(session.trace.iter().map(|i| counts(i).1).sum()),
@@ -897,7 +904,7 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
             ),
             SpanKind::LlmRequest(request) => (
                 request_text(row, request),
-                Style::new().fg(Color::LightBlue),
+                Style::new().fg(theme::current().request),
                 request_marks(request).join(", "),
             ),
             _ => (String::new(), Style::new(), String::new()),
@@ -990,9 +997,9 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                     SpanKind::Tool(call) => {
                         let (mark, style) = outcome(call);
                         let colour = if call.success == Some(false) {
-                            Color::Red
+                            theme::current().error
                         } else {
-                            Color::Green
+                            theme::current().ok
                         };
                         (mark.to_owned(), style, colour)
                     }
@@ -1002,15 +1009,15 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                         let style = match stop.as_str() {
                             "end_turn" => done(),
                             "tool_use" | "" => dim(),
-                            _ => Style::new().fg(Color::Red),
+                            _ => Style::new().fg(theme::current().error),
                         };
-                        (stop, style, Color::LightBlue)
+                        (stop, style, theme::current().request)
                     }
-                    _ => (String::new(), dim(), Color::LightBlue),
+                    _ => (String::new(), dim(), theme::current().request),
                 },
                 TraceItem::Subagent(subagent) => match subagent.finished {
-                    Some(true) => ("done".to_owned(), done(), Color::Magenta),
-                    _ => ("running".to_owned(), running(), Color::Magenta),
+                    Some(true) => ("done".to_owned(), done(), theme::current().agent),
+                    _ => ("running".to_owned(), running(), theme::current().agent),
                 },
             };
             let (name, style, beside) = trace_label(row);
@@ -1030,7 +1037,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                 if !beside.is_empty() {
                     text.push(Span::styled(
                         format!("{beside}  "),
-                        Style::new().fg(Color::Yellow),
+                        Style::new().fg(theme::current().warn),
                     ));
                 }
                 text.push(Span::styled(name, style));
@@ -1275,7 +1282,7 @@ fn said_lines(
     match said.map(|said| &said.text) {
         Some(Err(reason)) => lines.push(Line::styled(
             format!("said      could not be read: {reason}"),
-            Style::new().fg(Color::Red),
+            Style::new().fg(theme::current().error),
         )),
         Some(Ok(None)) => lines.push(Line::styled(
             "said      nothing: the session's files hold no text of this response",
@@ -1338,7 +1345,7 @@ fn llm_request_lines(
         lines.push(match request.unusual_stop() {
             Some(stop) => Line::from(vec![
                 Span::styled(format!("{:<10}", "stop"), label()),
-                Span::styled(stop.to_owned(), Style::new().fg(Color::Red)),
+                Span::styled(stop.to_owned(), Style::new().fg(theme::current().error)),
             ]),
             None => field("stop", stop.clone()),
         });
@@ -1348,7 +1355,7 @@ fn llm_request_lines(
             Span::styled(format!("{:<10}", "context"), label()),
             Span::styled(
                 "rebuilt: sent anew, not as a continuation (as after a compaction)",
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::current().warn),
             ),
         ]));
     }
@@ -1357,7 +1364,7 @@ fn llm_request_lines(
             Span::styled(format!("{:<10}", "shape"), label()),
             Span::styled(
                 "the system prompt or the tools differ from the request before",
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::current().warn),
             ),
         ]));
     }
@@ -1604,7 +1611,10 @@ fn output_lines(call: &ToolCall, whole: Option<&Loaded>, width: usize) -> Vec<Li
     let note = |text: String| Line::styled(text, dim());
     let stderr = |lines: &mut Vec<Line<'static>>, text: &str| {
         lines.push(Line::raw(""));
-        lines.push(Line::styled("stderr", Style::new().fg(Color::Red)));
+        lines.push(Line::styled(
+            "stderr",
+            Style::new().fg(theme::current().error),
+        ));
         lines.extend(wrap(text, width));
     };
     let mut lines = vec![Line::raw("")];
@@ -1612,7 +1622,7 @@ fn output_lines(call: &ToolCall, whole: Option<&Loaded>, width: usize) -> Vec<Li
         Some(Err(reason)) => {
             lines.push(Line::styled(
                 format!("output    could not be read: {reason}"),
-                Style::new().fg(Color::Red),
+                Style::new().fg(theme::current().error),
             ));
         }
         Some(Ok(None)) => lines.push(note(
@@ -1745,9 +1755,9 @@ fn context_line(session: &Session, width: usize) -> Line<'static> {
         );
     };
     let color = match fill {
-        f if f >= 0.9 => Color::Red,
-        f if f >= 0.7 => Color::Yellow,
-        _ => Color::Green,
+        f if f >= 0.9 => theme::current().error,
+        f if f >= 0.7 => theme::current().warn,
+        _ => theme::current().ok,
     };
     let text = format!(
         "{} of {} ({})  ",
@@ -2181,16 +2191,16 @@ fn add(total: &mut ModelUsage, usage: &ModelUsage) {
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = if let Some(typed) = &app.typing {
         Line::from(vec![
-            Span::styled("/", Style::new().fg(Color::Yellow)),
+            Span::styled("/", Style::new().fg(theme::current().search)),
             Span::raw(typed.clone()),
             Span::styled("█", dim()),
         ])
     } else if let Some(notice) = &app.notice {
-        Line::styled(notice.clone(), Style::new().fg(Color::Red))
+        Line::styled(notice.clone(), Style::new().fg(theme::current().error))
     } else if let LiveStatus::Failed(reason) = &app.live {
         Line::styled(
             format!("live events unavailable: {reason}"),
-            Style::new().fg(Color::Red),
+            Style::new().fg(theme::current().error),
         )
     } else {
         Line::styled(
@@ -2273,13 +2283,16 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![Line::from(vec![
         Span::styled(
             format!(" {:<18}", keys.join(" ")),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(theme::current().label),
         ),
         Span::raw(titles.join(" / ")),
     ])];
     lines.extend(HELP.iter().map(|(keys, what)| {
         Line::from(vec![
-            Span::styled(format!(" {keys:<18}"), Style::new().fg(Color::Cyan)),
+            Span::styled(
+                format!(" {keys:<18}"),
+                Style::new().fg(theme::current().label),
+            ),
             Span::raw(*what),
         ])
     }));
@@ -2300,9 +2313,11 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
 
 fn style_of(kind: StatusKind) -> Style {
     match kind {
-        StatusKind::Busy => Style::new().fg(Color::Green),
-        StatusKind::NeedsApproval => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        StatusKind::Waiting => Style::new().fg(Color::Cyan),
+        StatusKind::Busy => Style::new().fg(theme::current().ok),
+        StatusKind::NeedsApproval => Style::new()
+            .fg(theme::current().warn)
+            .add_modifier(Modifier::BOLD),
+        StatusKind::Waiting => Style::new().fg(theme::current().waiting),
         StatusKind::Idle => Style::new(),
         StatusKind::Exited => dim(),
     }
@@ -2310,37 +2325,41 @@ fn style_of(kind: StatusKind) -> Style {
 
 /// The names of fields and the headings inside a pane.
 fn label() -> Style {
-    Style::new().fg(Color::Cyan)
+    Style::new().fg(theme::current().label)
 }
 
 /// The first line of a detail: what it is about.
 fn headline() -> Style {
-    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    Style::new()
+        .fg(theme::current().headline)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Where a session runs.
 fn cwd_style() -> Style {
-    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    Style::new()
+        .fg(theme::current().cwd)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// A tool's name.
 fn tool_style() -> Style {
-    Style::new().fg(Color::Cyan)
+    Style::new().fg(theme::current().tool)
 }
 
 /// A subagent.
 fn agent_style() -> Style {
-    Style::new().fg(Color::Magenta)
+    Style::new().fg(theme::current().agent)
 }
 
 /// Finished, and well.
 fn done() -> Style {
-    Style::new().fg(Color::Green)
+    Style::new().fg(theme::current().ok)
 }
 
 /// Not finished yet.
 fn running() -> Style {
-    Style::new().fg(Color::Yellow)
+    Style::new().fg(theme::current().warn)
 }
 
 /// How long something took: the slow stand out.
@@ -2349,9 +2368,9 @@ fn took_style(slow: [Duration; 2], ms: Option<u64>) -> Style {
         return Style::new();
     };
     if ms >= slow[1].as_millis() {
-        Style::new().fg(Color::Red)
+        Style::new().fg(theme::current().error)
     } else if ms >= slow[0].as_millis() {
-        Style::new().fg(Color::Yellow)
+        Style::new().fg(theme::current().warn)
     } else {
         Style::new()
     }
@@ -2359,7 +2378,7 @@ fn took_style(slow: [Duration; 2], ms: Option<u64>) -> Style {
 
 /// What matters least: captions, what is absent or unknown.
 fn dim() -> Style {
-    Style::new().fg(Color::DarkGray)
+    Style::new().fg(theme::current().dim)
 }
 
 #[cfg(test)]
@@ -2368,6 +2387,7 @@ mod tests {
     use crate::app::tests::{fixture_app, INDEXED, WITH_SUBAGENTS};
     use crate::app::{Config, Filter, Sort};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     const LATER: &str = "2026-11-03T12:00:00.000Z";
@@ -4202,6 +4222,54 @@ mod tests {
             .recent_tools
             .iter()
             .all(|call| call.output.is_none()));
+    }
+
+    #[test]
+    fn the_colours_of_the_roles_come_from_the_settings() {
+        let colours = |app: &mut App| {
+            let now = Timestamp::parse(SOON).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+            terminal.draw(|frame| draw(frame, app, now)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            move |word: &str| -> Color {
+                for y in 0..44u16 {
+                    let text: String = (0..150u16).map(|x| buffer[(x, y)].symbol()).collect();
+                    if let Some(at) = text.find(word) {
+                        return buffer[(text[..at].chars().count() as u16, y)].fg;
+                    }
+                }
+                panic!("no {word} on the screen");
+            }
+        };
+
+        // As they are without a setting.
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        let plain = colours(&mut app);
+        assert_eq!(plain("context   "), Color::Cyan);
+        assert_eq!(plain("other.repo"), Color::Yellow);
+        assert_eq!(plain("live off"), Color::DarkGray);
+
+        // Two roles replaced: the others stay.
+        let mut app = App::new(Config {
+            colors: theme::Theme {
+                label: Color::Rgb(0x12, 0x34, 0x56),
+                dim: Color::Blue,
+                ..theme::Theme::default()
+            },
+            ..crate::app::tests::fixture_config()
+        });
+        app.go_to(Page::Sessions);
+        select(&mut app, WITH_SUBAGENTS);
+        let themed = colours(&mut app);
+        assert_eq!(themed("context   "), Color::Rgb(0x12, 0x34, 0x56));
+        assert_eq!(themed("live off"), Color::Blue);
+        assert_eq!(themed("other.repo"), Color::Yellow);
+
+        // The next screen of another viewer is drawn in its own colours.
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        assert_eq!(colours(&mut app)("context   "), Color::Cyan);
     }
 
     #[test]

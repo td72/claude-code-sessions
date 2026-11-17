@@ -14,11 +14,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ratatui::style::Color;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use toml::Spanned;
 
 use crate::app::{parse_duration, Config, Filter, Page, Sort, TimeStyle};
+use crate::theme::Theme;
 
 /// What the command line asked for. `None` and `false` leave the choice to
 /// the file.
@@ -64,6 +66,8 @@ pub struct File {
     trace: Trace,
     #[serde(default)]
     tools: Tools,
+    #[serde(default)]
+    colors: Colors,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -109,6 +113,109 @@ struct Trace {
 struct Tools {
     recent: Option<usize>,
     output_chars: Option<usize>,
+}
+
+/// A colour per role ([`Theme`]). A role that is not set keeps its colour.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Colors {
+    label: Option<Colour>,
+    headline: Option<Colour>,
+    focus: Option<Colour>,
+    session: Option<Colour>,
+    cwd: Option<Colour>,
+    tool: Option<Colour>,
+    agent: Option<Colour>,
+    request: Option<Colour>,
+    ok: Option<Colour>,
+    warn: Option<Colour>,
+    error: Option<Colour>,
+    waiting: Option<Colour>,
+    dim: Option<Colour>,
+    search: Option<Colour>,
+}
+
+impl Colors {
+    /// `theme` with the roles that are set here replaced.
+    fn over(&self, mut theme: Theme) -> Theme {
+        let roles = [
+            (&mut theme.label, self.label),
+            (&mut theme.headline, self.headline),
+            (&mut theme.focus, self.focus),
+            (&mut theme.session, self.session),
+            (&mut theme.cwd, self.cwd),
+            (&mut theme.tool, self.tool),
+            (&mut theme.agent, self.agent),
+            (&mut theme.request, self.request),
+            (&mut theme.ok, self.ok),
+            (&mut theme.warn, self.warn),
+            (&mut theme.error, self.error),
+            (&mut theme.waiting, self.waiting),
+            (&mut theme.dim, self.dim),
+            (&mut theme.search, self.search),
+        ];
+        for (role, set) in roles {
+            if let Some(colour) = set {
+                *role = colour.0;
+            }
+        }
+        theme
+    }
+}
+
+/// A colour: one of the terminal's sixteen by name (`red`, `light-blue`,
+/// `dark-gray`, …), `default` for the terminal's own foreground, or
+/// `#rrggbb`.
+#[derive(Debug, Clone, Copy)]
+struct Colour(Color);
+
+impl Colour {
+    fn parse(text: &str) -> Option<Color> {
+        Some(match text {
+            "default" => Color::Reset,
+            "black" => Color::Black,
+            "red" => Color::Red,
+            "green" => Color::Green,
+            "yellow" => Color::Yellow,
+            "blue" => Color::Blue,
+            "magenta" => Color::Magenta,
+            "cyan" => Color::Cyan,
+            "gray" => Color::Gray,
+            "dark-gray" => Color::DarkGray,
+            "light-red" => Color::LightRed,
+            "light-green" => Color::LightGreen,
+            "light-yellow" => Color::LightYellow,
+            "light-blue" => Color::LightBlue,
+            "light-magenta" => Color::LightMagenta,
+            "light-cyan" => Color::LightCyan,
+            "white" => Color::White,
+            _ => {
+                let hex = text.strip_prefix('#').filter(|hex| hex.len() == 6)?;
+                let part = |at: usize| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok();
+                Color::Rgb(part(0)?, part(2)?, part(4)?)
+            }
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Colour {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl de::Visitor<'_> for Visitor {
+            type Value = Colour;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a colour such as \"red\", \"light-blue\" or \"#rrggbb\"")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Colour, E> {
+                Colour::parse(text)
+                    .map(Colour)
+                    .ok_or_else(|| E::invalid_value(de::Unexpected::Str(text), &self))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
 }
 
 /// A length of time, written as `--ago` takes it: `90s`, `30m`, `1h`, `2d`.
@@ -346,6 +453,7 @@ pub fn resolve(args: Args, file: File, env: &Env) -> Result<Config, String> {
     if let Some(chars) = file.tools.output_chars {
         config.output_chars = chars;
     }
+    config.colors = file.colors.over(config.colors);
     Ok(config)
 }
 
@@ -513,6 +621,12 @@ output_chars = 300
                 "agoo",
             ),
             ("[colours]\nwarn = \"red\"\n", "line 1", "colours"),
+            // A role and a colour that are not known.
+            ("[colors]\nwarning = \"red\"\n", "line 2", "warning"),
+            ("[colors]\nwarn = \"reddish\"\n", "line 2", "reddish"),
+            ("[colors]\nwarn = \"#12345\"\n", "line 2", "#12345"),
+            ("[colors]\nwarn = \"#12345g\"\n", "line 2", "#12345g"),
+            ("[colors]\nwarn = 3\n", "line 2", "colour"),
             // A value of the wrong type.
             ("cwd = \"yes\"\n", "line 1", "boolean"),
             ("[tools]\nrecent = \"many\"\n", "line 2", "many"),
@@ -552,6 +666,59 @@ output_chars = 300
                 error.contains(line) && error.contains(word),
                 "{text:?}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn a_role_takes_the_colour_it_is_given_and_the_others_keep_theirs() {
+        let config = config(
+            "[colors]\nwarn = \"light-red\"\nerror = \"#ff5555\"\ndim = \"default\"\n",
+            Args::default(),
+        );
+        let plain = Theme::default();
+        assert_eq!(config.colors.warn, Color::LightRed);
+        assert_eq!(config.colors.error, Color::Rgb(0xff, 0x55, 0x55));
+        assert_eq!(config.colors.dim, Color::Reset);
+        assert_eq!(
+            config.colors,
+            Theme {
+                warn: Color::LightRed,
+                error: Color::Rgb(0xff, 0x55, 0x55),
+                dim: Color::Reset,
+                ..plain
+            }
+        );
+        // Every role can be set.
+        let all = [
+            "label", "headline", "focus", "session", "cwd", "tool", "agent", "request", "ok",
+            "warn", "error", "waiting", "dim", "search",
+        ];
+        let text: String = std::iter::once("[colors]\n".to_owned())
+            .chain(all.iter().map(|role| format!("{role} = \"white\"\n")))
+            .collect();
+        let white = self::config(&text, Args::default()).colors;
+        assert_eq!(format!("{white:?}").matches("White").count(), all.len());
+        // Every name of a colour.
+        for name in [
+            "black",
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "gray",
+            "dark-gray",
+            "light-red",
+            "light-green",
+            "light-yellow",
+            "light-blue",
+            "light-magenta",
+            "light-cyan",
+            "white",
+            "default",
+        ] {
+            assert!(Colour::parse(name).is_some(), "{name}");
         }
     }
 
