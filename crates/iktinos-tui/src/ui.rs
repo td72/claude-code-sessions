@@ -2198,18 +2198,18 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 const HELP: &[(&str, &str)] = &[
     (
         "1 2 3 4 5",
-        "Sessions / Tool calls / Subagents / Trace / Usage",
+        "Trace / Sessions / Tool calls / Subagents / Usage",
     ),
     ("j / k", "down / up (scrolls the detail pane)"),
     ("gg / G", "top / bottom"),
     ("Ctrl+d / Ctrl+u", "half a page down / up"),
     (
         "Enter (session)",
-        "narrow pages 2 to 4 to it, show its tool calls",
+        "narrow the other lists to it, show its tool calls",
     ),
     (
         "Enter (subagent)",
-        "narrow page 2 to it, show its tool calls",
+        "narrow the tool calls to it, and show them",
     ),
     ("i / Enter", "focus the detail pane"),
     (
@@ -2403,17 +2403,13 @@ mod tests {
         select(&mut app, WITH_SUBAGENTS);
         let screen = screen(&mut app, 150, 44, SOON);
 
-        // Header: the four pages, the counts, the live state.
+        // Header: the pages in the order of their keys, the counts, the
+        // live state.
         let header = screen.lines().next().unwrap();
-        for page in [
-            "1:Sessions",
-            "2:Tool calls",
-            "3:Subagents",
-            "4:Trace",
-            "5:Usage",
-        ] {
-            assert!(header.contains(page), "{header}");
-        }
+        assert!(
+            header.contains("1:Trace   2:Sessions   3:Tool calls   4:Subagents   5:Usage"),
+            "{header}"
+        );
         assert!(header.contains("3 sessions"));
         assert!(header.contains("live off"));
 
@@ -3861,10 +3857,12 @@ mod tests {
 
     /// The fixture sessions, narrowed to those of `dir`.
     fn app_within(dir: &str) -> App {
-        App::new(Config {
+        let mut app = App::new(Config {
             within: Some(dir.into()),
             ..crate::app::tests::fixture_config()
-        })
+        });
+        app.go_to(Page::Sessions);
+        app
     }
 
     #[test]
@@ -4080,8 +4078,8 @@ mod tests {
         assert!(screen.contains("Keys (any key closes)"), "{screen}");
         assert!(screen.contains("Ctrl+d / Ctrl+u"));
         assert!(screen.contains("filter sessions"));
-        assert!(screen.contains("narrow pages 2 to 4"));
-        assert!(screen.contains("Sessions / Tool calls / Subagents / Trace / Usage"));
+        assert!(screen.contains("narrow the other lists to it"));
+        assert!(screen.contains("Trace / Sessions / Tool calls / Subagents / Usage"));
         assert!(screen.contains("unfold or fold a subagent"));
         assert!(screen.contains("interactions by session, or latest first"));
         assert!(screen.contains("a tool call's whole output"));

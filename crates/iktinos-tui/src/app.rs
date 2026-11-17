@@ -142,11 +142,13 @@ pub enum Page {
 }
 
 impl Page {
+    /// In the order of their keys, `1` to `5`. The first is the page the
+    /// viewer starts on.
     pub const ALL: [Page; 5] = [
+        Page::Trace,
         Page::Sessions,
         Page::Tools,
         Page::Subagents,
-        Page::Trace,
         Page::Usage,
     ];
 
@@ -482,7 +484,7 @@ impl App {
             files: BTreeMap::new(),
             whole: None,
             said: None,
-            page: Page::Sessions,
+            page: Page::ALL[0],
             in_detail: false,
             sort: Sort::Updated,
             filter: Filter::All,
@@ -1863,8 +1865,28 @@ pub mod tests {
         }
     }
 
+    /// The fixture sessions, on the Sessions page: most tests start from
+    /// its list. The viewer itself starts on the Trace page.
     pub fn fixture_app() -> App {
-        App::new(fixture_config())
+        let mut app = App::new(fixture_config());
+        app.go_to(Page::Sessions);
+        app
+    }
+
+    #[test]
+    fn the_viewer_starts_on_the_first_page_which_is_the_trace() {
+        let app = App::new(fixture_config());
+        assert_eq!(app.page, Page::Trace);
+        assert_eq!(
+            Page::ALL,
+            [
+                Page::Trace,
+                Page::Sessions,
+                Page::Tools,
+                Page::Subagents,
+                Page::Usage
+            ]
+        );
     }
 
     #[test]
