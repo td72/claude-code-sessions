@@ -195,6 +195,11 @@ pub struct App {
     /// The tool call under the cursor of a subagent's detail pane, which
     /// lists the subagent's calls.
     pub trace_selected: usize,
+    /// The Trace page lists its interactions under their sessions, instead
+    /// of all together, the latest first.
+    pub by_session: bool,
+    /// The sessions folded in that list, by id.
+    pub closed_sessions: HashSet<String>,
     /// The row under the cursor of the tree the Trace page shows for its
     /// interaction.
     pub span_selected: usize,
@@ -205,6 +210,10 @@ pub struct App {
     /// focus. Only ever set while `in_detail` is.
     pub call_focus: bool,
     pub call_scroll: usize,
+    /// The Trace page's pane beside its list was entered from the list, not
+    /// from the tree: it shows the interaction, and `h` goes back to the
+    /// list.
+    pub from_list: bool,
     /// The first visible row of each list ([`Page::list_index`]; the last
     /// is the Trace page's tree), kept between draws so a list scrolls only
     /// when the cursor leaves it.
@@ -232,6 +241,31 @@ const INTERACTION_ROWS: usize = 200;
 
 /// Which of the lists' scroll positions is the Trace page's tree's.
 pub const TREE: usize = 4;
+
+/// One row of the Trace page's list: a session, or under it one of its
+/// interactions.
+#[derive(Debug, Clone, Copy)]
+pub struct ListRow<'a> {
+    pub session: &'a Session,
+    /// `None` on the session's own row.
+    pub interaction: Option<InteractionRow<'a>>,
+    /// On a session's row: whether its interactions are listed under it.
+    pub open: bool,
+}
+
+impl ListRow<'_> {
+    /// The text the row is searched by.
+    fn text(&self) -> String {
+        match &self.interaction {
+            Some(interaction) => interaction.text(),
+            None => format!(
+                "{} {}",
+                label(self.session),
+                project(self.session).unwrap_or_default()
+            ),
+        }
+    }
+}
 
 /// One interaction in the Trace page's list.
 #[derive(Debug, Clone, Copy)]
@@ -317,11 +351,14 @@ impl App {
             subagent_selected: 0,
             detail_scroll: 0,
             trace_selected: 0,
+            by_session: false,
+            closed_sessions: HashSet::new(),
             span_selected: 0,
             open_agents: HashSet::new(),
             call_selected: 0,
             call_focus: false,
             call_scroll: 0,
+            from_list: false,
             offsets: [0; 5],
             search: None,
             typing: None,
@@ -373,10 +410,13 @@ impl App {
             .then(|| self.selected_call())
             .flatten()
             .map(|call| call.id.clone());
-        let interaction = (self.trace_selected > 0)
-            .then(|| self.selected_interaction())
+        let listed = (self.trace_selected > 0)
+            .then(|| self.selected_list_row())
             .flatten()
-            .map(|row| (row.session.id.clone(), row.interaction.id.clone()));
+            .map(|row| {
+                let interaction = row.interaction.map(|i| i.interaction.id.clone());
+                (row.session.id.clone(), interaction)
+            });
         let span = (self.span_selected > 0)
             .then(|| self.selected_span().map(|row| row.key()))
             .flatten();
@@ -397,11 +437,11 @@ impl App {
                 .position(|(s, a)| s.id == session && a.agent_id == id);
             self.follow(Page::Subagents, found);
         }
-        if let Some((session, id)) = interaction {
-            let found = self
-                .interactions()
-                .iter()
-                .position(|row| row.session.id == session && row.interaction.id == id);
+        if let Some((session, id)) = listed {
+            let found = self.trace_list().iter().position(|row| {
+                row.session.id == session
+                    && row.interaction.map(|i| &i.interaction.id) == id.as_ref()
+            });
             self.follow(Page::Trace, found);
         }
         if let Some(key) = span {
@@ -582,34 +622,135 @@ impl App {
         subagents
     }
 
-    /// The interactions of the Trace page, the latest first.
-    pub fn interactions(&self) -> Vec<InteractionRow<'_>> {
-        let mut interactions: Vec<InteractionRow> = self
+    /// The Trace page's list. Flat: every interaction, the latest first. By
+    /// session: the sessions that have interactions, the one with the
+    /// latest first, and under each that is not folded its interactions,
+    /// the latest first.
+    pub fn trace_list(&self) -> Vec<ListRow<'_>> {
+        if !self.by_session {
+            let mut rows: Vec<ListRow> = self
+                .in_scope()
+                .into_iter()
+                .flat_map(|session| {
+                    session.trace.iter().map(move |interaction| ListRow {
+                        session,
+                        interaction: Some(interaction_row(session, interaction)),
+                        open: true,
+                    })
+                })
+                .collect();
+            let started = |row: &ListRow| row.interaction.and_then(|i| i.interaction.started_at);
+            rows.sort_by(|a, b| {
+                started(b)
+                    .cmp(&started(a))
+                    .then_with(|| a.session.id.cmp(&b.session.id))
+            });
+            rows.truncate(INTERACTION_ROWS);
+            return rows;
+        }
+        let latest = |session: &Session| session.trace.iter().filter_map(|i| i.started_at).max();
+        let mut sessions: Vec<&Session> = self
             .in_scope()
             .into_iter()
-            .flat_map(|session| {
-                session.trace.iter().map(move |interaction| InteractionRow {
-                    session,
-                    interaction,
-                    end: interaction.ended_at.or_else(|| {
-                        let spans = interaction.thread.spans.iter();
-                        spans.filter_map(|s| s.ended_at.or(s.started_at)).max()
-                    }),
-                })
-            })
+            .filter(|session| !session.trace.is_empty())
             .collect();
-        interactions.sort_by(|a, b| {
-            b.interaction
-                .started_at
-                .cmp(&a.interaction.started_at)
-                .then_with(|| a.session.id.cmp(&b.session.id))
-        });
-        interactions.truncate(INTERACTION_ROWS);
-        interactions
+        sessions.sort_by(|a, b| latest(b).cmp(&latest(a)).then_with(|| a.id.cmp(&b.id)));
+
+        let mut rows = Vec::new();
+        let mut left = INTERACTION_ROWS;
+        for session in sessions {
+            if left == 0 {
+                break;
+            }
+            let open = !self.closed_sessions.contains(&session.id);
+            rows.push(ListRow {
+                session,
+                interaction: None,
+                open,
+            });
+            if !open {
+                continue;
+            }
+            for interaction in session.trace.iter().rev().take(left) {
+                rows.push(ListRow {
+                    session,
+                    interaction: Some(interaction_row(session, interaction)),
+                    open,
+                });
+                left -= 1;
+            }
+        }
+        rows
     }
 
+    /// How many interactions the Trace page's sessions hold, folded or not.
+    pub fn interaction_count(&self) -> usize {
+        self.in_scope()
+            .iter()
+            .map(|session| session.trace.len())
+            .sum()
+    }
+
+    pub fn selected_list_row(&self) -> Option<ListRow<'_>> {
+        self.trace_list().get(self.trace_selected).copied()
+    }
+
+    /// The interaction the Trace page's other panes show: the one under the
+    /// cursor, or, on a session's row, the session's latest.
     pub fn selected_interaction(&self) -> Option<InteractionRow<'_>> {
-        self.interactions().get(self.trace_selected).copied()
+        let row = self.selected_list_row()?;
+        row.interaction.or_else(|| {
+            let latest = row.session.trace.back()?;
+            Some(interaction_row(row.session, latest))
+        })
+    }
+
+    /// `t`: the Trace page's list by session, or flat again. The cursor
+    /// stays on its interaction (from a session's row, on its latest).
+    pub fn toggle_by_session(&mut self) {
+        if self.page != Page::Trace {
+            return;
+        }
+        let on = self
+            .selected_interaction()
+            .map(|row| (row.session.id.clone(), row.interaction.id.clone()));
+        self.by_session = !self.by_session;
+        // The session of that interaction is unfolded, so it has a row.
+        if let Some((session, _)) = &on {
+            self.closed_sessions.remove(session);
+        }
+        let found = on.and_then(|(session, id)| {
+            self.trace_list().iter().position(|row| {
+                row.session.id == session && row.interaction.is_some_and(|i| i.interaction.id == id)
+            })
+        });
+        self.trace_selected = found.unwrap_or(0);
+        self.offsets[Page::Trace.list_index()] = 0;
+    }
+
+    /// Folds or unfolds the session under the cursor of the Trace page's
+    /// list. `false` if the row is not a session's, or is already as asked.
+    fn fold_session(&mut self, open: Option<bool>) -> bool {
+        if self.page != Page::Trace || self.in_detail {
+            return false;
+        }
+        let Some(row) = self
+            .selected_list_row()
+            .filter(|row| row.interaction.is_none())
+        else {
+            return false;
+        };
+        let open = open.unwrap_or(!row.open);
+        if open == row.open {
+            return false;
+        }
+        let id = row.session.id.clone();
+        if open {
+            self.closed_sessions.remove(&id);
+        } else {
+            self.closed_sessions.insert(id);
+        }
+        true
     }
 
     /// The interaction under the Trace page's cursor as a tree, in the order
@@ -694,13 +835,28 @@ impl App {
         true
     }
 
-    /// `l`: unfolds a folded subagent of the Trace page's tree; otherwise
-    /// one pane further in.
+    /// `l`: on the Trace page, to the pane on the right, which shows the
+    /// interaction (from the list) or the span chosen (from the tree).
+    /// Elsewhere: one pane further in.
     pub fn right(&mut self) {
-        if self.choosing_span() && self.fold(Some(true)) {
-            return;
+        if self.page != Page::Trace {
+            self.focus_detail();
+        } else if !self.in_detail {
+            if self.selected_interaction().is_some() {
+                self.in_detail = true;
+                self.call_focus = true;
+                self.from_list = true;
+                self.call_scroll = 0;
+            }
+        } else if self.choosing_span() {
+            self.call_focus = self.selected_span().is_some();
         }
-        self.focus_detail();
+    }
+
+    /// The Trace page's tree shows its cursor: it has, or had before the
+    /// pane of its span, the focus.
+    pub fn in_tree(&self) -> bool {
+        self.in_detail && self.page == Page::Trace && !self.from_list
     }
 
     pub fn selected_tool(&self) -> Option<(&Session, &ToolCall)> {
@@ -750,7 +906,7 @@ impl App {
             Page::Sessions => self.order.len(),
             Page::Tools => self.tools().len(),
             Page::Subagents => self.subagents().len(),
-            Page::Trace => self.interactions().len(),
+            Page::Trace => self.trace_list().len(),
             Page::Usage => 0,
         }
     }
@@ -859,6 +1015,7 @@ impl App {
             self.page = page;
             self.in_detail = false;
             self.call_focus = false;
+            self.from_list = false;
             self.reset_detail();
         }
     }
@@ -881,6 +1038,7 @@ impl App {
         } else {
             self.in_detail = !self.in_detail;
             self.call_focus = false;
+            self.from_list = false;
         }
     }
 
@@ -900,6 +1058,10 @@ impl App {
     fn step_out(&mut self) -> bool {
         if self.in_call() {
             self.call_focus = false;
+            // Back to where the pane was entered from.
+            if std::mem::take(&mut self.from_list) {
+                self.in_detail = false;
+            }
         } else if self.in_detail {
             self.in_detail = false;
         } else {
@@ -916,8 +1078,9 @@ impl App {
 
     /// `Enter`. On a session: narrow the Tool calls and Subagents pages to it
     /// and show its tool calls. On a subagent: narrow the Tool calls page to
-    /// it and show them. On a subagent in the Trace page's tree: fold or
-    /// unfold it. Elsewhere: one pane further in.
+    /// it and show them. On a session in the Trace page's list, or a
+    /// subagent in its tree: fold or unfold it. Elsewhere: one pane further
+    /// in.
     pub fn enter(&mut self) {
         if self.in_detail {
             if !(self.choosing_span() && self.fold(None)) {
@@ -926,6 +1089,11 @@ impl App {
             return;
         }
         match self.page {
+            Page::Trace => {
+                if !self.fold_session(None) {
+                    self.focus_detail();
+                }
+            }
             Page::Sessions => {
                 let Some(id) = self.order.get(self.selected).cloned() else {
                     return;
@@ -998,14 +1166,10 @@ impl App {
         }
     }
 
-    /// `h`: out of the pane in focus only. In the Trace page's tree it first
-    /// folds the subagent under the cursor, or goes to the row this one is
-    /// under.
+    /// `h`: out of the pane in focus only. In the Trace page's tree, and in
+    /// its list by session, it first goes to the row this one is under.
     pub fn leave_detail(&mut self) {
         if self.choosing_span() {
-            if self.fold(Some(false)) {
-                return;
-            }
             let rows = self.span_rows();
             let parent = rows.get(self.span_selected).and_then(|row| {
                 rows[..self.span_selected]
@@ -1016,6 +1180,19 @@ impl App {
                 self.move_to(parent);
                 return;
             }
+        }
+        if self.page == Page::Trace && !self.in_detail {
+            let rows = self.trace_list();
+            let on_interaction = rows
+                .get(self.trace_selected)
+                .is_some_and(|row| row.interaction.is_some());
+            let session = rows[..self.trace_selected.min(rows.len())]
+                .iter()
+                .rposition(|row| row.interaction.is_none());
+            if let (true, Some(session)) = (on_interaction, session) {
+                self.move_to(session);
+            }
+            return;
         }
         self.step_out();
     }
@@ -1087,11 +1264,7 @@ impl App {
                     )
                 })
                 .collect(),
-            Page::Trace => self
-                .interactions()
-                .iter()
-                .map(InteractionRow::text)
-                .collect(),
+            Page::Trace => self.trace_list().iter().map(ListRow::text).collect(),
             Page::Usage => Vec::new(),
         };
         rows.into_iter().map(|row| row.to_lowercase()).collect()
@@ -1172,6 +1345,18 @@ pub fn calls_of<'a>(session: &'a Session, agent_id: &str) -> Vec<&'a ToolCall> {
         .collect();
     calls.sort_by(|a, b| latest_first(a, b));
     calls
+}
+
+/// An interaction as the Trace page lists it.
+fn interaction_row<'a>(session: &'a Session, interaction: &'a Interaction) -> InteractionRow<'a> {
+    InteractionRow {
+        session,
+        interaction,
+        end: interaction.ended_at.or_else(|| {
+            let spans = interaction.thread.spans.iter();
+            spans.filter_map(|s| s.ended_at.or(s.started_at)).max()
+        }),
+    }
 }
 
 /// The time of the last thing known about a session, from either input.
@@ -1572,11 +1757,19 @@ pub mod tests {
         writeln!(file, "{line}").unwrap();
     }
 
-    /// The interactions of the Trace page, by id.
-    fn interactions(app: &App) -> Vec<String> {
-        app.interactions()
+    /// The rows of the Trace page's list: an interaction by its id, a
+    /// session by the start of its own, with how it folds.
+    fn listed(app: &App) -> Vec<String> {
+        app.trace_list()
             .iter()
-            .map(|row| row.interaction.id.clone())
+            .map(|row| match row.interaction {
+                Some(interaction) => interaction.interaction.id.clone(),
+                None => format!(
+                    "{} {}",
+                    if row.open { "-" } else { "+" },
+                    &row.session.id[..8]
+                ),
+            })
             .collect()
     }
 
@@ -1607,15 +1800,14 @@ pub mod tests {
     fn the_trace_page_lists_interactions_over_the_tree_of_one() {
         let mut app = fixture_app();
         app.go_to(Page::Trace);
-        // Every session's interactions, the latest first; the list is never
-        // unfolded in place.
-        assert_eq!(interactions(&app).len(), 3);
+        // Every session's interactions, the latest first.
+        assert_eq!(listed(&app).len(), 3);
         assert_eq!(app.selected_interaction().unwrap().session.id, UNINDEXED);
         assert!(tree(&app).is_empty(), "only its prompt was read");
 
         // The tree under the list is the interaction under the cursor: its
-        // LLM requests and tool calls, the subagent under the call that spawned it
-        // and the one placed by time.
+        // LLM requests and tool calls, the subagent under the call that
+        // spawned it and the one placed by time.
         app.move_by(1);
         assert_eq!(
             app.selected_interaction().unwrap().session.id,
@@ -1642,19 +1834,15 @@ pub mod tests {
         app.move_by(1);
         app.enter();
         app.go_to(Page::Trace);
-        assert_eq!(interactions(&app), ["prompt-u1"]);
+        assert_eq!(listed(&app), ["prompt-u1"]);
 
         // Enter goes into the tree, where the cursor is on a span.
-        assert_eq!(
-            app.selected_span().map(|row| row.key()),
-            None::<String>.or(app.span_rows().first().map(|row| row.key()))
-        );
         app.enter();
-        assert!(app.choosing_span());
+        assert!(app.choosing_span() && app.in_tree());
         app.move_by(3);
         assert_eq!((app.trace_selected, app.span_selected), (0, 3));
-        // `l` (and Enter) unfold a subagent.
-        app.right();
+        // Enter unfolds a subagent, and folds it again.
+        app.enter();
         assert!(app.choosing_span());
         assert_eq!(
             tree(&app)[3..7],
@@ -1666,45 +1854,66 @@ pub mod tests {
             ]
         );
         app.enter();
-        assert_eq!(tree(&app).len(), 8, "Enter folds it again");
+        assert_eq!(tree(&app).len(), 8);
         app.enter();
         app.move_by(2);
         assert_eq!(app.selected_span().unwrap().key(), "t:toolu_s1");
 
-        // On a row that does not fold, they go on to the pane that shows
-        // it, which scrolls.
+        // `l` is the pane on the right, which shows the span and scrolls;
+        // it does not unfold anything. Enter on a row that does not fold
+        // goes there too.
         app.right();
-        assert!(app.in_call() && !app.choosing_span());
+        assert!(app.in_call() && !app.choosing_span() && app.in_tree());
         app.viewport.call_rows = 4;
         app.viewport.call_lines = 10;
         app.move_by(3);
         assert_eq!((app.call_scroll, app.span_selected), (3, 5));
+        app.right();
+        assert!(app.in_call(), "there is nothing further right");
         app.leave_detail();
         assert!(app.choosing_span());
         app.enter();
         assert!(app.in_call());
         app.back();
+        app.move_by(-2);
+        app.right();
+        assert!(app.in_call(), "on a subagent too");
+        assert_eq!(tree(&app).len(), 11, "and it stays unfolded");
+        app.leave_detail();
+        app.move_by(2);
 
-        // `h` goes to the row this one is under, then folds it, then leaves
-        // the tree.
+        // `h` goes to the row this one is under, then out of the tree; it
+        // does not fold anything.
         app.leave_detail();
         assert_eq!(app.span_selected, 3, "the subagent that made the call");
         assert_eq!(app.call_scroll, 0, "another span starts at its top");
         app.leave_detail();
-        assert_eq!(tree(&app)[3], "  + agent a1b2c3d4e5f60718");
-        app.leave_detail();
         assert_eq!(app.span_selected, 2, "the call that spawned it");
+        assert_eq!(tree(&app).len(), 11);
         app.leave_detail();
         assert!(
             !app.in_detail,
             "a call is under nothing but the interaction"
         );
 
+        // From the list, `l` is the same pane, showing the interaction, and
+        // `h` or Esc comes back to the list.
+        app.right();
+        assert!(app.in_call() && app.from_list && !app.in_tree());
+        app.move_by(2);
+        assert_eq!((app.call_scroll, app.trace_selected), (2, 0));
+        app.leave_detail();
+        assert!(!app.in_detail && !app.from_list);
+        app.right();
+        app.back();
+        assert!(!app.in_detail && !app.from_list);
+        assert!(app.scope.is_some(), "Esc left the pane, not the narrowing");
+
         // Tab goes round the three panes.
         app.toggle_focus();
         assert!(app.choosing_span());
         app.toggle_focus();
-        assert!(app.in_call());
+        assert!(app.in_call() && !app.from_list);
         app.toggle_focus();
         assert!(!app.in_detail && !app.call_focus);
 
@@ -1720,11 +1929,114 @@ pub mod tests {
         app.focus_detail();
         app.move_by(2);
         app.leave_detail();
-        app.leave_detail();
-        app.leave_detail();
         app.move_by(1);
         app.focus_detail();
         assert_eq!(app.span_selected, 0);
+    }
+
+    #[test]
+    fn the_trace_list_can_be_a_tree_of_sessions() {
+        let mut app = fixture_app();
+        app.go_to(Page::Trace);
+        app.move_by(1);
+        let flat = listed(&app);
+        assert_eq!(flat.len(), 3);
+        assert!(flat.iter().all(|row| !row.starts_with(['-', '+'])));
+
+        // `t`: each session with its interactions under it, and the cursor
+        // still on the interaction it was on.
+        app.toggle_by_session();
+        assert!(app.by_session);
+        assert_eq!(
+            listed(&app),
+            [
+                "- 33333333",
+                flat[0].as_str(),
+                "- 22222222",
+                "prompt-u1",
+                "- 11111111",
+                flat[2].as_str(),
+            ]
+        );
+        assert_eq!(app.trace_selected, 3);
+        assert_eq!(tree(&app).len(), 8);
+
+        // On a session's row the other panes show its latest interaction.
+        app.leave_detail(); // `h`: to the session the interaction is under
+        assert_eq!(app.trace_selected, 2);
+        assert_eq!(
+            app.selected_interaction().unwrap().interaction.id,
+            "prompt-u1"
+        );
+        assert_eq!(tree(&app).len(), 8);
+        // `h` and `l` fold nothing.
+        app.leave_detail();
+        assert_eq!(listed(&app).len(), 6);
+        app.right();
+        assert!(app.in_call() && app.from_list);
+        assert_eq!(listed(&app).len(), 6);
+        app.leave_detail();
+
+        // Enter folds a session and unfolds it; on an interaction it goes
+        // into the tree.
+        app.enter();
+        assert_eq!(
+            listed(&app),
+            [
+                "- 33333333",
+                flat[0].as_str(),
+                "+ 22222222",
+                "- 11111111",
+                flat[2].as_str(),
+            ]
+        );
+        assert!(!app.in_detail);
+        assert_eq!(tree(&app).len(), 8, "its latest interaction still");
+        app.enter();
+        assert_eq!(listed(&app).len(), 6);
+        app.move_by(1);
+        app.enter();
+        assert!(app.choosing_span());
+        app.back();
+
+        // A search matches a session by its name and an interaction by
+        // what it called.
+        app.start_search();
+        app.typing = Some("other.repo".to_owned());
+        app.submit_search();
+        assert_eq!(app.matches(Page::Trace, now()), [2]);
+        app.back();
+        app.start_search();
+        app.typing = Some("lookup".to_owned());
+        app.submit_search();
+        assert_eq!(app.matches(Page::Trace, now()), [3]);
+        app.back();
+
+        // `t` again: flat, on the same interaction. From a session's row,
+        // on its latest; a folded session is unfolded for it.
+        app.move_first();
+        app.move_by(2);
+        app.enter();
+        assert_eq!(listed(&app)[2], "+ 22222222");
+        app.toggle_by_session();
+        assert!(!app.by_session);
+        assert_eq!(listed(&app), flat);
+        assert_eq!(app.trace_selected, 1);
+        app.toggle_by_session();
+        assert_eq!(listed(&app)[2..4], ["- 22222222", "prompt-u1"]);
+        assert_eq!(app.trace_selected, 3);
+
+        // Narrowed to a session, the tree has that session only.
+        app.go_to(Page::Sessions);
+        app.move_first();
+        app.move_by(1);
+        app.enter();
+        app.go_to(Page::Trace);
+        assert_eq!(listed(&app), ["- 22222222", "prompt-u1"]);
+        // `t` belongs to the Trace page.
+        app.go_to(Page::Tools);
+        app.toggle_by_session();
+        assert!(app.by_session);
     }
 
     #[test]
@@ -1739,7 +2051,7 @@ pub mod tests {
         app.move_by(1);
         app.enter();
         app.move_by(3);
-        app.right(); // the subagent, unfolded
+        app.enter(); // the subagent, unfolded
         app.move_by(4);
         assert_eq!(
             app.selected_interaction().unwrap().interaction.id,
@@ -1755,7 +2067,7 @@ pub mod tests {
         append_tool_call(&projects, "toolu_new1", 1);
         append_agent_call(&projects, "toolu_s2", 2, r#"{"command":"ls"}"#);
         app.refresh();
-        assert_eq!(interactions(&app)[1..3], ["prompt-new", "prompt-u1"]);
+        assert_eq!(listed(&app)[1..3], ["prompt-new", "prompt-u1"]);
         assert_eq!(
             app.selected_interaction().unwrap().interaction.id,
             "prompt-u1"

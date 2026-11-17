@@ -90,6 +90,7 @@ Each list page is a list over a detail pane, in fixed proportions:
   time axis that is as long as the interaction; and beside the list what is
   chosen: where the interaction's time went, or, in the tree, a request's
   tokens and cost or a call's command.
+  `t` lists the interactions under their sessions instead.
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
@@ -105,7 +106,9 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `Enter` on a subagent | narrow page 2 to it and show its tool calls |
 | `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
 | `j` / `k` in a subagent's detail, or in an interaction's tree; then `i` / `Enter` | choose a tool call, or a span; into the pane that shows it |
-| `Enter` / `l`, `h` on a subagent in an interaction's tree | unfold it; fold it (`h` elsewhere goes to the row it is under, then out of the tree) |
+| `t` in the trace | list the interactions under their sessions, or all together, the latest first |
+| `Enter` on a session in that list, or on a subagent in an interaction's tree | unfold it, fold it |
+| `l`, `h` in the trace | the pane on the right, and back (`h` in the tree or under a session goes to the row above first) |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |

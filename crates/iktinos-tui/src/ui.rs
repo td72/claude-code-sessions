@@ -40,7 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
                 // The interactions, and beside them what is chosen: the interaction, or
                 // the span chosen in its tree below.
                 let [interactions, span] =
-                    Layout::horizontal([Constraint::Percentage(50), Constraint::Min(0)])
+                    Layout::horizontal([Constraint::Percentage(60), Constraint::Min(0)])
                         .areas(list);
                 draw_interaction_list(frame, interactions, app, now);
                 draw_span(frame, span, app, now);
@@ -476,18 +476,48 @@ fn interaction_state(
 
 fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let matches = app.matches(Page::Trace, now);
-    let scoped = app.scope.is_some();
-    let interactions = app.interactions();
-    let count = interactions.len();
-    let rows: Vec<Row<'static>> = interactions
+    // Flat, the rows name their session unless the page is narrowed to one;
+    // by session, the session is the row they are under.
+    let names = !app.by_session && app.scope.is_none();
+    let listed = app.trace_list();
+    let count = listed.len();
+    let rows: Vec<Row<'static>> = listed
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let InteractionRow {
-                session,
-                interaction,
-                end,
-            } = *row;
+            let session = row.session;
+            let Some(InteractionRow {
+                interaction, end, ..
+            }) = row.interaction
+            else {
+                // A session: its name, where it runs, what it is doing.
+                let status = app::status(session, now);
+                let when = session
+                    .trace
+                    .iter()
+                    .filter_map(|i| i.started_at)
+                    .max()
+                    .map_or("—".to_owned(), |at| format::ago(now, at));
+                let name = app::label(session).lines().next().unwrap_or_default();
+                return Row::new([
+                    Cell::from(Line::from(when).right_aligned()),
+                    Cell::from(Line::from(vec![
+                        Span::raw(if row.open { "▾ " } else { "▸ " }),
+                        Span::styled(name.to_owned(), Style::new().add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            format!(
+                                "  {} · {}",
+                                app::project(session).unwrap_or_else(|| "—".to_owned()),
+                                session.trace.len()
+                            ),
+                            dim(),
+                        ),
+                    ])),
+                    Cell::from(""),
+                    Cell::from(status.text).style(style_of(status.kind)),
+                ])
+                .style(row_style(&matches, index));
+            };
             let end = if interaction_runs(session, interaction, now) {
                 Some(now)
             } else {
@@ -501,7 +531,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 .started_at
                 .map_or("—".to_owned(), |at| format::ago(now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
-            if !scoped {
+            if names {
                 cells.push(session_cell(session));
             }
             let calls = interaction
@@ -513,7 +543,8 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
             cells.extend([
                 // Short: the list shares its row with the pane beside it.
                 Cell::from(format!(
-                    "{} llm, {}",
+                    "{}{} llm, {}",
+                    if app.by_session { "    " } else { "" },
                     interaction.thread.spans.len() - calls,
                     format::count(calls as u64, "tool")
                 )),
@@ -527,19 +558,32 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
         .collect();
     let mut widths = vec![Constraint::Length(4)];
     let mut header = vec!["when"];
-    if !scoped {
-        widths.push(Constraint::Max(16));
+    if names {
+        // The session gets what the short columns leave.
+        widths.push(Constraint::Fill(1));
         header.push("session");
+        widths.push(Constraint::Length(16));
+    } else {
+        widths.push(Constraint::Fill(1));
     }
-    widths.extend([
-        Constraint::Fill(1),
-        Constraint::Length(7),
-        Constraint::Length(7),
-    ]);
-    header.extend(["interaction", "took", ""]);
+    header.push(if app.by_session {
+        "session / interaction"
+    } else {
+        "interaction"
+    });
+    widths.extend([Constraint::Length(7), Constraint::Length(8)]);
+    header.extend(["took", ""]);
     let title = list_title(
         app,
-        format!("Trace ({})", format::count(count as u64, "interaction")),
+        format!(
+            "Trace ({} · {})",
+            format::count(app.interaction_count() as u64, "interaction"),
+            if app.by_session {
+                "by session"
+            } else {
+                "latest first"
+            }
+        ),
         matches.len(),
     );
     let table = Table::new(rows, widths)
@@ -553,7 +597,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
 /// in its tree, the span chosen there.
 fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
-    let chosen = app.selected_span().filter(|_| app.in_detail);
+    let chosen = app.selected_span().filter(|_| app.in_tree());
     let (title, lines) = match (chosen, app.selected_interaction()) {
         (Some(row), _) => ("Span", trace_lines(&row, now, width)),
         (
@@ -744,7 +788,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         .header(Row::new(header).style(dim()))
         .block(block);
     // The cursor shows once the tree has been entered.
-    let selected = app.in_detail.then_some(app.span_selected.min(count - 1));
+    let selected = app.in_tree().then_some(app.span_selected.min(count - 1));
     draw_list(frame, area, app, TREE, table, selected);
 }
 
@@ -1637,15 +1681,21 @@ const HELP: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "the page's panes in turn"),
     ("h / Esc", "back a pane, to the list"),
     (
-        "Enter, l / h",
-        "in an interaction's tree: unfold or fold a subagent",
+        "Enter",
+        "unfold or fold a subagent in an interaction's tree",
     ),
+    ("l / h", "in the trace: the pane on the right, and back"),
     (
         "Esc (list)",
         "clear the search, then the narrowing, step by step",
     ),
     ("/", "search the list"),
     ("n / N", "next / previous match"),
+    (
+        "t",
+        "in the trace: interactions by session, or latest first",
+    ),
+    ("Enter", "unfold or fold a session in the trace by session"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
     ("r", "refresh now"),
@@ -1966,7 +2016,7 @@ mod tests {
             .nth(tops[0])
             .unwrap()
             .contains("┐┌ Interaction "));
-        let interactions = pane_text(&shown, "┌ Trace (1 interaction) of 22222222");
+        let interactions = pane_text(&shown, "┌ Trace (1 interaction · latest first) of 22222222");
         assert!(interactions.contains("3 llm, 3 tools"), "{shown}");
         assert!(interactions.contains("8.0s") && interactions.contains("done"));
         // The list is never unfolded in place.
@@ -2023,7 +2073,7 @@ mod tests {
         assert!(span.contains("by        the main thread"), "{call}");
         assert!(span.contains("cargo test --workspace"));
         app.move_by(2);
-        app.right();
+        app.enter();
         let subagent = screen(&mut app, 150, 44, SOON);
         let tree = pane_text(&subagent, "┌ Interaction: ");
         assert!(tree.contains("▾ ↳ Explore"), "{subagent}");
@@ -2035,8 +2085,11 @@ mod tests {
         app.back();
         app.back();
         let all = screen(&mut app, 150, 44, SOON);
-        assert!(all.contains("Trace (3 interactions)"), "{all}");
-        let interactions = pane_text(&all, "┌ Trace (3 interactions)");
+        assert!(
+            all.contains("Trace (3 interactions · latest first)"),
+            "{all}"
+        );
+        let interactions = pane_text(&all, "┌ Trace (3 interactions");
         assert!(interactions.contains("session") && interactions.contains("Synthetic sessio"));
         // An interaction of which only the prompt was read.
         assert!(all.contains("nothing was read of this interaction but its prompt"));
@@ -2044,6 +2097,73 @@ mod tests {
         let narrow = screen(&mut app, 60, 30, SOON);
         assert!(!narrow.contains('█'), "{narrow}");
         assert!(narrow.contains("cargo test"));
+    }
+
+    #[test]
+    fn the_trace_list_by_session_puts_interactions_under_their_session() {
+        let mut app = fixture_app();
+        app.go_to(Page::Trace);
+        app.move_by(1);
+        // Flat: the session is a column, and it has the room.
+        let flat = screen(&mut app, 150, 44, SOON);
+        let list = pane_text(&flat, "┌ Trace (3 interactions · latest first)");
+        assert!(list.contains("session"), "{flat}");
+        assert!(list.contains("Synthetic title after the damage"), "{flat}");
+        assert!(list.contains("Synthetic session title"));
+
+        // By session: a row a session, its interactions under it.
+        app.toggle_by_session();
+        let tree = screen(&mut app, 150, 44, SOON);
+        let list = pane(&tree, "┌ Trace (3 interactions · by session)");
+        let find = |needle: &str| -> &str {
+            list.iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{tree}"))
+        };
+        let session = find("▾ 22222222");
+        assert!(session.contains("other.repo · 1") && session.contains("active"));
+        assert!(find("▾ Synthetic session title").contains("example · 1"));
+        assert!(find("    3 llm, 3 tools").contains("8.0s"));
+        assert!(list[1].contains("session / interaction"), "{tree}");
+        // The panes still show the interaction the cursor was on.
+        assert!(tree.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
+
+        // Folded, a session is one row; the panes show its latest
+        // interaction.
+        app.leave_detail();
+        app.enter();
+        let folded = screen(&mut app, 150, 44, SOON);
+        let list = pane_text(&folded, "┌ Trace (3 interactions · by session)");
+        assert!(list.contains("▸ 22222222"), "{folded}");
+        assert!(!list.contains("3 llm, 3 tools"));
+        assert!(folded.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
+        assert!(pane_text(&folded, "┌ Interaction ─").contains("took      8.0s"));
+    }
+
+    #[test]
+    fn the_pane_beside_the_trace_list_takes_the_focus_from_either_side() {
+        let mut app = fixture_app();
+        app.go_to(Page::Trace);
+        app.move_by(1);
+        // From the list: it shows the interaction, and the tree has no
+        // cursor.
+        app.right();
+        let beside = screen(&mut app, 150, 20, SOON);
+        assert!(beside.contains("┌ Interaction ["), "{beside}");
+        assert!(app.viewport.call_lines > app.viewport.call_rows);
+        app.move_last();
+        let scrolled = screen(&mut app, 150, 20, SOON);
+        assert!(pane_text(&scrolled, "┌ Interaction [").contains("id        prompt-u1"));
+        // From the tree: the span.
+        app.leave_detail();
+        app.enter();
+        app.move_by(1);
+        app.right();
+        let span = screen(&mut app, 150, 44, SOON);
+        assert!(
+            pane_text(&span, "┌ Span ").contains("cargo test --workspace"),
+            "{span}"
+        );
     }
 
     #[test]
@@ -2063,7 +2183,7 @@ mod tests {
         app.move_by(1);
         app.enter();
         app.move_by(3);
-        app.right();
+        app.enter();
         // The subagent's calls are far more than the pane shows.
         let top = screen(&mut app, 150, 40, LATER);
         assert!(
@@ -2463,6 +2583,8 @@ mod tests {
         assert!(screen.contains("narrow pages 2 to 4"));
         assert!(screen.contains("Sessions / Tool calls / Subagents / Trace / Usage"));
         assert!(screen.contains("unfold or fold a subagent"));
+        assert!(screen.contains("interactions by session, or latest first"));
+        assert!(screen.contains("the pane on the right, and back"));
     }
 
     #[test]
@@ -2513,6 +2635,14 @@ mod tests {
         println!("{}", screen(&mut app, 100, 24, SOON));
         app.go_to(Page::Trace);
         println!("{}", screen(&mut app, 150, 36, SOON));
+        app.back();
+        println!("{}", screen(&mut app, 150, 20, SOON));
+        app.toggle_by_session();
+        println!("{}", screen(&mut app, 150, 20, SOON));
+        app.toggle_by_session();
+        app.go_to(Page::Sessions);
+        app.enter();
+        app.go_to(Page::Trace);
         app.enter();
         app.move_by(3);
         app.enter();
@@ -2535,14 +2665,12 @@ mod tests {
                     app.move_first();
                     app.move_by(interaction);
                     app.focus_detail();
-                    for at in (0..40).rev() {
-                        app.move_first();
-                        app.move_by(at);
-                        app.right();
-                        app.leave_detail();
-                        app.in_detail = true;
-                        app.call_focus = false;
-                    }
+                    let agents: Vec<(String, String)> = app
+                        .store
+                        .sessions()
+                        .flat_map(|s| s.subagents.keys().map(|a| (s.id.clone(), a.clone())))
+                        .collect();
+                    app.open_agents.extend(agents);
                     for _ in 0..12 {
                         let screen = screen(&mut app, 160, 50, LATER);
                         assert!(!screen.contains("SYNTHETIC-TEXT"), "{screen}");

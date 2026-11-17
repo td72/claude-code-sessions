@@ -156,6 +156,7 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('n') => app.next_match(1),
         KeyCode::Char('N') => app.next_match(-1),
         KeyCode::Char('s') => app.cycle_sort(),
+        KeyCode::Char('t') => app.toggle_by_session(),
         KeyCode::Char('f') => app.cycle_filter(),
         _ => {}
     }
@@ -326,6 +327,24 @@ mod tests {
         );
         press(&mut app, "5j\ti");
         assert_eq!((app.page, app.in_detail), (Page::Usage, false));
+
+        // The Trace page: `l` and `h` are the pane on the right and back,
+        // `t` the list by session, Enter a fold.
+        press(&mut app, "4l");
+        assert!(app.in_call() && app.from_list);
+        press(&mut app, "h");
+        assert!(!app.in_detail);
+        press(&mut app, "t");
+        assert!(app.by_session);
+        // The cursor stayed on its interaction: up to its session.
+        press(&mut app, "k\n");
+        assert_eq!(app.closed_sessions.len(), 1);
+        press(&mut app, "\nt");
+        assert!(app.closed_sessions.is_empty() && !app.by_session);
+        press(&mut app, "j\njl");
+        assert!(app.in_call() && !app.from_list);
+        press(&mut app, "hh");
+        assert!(!app.in_detail);
 
         // Help.
         press(&mut app, "1?");
