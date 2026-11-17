@@ -69,6 +69,7 @@
 //! | [`session`] | the fold of records into `Session` / `SessionStore` |
 //! | [`trace`] | a session's latest interactions as trees of spans: LLM requests, tool calls, subagents |
 //! | [`output`] | the whole output of one tool call, read again from the transcript on demand |
+//! | [`place`] | where a session runs against a directory: below it, or in a worktree of the same git repository |
 //! | [`pricing`] | the embedded price table and context windows |
 
 pub mod record;
@@ -78,6 +79,8 @@ pub mod discover;
 pub mod tail;
 
 pub mod session;
+
+pub mod place;
 
 pub mod trace;
 

@@ -35,6 +35,9 @@ Options:
       --projects-dir <DIR>  Read transcripts from DIR instead of ~/.claude/projects
       --socket-dir <DIR>    Listen for live events in DIR instead of the shared default
       --no-live             Do not listen for live events from the bridge mod
+      --cwd                 Show only the sessions that run in the current directory,
+                            below it, or in a worktree of its git repository
+                            (the Usage page still totals every session)
       --time <STYLE>        Show times as `clock` (the local date and time, the
                             default) or `relative` (how long ago); T switches
       --ago <DURATION>      With `clock`, still show what is newer than DURATION
@@ -183,6 +186,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
     let mut live = true;
     let mut time = app::TimeStyle::default();
     let mut ago_within = app::DEFAULT_AGO_WITHIN;
+    let mut within = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -203,6 +207,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
             "--projects-dir" => projects_dir = Some(value("--projects-dir")?),
             "--socket-dir" => socket_dir = Some(value("--socket-dir")?),
             "--no-live" => live = false,
+            "--cwd" => {
+                if inline.is_some() {
+                    return Err("--cwd takes no value".to_owned());
+                }
+                let dir = env::current_dir()
+                    .map_err(|e| format!("--cwd: cannot tell the current directory: {e}"))?;
+                within = Some(dir);
+            }
             "--ago" => {
                 let length = inline.clone().or_else(|| args.next()).unwrap_or_default();
                 ago_within = app::parse_duration(&length).ok_or_else(|| {
@@ -233,6 +245,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
         socket_dir,
         time,
         ago_within,
+        within,
     }))
 }
 
@@ -252,6 +265,7 @@ mod tests {
             socket_dir: Some(PathBuf::from("/synthetic/sockets")),
             time: app::TimeStyle::default(),
             ago_within: app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         assert_eq!(
             parse(&[
@@ -267,6 +281,21 @@ mod tests {
         };
         assert!(config.live);
         assert_eq!(config.socket_dir, None);
+        // Every session unless asked otherwise.
+        assert_eq!(config.within, None);
+        let Ok(Parsed::Run(config)) = parse(&["--projects-dir=/p", "--cwd"]) else {
+            panic!()
+        };
+        assert_eq!(config.within, Some(env::current_dir().unwrap()));
+        // A flag: the directory is where the viewer was started, not named.
+        assert_eq!(
+            parse(&["--cwd=/work/example"]),
+            Err("--cwd takes no value".to_owned())
+        );
+        assert_eq!(
+            parse(&["--cwd", "/work/example"]),
+            Err("unexpected argument '/work/example'".to_owned())
+        );
         assert_eq!(config.time, app::TimeStyle::Clock);
         for (args, style) in [
             (

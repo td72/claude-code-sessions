@@ -2,6 +2,7 @@
 //! (the shape of vig's pages); the Usage page is three tables.
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
@@ -73,7 +74,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
     let mut counts = [0usize; 3];
-    for session in app.store.sessions() {
+    for session in app.shown() {
         match app::status(session, now).kind {
             StatusKind::Busy => counts[0] += 1,
             StatusKind::NeedsApproval => counts[1] += 1,
@@ -96,7 +97,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
     }
     spans.push(Span::raw(format!(
         "   {} sessions  {} busy",
-        app.store.len(),
+        app.shown().count(),
         counts[0]
     )));
     if counts[1] > 0 {
@@ -214,6 +215,8 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
                 " of {}",
                 format::truncate(app::label(session), 40)
             ));
+        } else if let Some(dir) = app.within() {
+            title.push_str(&format!(" in {}", place_name(dir)));
         }
         if let (Page::Tools, Some(agent)) = (app.page, app.scoped_subagent()) {
             title.push_str(&format!(
@@ -227,6 +230,22 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
         title.push_str(&format!("  /{} ({matches})", search.query));
     }
     title
+}
+
+/// The directory the lists are narrowed to, short enough for a title: its
+/// last two components.
+fn place_name(dir: &Path) -> String {
+    let names: Vec<_> = dir
+        .components()
+        .filter(|part| matches!(part, Component::Normal(_)))
+        .collect();
+    match names.len() {
+        0..=2 => dir.display().to_string(),
+        n => {
+            let last: PathBuf = names[n - 2..].iter().collect();
+            format!("…/{}", last.display())
+        }
+    }
 }
 
 /// When something happened, the way the lists are set to say it: how
@@ -318,14 +337,18 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         .collect();
     let title = list_title(
         app,
-        match &app.repository {
-            Some(repository) => format!(
-                "Sessions ({} · {repository} · {} ↓)",
-                app.filter.label(),
-                app.sort.label()
-            ),
-            None => format!("Sessions ({} · {} ↓)", app.filter.label(), app.sort.label()),
-        },
+        format!(
+            "Sessions ({}{}{} · {} ↓)",
+            app.filter.label(),
+            app.within()
+                .map(|dir| format!(" · in {}", place_name(dir)))
+                .unwrap_or_default(),
+            app.repository
+                .as_ref()
+                .map(|repository| format!(" · {repository}"))
+                .unwrap_or_default(),
+            app.sort.label()
+        ),
         matches.len(),
     );
     let table = Table::new(
@@ -2659,6 +2682,7 @@ mod tests {
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         let session = app.store.get(WITH_SUBAGENTS).unwrap();
         let known = session.trace.back().unwrap();
@@ -2699,6 +2723,7 @@ mod tests {
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Trace);
         app.by_session = false; // these are about the flat list
@@ -2751,6 +2776,7 @@ mod tests {
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Trace);
         app.by_session = false; // these are about the flat list
@@ -2853,6 +2879,7 @@ mod tests {
             socket_dir: None,
             time: TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Tools);
         let at = app
@@ -3004,6 +3031,7 @@ mod tests {
                 socket_dir: None,
                 time: TimeStyle::Clock,
                 ago_within,
+                within: None,
             });
             app.go_to(Page::Tools);
             app
@@ -3096,6 +3124,7 @@ mod tests {
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Subagents);
 
@@ -3389,6 +3418,7 @@ mod tests {
             socket_dir: Some(socket_dir.clone()),
             time: TimeStyle::Clock,
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         let LiveStatus::Listening(socket) = app.live.clone() else {
             panic!("{:?}", app.live)
@@ -3655,6 +3685,126 @@ mod tests {
         assert_eq!(app.repository, None);
     }
 
+    /// The fixture sessions, narrowed to those of `dir`.
+    fn app_within(dir: &str) -> App {
+        App::new(Config {
+            within: Some(dir.into()),
+            ..crate::app::tests::fixture_config()
+        })
+    }
+
+    #[test]
+    fn a_viewer_narrowed_to_a_directory_shows_its_sessions_only() {
+        let mut app = app_within("/work/example");
+        let sessions = screen(&mut app, 150, 44, SOON);
+        // The header counts what is shown, the title says where.
+        let header = sessions.lines().next().unwrap();
+        assert!(header.contains("2 sessions"), "{header}");
+        assert!(
+            sessions.contains("Sessions (all · in /work/example · updated ↓)"),
+            "{sessions}"
+        );
+        assert!(sessions.contains("Synthetic session title"));
+        assert!(sessions.contains("Synthetic title after the damage"));
+        assert!(!sessions.contains("other.repo"), "{sessions}");
+        assert!(
+            sessions.contains("2 sessions, 1 without a cost"),
+            "{sessions}"
+        );
+
+        // The other lists are of the same sessions.
+        app.go_to(Page::Trace);
+        let trace = screen(&mut app, 150, 44, SOON);
+        assert!(
+            trace.contains("Trace (2 interactions · by session) in /work/example"),
+            "{trace}"
+        );
+        assert!(!trace.contains("other.repo"), "{trace}");
+        app.go_to(Page::Tools);
+        let tools = screen(&mut app, 150, 44, SOON);
+        assert!(tools.contains("Tool calls (0) in /work/example"), "{tools}");
+        app.go_to(Page::Subagents);
+        assert!(screen(&mut app, 150, 44, SOON).contains("no subagents"));
+
+        // The Usage page totals every session, narrowed or not.
+        let usage = |app: &mut App| {
+            app.go_to(Page::Usage);
+            let shown = screen(app, 150, 44, SOON);
+            shown.lines().skip(1).collect::<Vec<_>>().join("\n")
+        };
+        let narrowed = usage(&mut app);
+        assert!(narrowed.contains("other.repo"), "{narrowed}");
+        assert_eq!(narrowed, usage(&mut fixture_app()));
+
+        // It goes with the other filters.
+        app.go_to(Page::Sessions);
+        app.toggle_repository();
+        app.cycle_filter();
+        app.cycle_filter();
+        let both = screen(&mut app, 150, 44, SOON);
+        assert!(
+            both.contains("Sessions (open · in /work/example · example · updated ↓)"),
+            "{both}"
+        );
+    }
+
+    #[test]
+    fn the_directory_is_matched_by_whole_names_and_downwards() {
+        let listed = |dir: &str| app_within(dir).order.len();
+        // Below the directory.
+        assert_eq!(listed("/work"), 3);
+        assert_eq!(listed("/work/other.repo"), 1);
+        // A name that only starts the same, and a directory further down.
+        assert_eq!(listed("/work/exam"), 0);
+        assert_eq!(listed("/work/example/src"), 0);
+
+        let mut app = app_within("/work/exam");
+        let empty = screen(&mut app, 150, 44, SOON);
+        assert!(
+            empty.lines().next().unwrap().contains("0 sessions"),
+            "{empty}"
+        );
+        assert!(empty.contains("no sessions"), "{empty}");
+
+        // A long path is named by its end.
+        let mut app = app_within("/no-such-root/a/b/work/example");
+        assert!(
+            screen(&mut app, 150, 44, SOON).contains("· in …/work/example ·"),
+            "{}",
+            screen(&mut app, 150, 44, SOON)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_without_a_known_location_is_outside_every_directory() {
+        // A live event for a session no transcript has shown: it runs
+        // nobody knows where.
+        let event = iktinos_live::event::Event::parse(
+            br#"{"v":1,"type":"turn.start","session_id":"99999999-9999-4999-8999-999999999999","ts":1793613600100,"turn_id":"t"}"#,
+        )
+        .unwrap();
+        let now = Timestamp::parse(SOON).unwrap();
+
+        let mut all = fixture_app();
+        iktinos_live::merge::apply_event(&mut all.store, &event);
+        all.arrange(now);
+        assert_eq!(all.order.len(), 4);
+
+        let mut narrowed = app_within("/work");
+        iktinos_live::merge::apply_event(&mut narrowed.store, &event);
+        narrowed.arrange(now);
+        assert_eq!(narrowed.order.len(), 3);
+        // The event was applied all the same.
+        assert_eq!(narrowed.store.len(), 4);
+        let shown = screen(&mut narrowed, 150, 44, SOON);
+        assert!(
+            shown.lines().next().unwrap().contains("3 sessions"),
+            "{shown}"
+        );
+        assert!(!shown.contains("99999999"), "{shown}");
+    }
+
     #[test]
     fn the_help_lists_the_keys_over_the_page() {
         let mut app = fixture_app();
@@ -3693,6 +3843,7 @@ mod tests {
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
+            within: None,
         });
         let sessions = screen(&mut app, 120, 20, LATER);
         assert!(sessions.contains("0 sessions"), "{sessions}");

@@ -58,7 +58,7 @@ for session in store.sessions() {
 
 | crate | role |
 | --- | --- |
-| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `pricing` (embedded price table) |
+| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the `iktinos` binary: a small terminal viewer |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
@@ -69,7 +69,18 @@ for session in store.sessions() {
 cargo install iktinos-tui     # installs the `iktinos` binary
 iktinos                       # the sessions on this machine
 iktinos --projects-dir tests/fixtures/2.1.325/projects --no-live
+iktinos --cwd                 # only the sessions of where it was started
 ```
+
+`--cwd` narrows every page but Usage to the sessions that run in the current
+directory, below it (by whole names: `foo` is not `foobar`), or in another
+worktree of the same git repository. A session whose location is not known is
+left out, and so is one of a worktree that has been removed. The lists'
+titles say where (`in …/td72/iktinos`), the header counts what is shown, and
+the Usage page still totals every session. To tell worktrees of one
+repository the viewer reads the repository's `.git` (a directory, or a
+worktree's file and the `commondir` it leads to); it starts no `git` and
+writes nothing.
 
 Four pages, in the shape and with the keys of [vig](https://github.com/td72/vig).
 Each list page is a list over a detail pane, in fixed proportions:
