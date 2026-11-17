@@ -1,6 +1,6 @@
 [package]
 name = "iktinos-live"
-version = "0.3.0"
+version = "0.2.0"
 description = "Live events for iktinos: the event protocol spoken by the iktinos-bridge mod and the Unix-socket server that receives it"
 readme = "../../README.md"
 edition.workspace = true

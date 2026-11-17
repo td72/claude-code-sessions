@@ -1,6 +1,6 @@
 [package]
 name = "iktinos-core"
-version = "0.3.0"
+version = "0.2.0"
 description = "Claude Code sessions as data: read the local transcripts (~/.claude/projects) into a model of every session on the machine"
 readme = "../../README.md"
 edition.workspace = true

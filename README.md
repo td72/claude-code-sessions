@@ -18,9 +18,9 @@ command is a terminal viewer over it.
 and watches the ground; it was also the name of an architect of the Parthenon.
 
 > Status: the crates (`iktinos-core`, `iktinos-live`, `iktinos-tui`, `iktinos`)
-> and the mod are implemented and at 0.3. Up to 0.2 the library was the crate
-> named `iktinos` and the command came with `iktinos-tui`: from 0.3 the
-> library is `iktinos-core` and `cargo install iktinos` installs the command. The project was called `claude-code-sessions` in its
+> and the mod are implemented. Up to 0.2 the library was the crate named
+> `iktinos` and the command came with `iktinos-tui`: from 0.3 the library is
+> `iktinos-core` and `cargo install iktinos` installs the command. The project was called `claude-code-sessions` in its
 > first days.
 
 ## Using the crate
