@@ -392,6 +392,7 @@ mod tests {
 
         // The Trace page: `l` and `h` are the pane on the right and back,
         // `t` the list by session, Enter a fold.
+        app.by_session = false;
         press(&mut app, "4l");
         assert!(app.in_call() && app.from_list);
         press(&mut app, "h");

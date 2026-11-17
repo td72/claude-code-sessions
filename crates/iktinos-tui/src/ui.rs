@@ -230,7 +230,8 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
             Row::new([
                 Cell::from(if scoped { "●" } else { "" }).style(Style::new().fg(Color::Cyan)),
                 session_cell(session),
-                Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned())),
+                Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned()))
+                    .style(cwd_style()),
                 Cell::from(session.git_branch.clone().unwrap_or_else(|| "—".to_owned())),
                 Cell::from(status.text).style(style_of(status.kind)),
                 Cell::from(Line::from(updated).right_aligned()),
@@ -566,18 +567,13 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     Cell::from(Line::from(when).right_aligned()),
                     Cell::from(Line::from(vec![
                         Span::raw(if row.open { "▾ " } else { "▸ " }),
+                        // Where it runs first: what tells sessions apart.
                         Span::styled(
-                            name.to_owned(),
-                            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            app::project(session).unwrap_or_else(|| "—".to_owned()),
+                            cwd_style(),
                         ),
-                        Span::styled(
-                            format!(
-                                "  {} · {}",
-                                app::project(session).unwrap_or_else(|| "—".to_owned()),
-                                session.trace.len()
-                            ),
-                            dim(),
-                        ),
+                        Span::raw("  "),
+                        Span::styled(name.to_owned(), Style::new().fg(Color::Cyan)),
                     ])),
                     number(session.trace.iter().map(|i| counts(i).0).sum()),
                     number(session.trace.iter().map(|i| counts(i).1).sum()),
@@ -608,7 +604,21 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 ])));
             } else {
                 if names {
-                    cells.push(session_cell(session));
+                    // Where it runs, then its name.
+                    cells.push(Cell::from(Line::from(vec![
+                        Span::styled(
+                            app::project(session).unwrap_or_else(|| "—".to_owned()),
+                            cwd_style(),
+                        ),
+                        Span::raw("  "),
+                        Span::raw(
+                            app::label(session)
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                                .to_owned(),
+                        ),
+                    ])));
                 }
                 cells.push(Cell::from(text).style(text_style));
             }
@@ -910,6 +920,12 @@ fn interaction_lines(
             .to_owned(),
         ),
     ];
+    if let Some(path) = session.project_path.as_ref().or(session.cwd.as_ref()) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "cwd"), label()),
+            Span::styled(path.display().to_string(), cwd_style()),
+        ]));
+    }
     if let Some(prompt) = &interaction.prompt {
         lines.push(field("prompt", prompt.clone()));
     }
@@ -1371,7 +1387,10 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     }
     lines.push(context_line(session, width));
     if let Some(path) = session.project_path.as_ref().or(session.cwd.as_ref()) {
-        lines.push(field("path", path.display().to_string()));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "cwd"), label()),
+            Span::styled(path.display().to_string(), cwd_style()),
+        ]));
     }
     if let Some(branch) = &session.git_branch {
         lines.push(field("branch", branch.clone()));
@@ -1822,6 +1841,11 @@ fn headline() -> Style {
     Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
 }
 
+/// Where a session runs.
+fn cwd_style() -> Style {
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+}
+
 /// A tool's name.
 fn tool_style() -> Style {
     Style::new().fg(Color::Cyan)
@@ -2119,6 +2143,7 @@ mod tests {
         select(&mut app, WITH_SUBAGENTS);
         app.enter();
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
 
         // Three panes: the interactions, beside them the interaction under the cursor,
         // under them its tree.
@@ -2217,7 +2242,7 @@ mod tests {
             "{all}"
         );
         let interactions = pane_text(&all, "┌ Trace (3 interactions");
-        assert!(interactions.contains("session") && interactions.contains("Synthetic sessio"));
+        assert!(interactions.contains("session") && interactions.contains("example  Synthet"));
         // An interaction of which only the prompt was read.
         assert!(all.contains("nothing was read of this interaction but its prompt"));
         app.move_by(1);
@@ -2230,6 +2255,7 @@ mod tests {
     fn the_trace_list_by_session_puts_interactions_under_their_session() {
         let mut app = fixture_app();
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         app.move_by(1);
         // Flat: the session is a column, and beside it what was asked.
         let flat = screen(&mut app, 150, 44, SOON);
@@ -2238,8 +2264,10 @@ mod tests {
             list.contains("session") && list.contains("prompt"),
             "{flat}"
         );
-        // (They share the room: both are cut at this width.)
-        assert!(list.contains("Synthetic sessio"), "{flat}");
+        // (They share the room: both are cut at this width.) The session
+        // is where it runs, then its name.
+        assert!(list.contains("other.repo  2222"), "{flat}");
+        assert!(list.contains("example  Synthet"), "{flat}");
         assert!(list.contains("Synthetic prompt: run the"), "{flat}");
         // The rest of the prompt is not kept.
         assert!(!flat.contains("SYNTHETIC-TEXT"));
@@ -2253,9 +2281,10 @@ mod tests {
                 .find(|line| line.contains(needle))
                 .unwrap_or_else(|| panic!("no {needle}\n{tree}"))
         };
-        let session = find("▾ 22222222");
-        assert!(session.contains("other.repo · 1") && session.contains("active"));
-        assert!(find("▾ Synthetic session title").contains("example · 1"));
+        // A session's row starts with where it runs.
+        let session = find("▾ other.repo");
+        assert!(session.contains("22222222") && session.contains("active"));
+        assert!(find("Synthetic session title").contains("▾ example"));
         // An interaction is under its session, with its counts; the
         // session's row has the totals.
         let under = find("8.0s").replace('│', " ");
@@ -2293,7 +2322,7 @@ mod tests {
         app.enter();
         let folded = screen(&mut app, 150, 44, SOON);
         let list = pane_text(&folded, "┌ Trace (3 interactions · by session)");
-        assert!(list.contains("▸ 22222222"), "{folded}");
+        assert!(list.contains("▸ other.repo  22222222"), "{folded}");
         assert!(!list.contains("8.0s"));
         assert!(folded.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
         assert!(pane_text(&folded, "┌ Interaction ─").contains("took      8.0s"));
@@ -2303,6 +2332,7 @@ mod tests {
     fn the_pane_beside_the_trace_list_takes_the_focus_from_either_side() {
         let mut app = fixture_app();
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         app.move_by(1);
         // From the list: it shows the interaction, and the tree has no
         // cursor.
@@ -2358,6 +2388,7 @@ mod tests {
 
         // A search finds an interaction by what was asked.
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         app.start_search();
         app.typing = Some("run the checks".to_owned());
         app.submit_search();
@@ -2383,6 +2414,7 @@ mod tests {
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         app.move_by(1);
         app.enter();
         app.move_by(3);
@@ -2434,7 +2466,8 @@ mod tests {
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Trace);
-        // Under the interaction of a session that is a day later.
+        app.by_session = false; // these are about the flat list
+                                // Under the interaction of a session that is a day later.
         app.move_by(1);
         assert_eq!(
             app.selected_interaction().unwrap().interaction.id,
@@ -2479,6 +2512,7 @@ mod tests {
         select(&mut app, WITH_SUBAGENTS);
         app.enter();
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         let now = Timestamp::parse(SOON).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();

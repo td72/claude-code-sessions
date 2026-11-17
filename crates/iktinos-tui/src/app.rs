@@ -247,8 +247,8 @@ pub struct App {
     /// The tool call under the cursor of a subagent's detail pane, which
     /// lists the subagent's calls.
     pub trace_selected: usize,
-    /// The Trace page lists its interactions under their sessions, instead
-    /// of all together, the latest first.
+    /// The Trace page lists its interactions under their sessions, as it
+    /// does to begin with, instead of all together, the latest first.
     pub by_session: bool,
     /// The sessions folded in that list, by id.
     pub closed_sessions: HashSet<String>,
@@ -408,7 +408,7 @@ impl App {
             subagent_selected: 0,
             detail_scroll: 0,
             trace_selected: 0,
-            by_session: false,
+            by_session: true,
             closed_sessions: HashSet::new(),
             span_selected: 0,
             open_agents: HashSet::new(),
@@ -1877,7 +1877,8 @@ pub mod tests {
     fn the_trace_page_lists_interactions_over_the_tree_of_one() {
         let mut app = fixture_app();
         app.go_to(Page::Trace);
-        // Every session's interactions, the latest first.
+        app.by_session = false; // these are about the flat list
+                                // Every session's interactions, the latest first.
         assert_eq!(listed(&app).len(), 3);
         assert_eq!(app.selected_interaction().unwrap().session.id, UNINDEXED);
         assert!(tree(&app).is_empty(), "only its prompt was read");
@@ -2014,7 +2015,9 @@ pub mod tests {
     #[test]
     fn the_trace_list_can_be_a_tree_of_sessions() {
         let mut app = fixture_app();
+        assert!(app.by_session, "by session to begin with");
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         app.move_by(1);
         let flat = listed(&app);
         assert_eq!(flat.len(), 3);
@@ -2127,6 +2130,7 @@ pub mod tests {
             ago_within: DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
         app.move_by(1);
         app.enter();
         app.move_by(3);
