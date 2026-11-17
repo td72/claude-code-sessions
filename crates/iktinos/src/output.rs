@@ -11,6 +11,10 @@
 //! up. That works for a call the session no longer lists, and costs one
 //! pass over the files. An output Claude Code moved out of the transcript
 //! (`<session>/tool-results/<tool_use_id>.txt`) is read from that file.
+//!
+//! The same goes for what a response said: an LLM request keeps its first
+//! line, and [`read_response`] reads all of it by the response's
+//! `message.id`. What a response thought is not read.
 
 use std::fmt;
 use std::fs::File;
@@ -202,4 +206,96 @@ fn read_capped(path: &Path) -> io::Result<(String, bool)> {
     let truncated = bytes.len() > MAX_OUTPUT_BYTES;
     bytes.truncate(MAX_OUTPUT_BYTES);
     Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+}
+
+/// Everything one response said: its text blocks, in order. What it thought
+/// is not part of it.
+#[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WholeResponse {
+    /// The text blocks of the response, a blank line between two.
+    pub text: String,
+    /// The text was longer than [`MAX_OUTPUT_BYTES`] and is cut here.
+    pub truncated: bool,
+}
+
+/// `Debug` says how much there is, not what.
+impl fmt::Debug for WholeResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WholeResponse")
+            .field("bytes", &self.text.len())
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Reads the whole text of the response `message_id` (an LLM request's
+/// [`message_id`](crate::trace::LlmRequest::message_id)) of the session
+/// `files` describes. `Ok(None)` when the response is not in the session's
+/// files, or said nothing (it only called tools).
+///
+/// Nothing is kept: every call reads the files again.
+pub fn read_response(files: &SessionFiles, message_id: &str) -> io::Result<Option<WholeResponse>> {
+    if message_id.is_empty() {
+        return Ok(None);
+    }
+    let transcripts = std::iter::once(&files.transcript.path).chain(
+        files
+            .subagents
+            .iter()
+            .map(|subagent| &subagent.transcript.path),
+    );
+    for path in transcripts {
+        match scan_response(path, message_id) {
+            // A response is in one transcript only.
+            Ok(Some(blocks)) => {
+                let (text, truncated) = capped(&blocks.join("\n\n"));
+                return Ok((!text.trim().is_empty()).then_some(WholeResponse { text, truncated }));
+            }
+            Ok(None) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+/// The text blocks of the response in one transcript; `None` if it is not
+/// there. A response is several records, one after the other.
+fn scan_response(path: &Path, message_id: &str) -> io::Result<Option<Vec<String>>> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let needle = message_id.as_bytes();
+    let mut line = Vec::new();
+    let mut found = None;
+    let mut bytes = 0;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 || bytes > MAX_OUTPUT_BYTES {
+            return Ok(found);
+        }
+        if !line.windows(needle.len()).any(|window| window == needle) {
+            continue;
+        }
+        let Ok(Value::Object(record)) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let message = record.get("message").and_then(Value::as_object);
+        if record.get("type").and_then(Value::as_str) != Some("assistant")
+            || message.and_then(|m| m.get("id")).and_then(Value::as_str) != Some(message_id)
+        {
+            continue;
+        }
+        let blocks = found.get_or_insert_with(Vec::new);
+        let texts = message
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str));
+        for text in texts {
+            bytes += text.len();
+            blocks.push(text.to_owned());
+        }
+    }
 }

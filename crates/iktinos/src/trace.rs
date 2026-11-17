@@ -8,8 +8,8 @@
 //! ```text
 //! interaction
 //! ├── LLM request
-//! ├── tool call
-//! │   └── subagent: its LLM requests and tool calls
+//! │   └── tool call
+//! │       └── subagent: its LLM requests and tool calls
 //! └── LLM request
 //! ```
 //!
@@ -24,8 +24,13 @@
 //!   there is none, and ends at its last block. **Its duration is an
 //!   approximation**: the transcript records when blocks were written, not
 //!   when the API answered.
-//! - A tool call's span runs from its `tool_use` block to its result. LLM
-//!   requests and tool calls are siblings, in the order they happened.
+//! - A tool call's span runs from its `tool_use` block to its result. A
+//!   thread keeps its LLM requests and tool calls side by side, in the
+//!   order they happened, as the exported traces do. **The tree departs
+//!   from them**: [`Session::walk`] hangs a tool call under the response
+//!   that called it (they share a `message.id`), so that a row says what
+//!   its response did. "Under" means "called by": the call runs after its
+//!   response has ended, so its time lies outside the response's.
 //! - A subagent hangs under the tool call that spawned it (`toolUseId` in
 //!   its metadata file). One without that link is placed by time, directly
 //!   under the interaction it started in.
@@ -146,6 +151,30 @@ pub struct LlmRequest {
     pub usd: Option<f64>,
     /// `end_turn`, `tool_use`, … of the last block read.
     pub stop_reason: Option<String>,
+    /// What the response said: the first line of its text
+    /// ([`RESPONSE_CHARS`](crate::record::RESPONSE_CHARS)). `None` for one
+    /// that only called tools. The whole text is read again on demand
+    /// ([`read_response`](crate::output::read_response)).
+    pub text: Option<String>,
+    /// From the request to the end of the response's thinking, for one that
+    /// thought. An approximation, like the span's own duration.
+    pub thinking_ms: Option<u64>,
+    /// The request did not continue the one before it on its thread: the
+    /// conversation was sent anew, as after a compaction.
+    pub rebuilt: bool,
+    /// The system prompt or the tools differ from those of the request
+    /// before it on its thread.
+    pub reshaped: bool,
+}
+
+impl LlmRequest {
+    /// The stop reason, where it is not one of the two a response usually
+    /// ends with (`tool_use`, `end_turn`).
+    pub fn unusual_stop(&self) -> Option<&str> {
+        self.stop_reason
+            .as_deref()
+            .filter(|reason| !matches!(*reason, "tool_use" | "end_turn"))
+    }
 }
 
 impl Thread {
@@ -340,7 +369,29 @@ struct Walk<'a> {
 
 impl<'a> Walk<'a> {
     fn thread(&mut self, thread: &'a Thread, depth: usize) {
+        // The responses read of this thread: a call hangs under the one
+        // that made it. A call whose response was not read (it was cut off,
+        // or the thread was full) stays where the thread has it.
+        let responses: HashSet<&str> = thread
+            .spans
+            .iter()
+            .filter_map(|span| match &span.kind {
+                SpanKind::LlmRequest(request) => request.message_id.as_deref(),
+                SpanKind::Tool(_) => None,
+            })
+            .collect();
         for span in &thread.spans {
+            let depth = match &span.kind {
+                SpanKind::Tool(call)
+                    if call
+                        .message_id
+                        .as_deref()
+                        .is_some_and(|id| responses.contains(id)) =>
+                {
+                    depth + 1
+                }
+                _ => depth,
+            };
             self.nodes.push(Node {
                 depth,
                 item: Item::Span(span),

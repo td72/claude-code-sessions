@@ -14,8 +14,8 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 use ratatui::Frame;
 
 use crate::app::{
-    self, App, InteractionRow, LiveStatus, Loaded, Page, Status, StatusKind, TimeStyle, Times,
-    Totals, TraceItem, TraceRow, TREE,
+    self, App, InteractionRow, LiveStatus, Loaded, Page, Said, Status, StatusKind, TimeStyle,
+    Times, Totals, TraceItem, TraceRow, TREE,
 };
 use crate::format;
 use crate::highlight;
@@ -96,8 +96,8 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
         ));
     }
     spans.push(Span::raw(format!(
-        "   {} sessions  {} busy",
-        app.shown().count(),
+        "   {}  {} busy",
+        format::count(app.shown().count() as u64, "session"),
         counts[0]
     )));
     if counts[1] > 0 {
@@ -891,13 +891,9 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
                 call.summary.clone().unwrap_or_default(),
             ),
             SpanKind::LlmRequest(request) => (
-                "llm_request".to_owned(),
+                request_text(row, request),
                 Style::new().fg(Color::LightBlue),
-                request
-                    .model
-                    .as_deref()
-                    .map(format::model_name)
-                    .unwrap_or_default(),
+                request_marks(request).join(", "),
             ),
             _ => (String::new(), Style::new(), String::new()),
         },
@@ -907,6 +903,57 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
             subagent_name(subagent).to_owned(),
         ),
     }
+}
+
+/// What a response did, in a line: the first line of what it said; for one
+/// that said nothing, how long it thought and the tools it called.
+fn request_text(row: &TraceRow, request: &LlmRequest) -> String {
+    if let Some(text) = &request.text {
+        return text.clone();
+    }
+    let mut parts = Vec::new();
+    if let Some(ms) = request.thinking_ms {
+        parts.push(format!("thinking {}", format::duration(ms)));
+    }
+    let called = called(row, request);
+    if !called.is_empty() {
+        parts.push(format!("→ {}", called.join(", ")));
+    }
+    if parts.is_empty() {
+        // Nothing was read of it but that it happened.
+        return "llm_request".to_owned();
+    }
+    parts.join(" ")
+}
+
+/// The tools a response called, by name, in order.
+fn called(row: &TraceRow, request: &LlmRequest) -> Vec<String> {
+    let Some(id) = request.message_id.as_deref() else {
+        return Vec::new();
+    };
+    let threads = std::iter::once(&row.interaction.thread)
+        .chain(row.session.subagents.values().map(|agent| &agent.thread));
+    threads
+        .flat_map(|thread| &thread.spans)
+        .filter_map(|span| match &span.kind {
+            SpanKind::Tool(call) if call.message_id.as_deref() == Some(id) => {
+                Some(format::tool_name(&call.name))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// What sets a request apart from the one before it, where anything does.
+fn request_marks(request: &LlmRequest) -> Vec<&'static str> {
+    let mut marks = Vec::new();
+    if request.rebuilt {
+        marks.push("context rebuilt");
+    }
+    if request.reshaped {
+        marks.push("shape changed");
+    }
+    marks
 }
 
 /// The pane under the interactions: the interaction under the cursor as a tree, each row
@@ -967,12 +1014,27 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                 Some(false) => "▸ ",
                 None => "  ",
             };
+            let is_request = matches!(
+                row.item,
+                TraceItem::Span(span) if matches!(span.kind, SpanKind::LlmRequest(_))
+            );
+            let mut text = vec![Span::raw(format!("{}{fold}", "  ".repeat(row.depth)))];
+            if is_request {
+                // What marks a response comes first, where it is not cut,
+                // and stands out.
+                if !beside.is_empty() {
+                    text.push(Span::styled(
+                        format!("{beside}  "),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                }
+                text.push(Span::styled(name, style));
+            } else {
+                text.push(Span::styled(name, style));
+                text.push(Span::raw(format!("  {beside}")));
+            }
             let mut cells = vec![
-                Cell::from(Line::from(vec![
-                    Span::raw(format!("{}{fold}", "  ".repeat(row.depth))),
-                    Span::styled(name, style),
-                    Span::raw(format!("  {beside}")),
-                ])),
+                Cell::from(Line::from(text)),
                 Cell::from(
                     Line::from(
                         between(start, end)
@@ -1013,7 +1075,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let mut widths = vec![
         Constraint::Fill(1),
         Constraint::Length(7),
-        Constraint::Length(8),
+        // As wide as the longest stop reason that matters: `max_tokens`.
+        Constraint::Length(10),
     ];
     let mut header = vec!["span", "took", ""];
     if axis > 0 {
@@ -1039,7 +1102,14 @@ fn trace_lines(app: &App, row: &TraceRow, now: Timestamp, width: usize) -> Vec<L
                 lines
             }
             SpanKind::LlmRequest(request) => {
-                llm_request_lines(request, span.started_at, span.duration_ms(), now)
+                let mut lines =
+                    llm_request_lines(request, span.started_at, span.duration_ms(), now);
+                let said = request
+                    .message_id
+                    .as_deref()
+                    .and_then(|id| app.said_for(&row.session.id, id));
+                lines.extend(said_lines(request, &called(row, request), said, width));
+                lines
             }
             _ => Vec::new(),
         },
@@ -1184,6 +1254,66 @@ fn interaction_lines(
     lines
 }
 
+/// What a response did: the tools it called and what it said, the first
+/// line of it or, once it was read (`o`), all of it.
+fn said_lines(
+    request: &LlmRequest,
+    called: &[String],
+    said: Option<&Said>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::raw("")];
+    if !called.is_empty() {
+        lines.push(field("called", called.join(", ")));
+    }
+    match said.map(|said| &said.text) {
+        Some(Err(reason)) => lines.push(Line::styled(
+            format!("said      could not be read: {reason}"),
+            Style::new().fg(Color::Red),
+        )),
+        Some(Ok(None)) => lines.push(Line::styled(
+            "said      nothing: the session's files hold no text of this response",
+            dim(),
+        )),
+        Some(Ok(Some(whole))) => {
+            let chars = whole.text.chars().count();
+            lines.push(Line::styled(
+                format!(
+                    "said      all of it: {}, {}  (o: the first line)",
+                    format::count(whole.text.lines().count() as u64, "line"),
+                    format::count(chars as u64, "character"),
+                ),
+                label(),
+            ));
+            let shown = match whole.text.char_indices().nth(WHOLE_SHOWN) {
+                Some((end, _)) => &whole.text[..end],
+                None => &whole.text,
+            };
+            lines.extend(wrap(shown, width));
+            if chars > WHOLE_SHOWN {
+                lines.push(Line::styled(
+                    format!("… the first {WHOLE_SHOWN} characters are shown"),
+                    dim(),
+                ));
+            }
+            if whole.truncated {
+                lines.push(Line::styled("… cut where reading stopped", dim()));
+            }
+        }
+        None => match &request.text {
+            Some(text) => {
+                lines.push(Line::styled(
+                    "said      the first line  (o: all of it)",
+                    label(),
+                ));
+                lines.extend(wrap(text, width));
+            }
+            None => lines.push(Line::styled("said      nothing", dim())),
+        },
+    }
+    lines
+}
+
 /// One API response.
 fn llm_request_lines(
     request: &LlmRequest,
@@ -1199,7 +1329,37 @@ fn llm_request_lines(
         lines.push(field("source", source.clone()));
     }
     if let Some(stop) = &request.stop_reason {
-        lines.push(field("stop", stop.clone()));
+        lines.push(match request.unusual_stop() {
+            Some(stop) => Line::from(vec![
+                Span::styled(format!("{:<10}", "stop"), label()),
+                Span::styled(stop.to_owned(), Style::new().fg(Color::Red)),
+            ]),
+            None => field("stop", stop.clone()),
+        });
+    }
+    if request.rebuilt {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "context"), label()),
+            Span::styled(
+                "rebuilt: sent anew, not as a continuation (as after a compaction)",
+                Style::new().fg(Color::Yellow),
+            ),
+        ]));
+    }
+    if request.reshaped {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "shape"), label()),
+            Span::styled(
+                "the system prompt or the tools differ from the request before",
+                Style::new().fg(Color::Yellow),
+            ),
+        ]));
+    }
+    if let Some(ms) = request.thinking_ms {
+        lines.push(field(
+            "thinking",
+            format!("{}  approximate", format::duration(ms)),
+        ));
     }
     if let Some(at) = started_at {
         lines.push(field("started", format::started(now, at)));
@@ -2076,6 +2236,7 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "unfold or fold a session in the trace by session"),
     ("T", "times as a date and time, or as how long ago"),
     ("o", "a tool call's whole output, or its excerpt again"),
+    ("o", "in the trace, on a request: all its response said"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
     (
@@ -2494,13 +2655,19 @@ mod tests {
         assert!(find("/work/example/README.md").contains("failed"));
         assert!(find("▸ ↳ Explore").contains("Synthetic agent task"));
         assert!(find("▸ ↳ agent").contains("b2c3d4e5f6071829"));
-        let requests: Vec<&&str> = tree
-            .iter()
-            .filter(|l| l.contains("llm_request  "))
-            .collect();
-        assert_eq!(requests.len(), 3, "{shown}");
-        assert!(requests[0].contains("fable-5-2") && requests[0].contains("tool_use"));
+        // A request's row says what its response did: the tools it called,
+        // or the first line of what it said.
+        let requests = [
+            find("→ Bash, Read"),
+            find("→ example/lookup"),
+            find("Synthetic answer: the checks pass"),
+        ];
+        assert!(requests[0].contains("tool_use"), "{shown}");
         assert!(requests[2].contains("end_turn"));
+        // The calls are under the response that made them.
+        let indent = |line: &str| line.chars().skip(1).take_while(|c| *c == ' ').count();
+        assert!(indent(bash) > indent(requests[0]), "{shown}");
+        assert_eq!(indent(bash), indent(find("/work/example/README.md")));
         // In the order they happened, left to right.
         assert!(bar_at(requests[0]) < bar_at(bash));
         assert!(bar_at(bash) < bar_at(find("synthetic lookup")));
@@ -2845,8 +3012,8 @@ mod tests {
         };
         let colour = |word: &str| colour_at(word, 0);
         // What a row is.
-        assert_eq!(colour("llm_request"), Color::LightBlue);
-        assert_eq!(colour("Bash"), Color::Cyan);
+        assert_eq!(colour("→ Bash, Read"), Color::LightBlue);
+        assert_eq!(colour("Bash  cargo"), Color::Cyan);
         assert_eq!(colour("↳ Explore"), Color::Magenta);
         // What a call is about is not greyed out.
         assert_eq!(colour("cargo test --workspace"), Color::Reset);
@@ -3014,10 +3181,17 @@ mod tests {
             pane_text(&whole, "┌ Span ").contains("Synthetic whole output of toolu_01"),
             "{whole}"
         );
-        // An LLM request has no output to read.
+        // On the request above it, `o` reads what the response said
+        // instead, and the output is let go.
         app.move_by(-1);
         app.load_output();
-        assert_eq!(app.whole.as_ref().unwrap().call, "toolu_01");
+        assert_eq!(app.whole, None);
+        assert!(app.said.is_some());
+        let said = screen(&mut app, 150, 44, LATER);
+        let span = pane_text(&said, "┌ Span ");
+        assert!(span.contains("called    Bash, Read"), "{said}");
+        // It only called tools.
+        assert!(span.contains("said      nothing"), "{said}");
     }
 
     #[test]
@@ -3803,6 +3977,99 @@ mod tests {
             "{shown}"
         );
         assert!(!shown.contains("99999999"), "{shown}");
+    }
+
+    /// The fixture session whose responses think, speak and are marked, on
+    /// the Trace page with the cursor in its interaction's tree.
+    fn responses_app() -> App {
+        let mut app = App::new(Config {
+            projects_dir: crate::app::tests::fixtures()
+                .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                .join("responses"),
+            ..crate::app::tests::fixture_config()
+        });
+        app.go_to(Page::Trace);
+        app.by_session = false;
+        app.enter();
+        assert!(app.in_tree());
+        app
+    }
+
+    #[test]
+    fn a_requests_row_says_what_its_response_did() {
+        const NOW: &str = "2026-11-05T09:01:00.000Z";
+        let mut app = responses_app();
+        let shown = screen(&mut app, 150, 44, NOW);
+        let tree = pane(&shown, "┌ Interaction: 3 LLM requests, 3 tool calls");
+        let find = |needle: &str| -> &str {
+            tree.iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{shown}"))
+        };
+        let indent = |line: &str| line.chars().skip(1).take_while(|c| *c == ' ').count();
+
+        // The first line of what it said; the model is not on the row.
+        let spoke = find("Synthetic answer: reading the build script first");
+        assert!(spoke.contains("tool_use"), "{shown}");
+        assert!(
+            !tree.iter().any(|line| line.contains("fable-5-2")),
+            "{shown}"
+        );
+        // Both calls it made at once are under it.
+        let read = find("Read  /work/responses/build.rs");
+        let bash = find("Bash  cargo build");
+        assert!(
+            indent(read) > indent(spoke) && indent(read) == indent(bash),
+            "{shown}"
+        );
+
+        // One that said nothing: how long it thought, and what it called.
+        let silent = find("thinking 12.0s → Grep");
+        assert_eq!(indent(silent), indent(spoke));
+        assert!(indent(find("Grep  synthetic_feature")) > indent(silent));
+
+        // The marks, only where they apply.
+        // They come first on the row, where they are not cut.
+        let cut = find("context rebuilt, shape changed  Synthetic answer: the feature");
+        assert!(cut.contains("max_tokens"), "{shown}");
+        assert_eq!(shown.matches("context rebuilt").count(), 1, "{shown}");
+
+        // Nothing unmodelled is on the screen.
+        assert!(!shown.contains("SYNTHETIC-TEXT"), "{shown}");
+
+        // The detail: the model, the thinking, what was called and said.
+        let span = pane_text(&shown, "┌ Span ");
+        assert!(span.contains("model     claude-fable-5-2"), "{shown}");
+        assert!(span.contains("thinking  3.0s"), "{shown}");
+        assert!(span.contains("called    Read, Bash"), "{shown}");
+        assert!(
+            span.contains("said      the first line  (o: all of it)"),
+            "{shown}"
+        );
+
+        // `o` reads all of it from the transcript; again, the first line.
+        app.load_output();
+        let whole = screen(&mut app, 150, 60, NOW);
+        let span = pane_text(&whole, "┌ Span ");
+        assert!(span.contains("said      all of it: 2 lines"), "{whole}");
+        assert!(
+            span.contains("SYNTHETIC-TEXT invented for the fixture"),
+            "{whole}"
+        );
+        app.load_output();
+        assert_eq!(app.said, None);
+        assert!(!screen(&mut app, 150, 44, NOW).contains("SYNTHETIC-TEXT"));
+
+        // The last request: its marks in words, its stop in red.
+        app.move_by(5);
+        let last = screen(&mut app, 150, 44, NOW);
+        let span = pane_text(&last, "┌ Span ");
+        assert!(span.contains("stop      max_tokens"), "{last}");
+        assert!(span.contains("context   rebuilt"), "{last}");
+        assert!(
+            span.contains("shape     the system prompt or the tools differ"),
+            "{last}"
+        );
     }
 
     #[test]

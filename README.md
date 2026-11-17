@@ -104,6 +104,12 @@ Each list page is a list over a detail pane, in fixed proportions:
   time axis that is as long as the interaction; and beside the list what is
   chosen: where the interaction's time went, or, in the tree, a request's
   tokens and cost or a call's command.
+  A request's row says what its response did: the first line of what it
+  said, or, where it said nothing, how long it thought and the tools it
+  called (`thinking 12.0s → Read, Bash`); the calls are under it. What sets
+  a request apart comes first on its row (`context rebuilt`,
+  `shape changed`), and a stop reason other than `tool_use` and `end_turn`
+  is red.
   The interactions are listed under their sessions, a session's row
   starting with where it runs; `t` lists them all together instead, the
   latest first. A row says what was asked (the first line of the prompt),
@@ -131,6 +137,7 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the repository, then the narrowing |
 | `o` on a tool call | read its whole output from the transcript and show it; again, the excerpt |
+| `o` on a request in an interaction's tree | read all its response said from the transcript and show it; again, the first line |
 | `T` | show times as a local date and time, or as how long ago (`--time clock` or `--time relative` sets which to start with; with `clock`, what is newer than `--ago`, an hour unless told otherwise, is still shown as how long ago) |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
 | `F` on a session | list only the sessions of its repository; again, or `Esc`, all of them |
@@ -171,8 +178,9 @@ timestamp; accumulated fields are folded once from the transcript offsets. No
 field is written by both inputs, so arrival order never changes the result.
 
 Text is modelled where a view needs it (a title, the last prompt, the first
-line of each recent prompt, a subagent's description, what a tool call was
-about and, in a store that asks for it, the start of what the call returned).
+line of each recent prompt and of each recent response, a subagent's
+description, what a tool call was about and, in a store that asks for it, the
+start of what the call returned).
 The crates never log record contents themselves, and a session keeps bounded
 recent activity, not its whole history: its latest tool calls, and its latest
 interactions as a trace.
@@ -195,13 +203,28 @@ OpenTelemetry (`claude_code.interaction`, `claude_code.llm_request`,
 ```
 interaction
 ├─ LLM request
-├─ tool call
-│  └─ subagent          (the call that spawned it)
-│     ├─ LLM request
-│     ├─ tool call
-│     └─ LLM request
+│  └─ tool call         (the response that called it)
+│     └─ subagent       (the call that spawned it)
+│        ├─ LLM request
+│        │  └─ tool call
+│        └─ LLM request
 └─ LLM request
 ```
+
+This is where the tree departs from the exported traces, in which LLM
+requests and tool calls are siblings (and a thread still keeps them side by
+side, in order): `Session::walk` hangs a tool call under the response that
+called it, so that a request's row says what its response did. "Under" means
+"called by": a call runs after its response has ended. A call whose response
+was not read stays a sibling.
+
+An LLM request carries the first line of what its response said, how long it
+thought (from the request to the end of its thinking block; what it thought
+is not modelled), and two marks: `rebuilt`, a request in the middle of a
+thread that does not continue the one before it (the conversation was sent
+anew, as after a compaction), and `reshaped`, one whose system prompt or
+tools differ from the request before. The whole text of a response is read
+again on demand (`output::read_response`) and kept nowhere.
 
 An interaction runs from a prompt to Claude Code's own `turn_duration` record;
 one without it is still running or was cut off, and the transcript cannot tell

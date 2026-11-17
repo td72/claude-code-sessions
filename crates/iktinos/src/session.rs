@@ -37,7 +37,7 @@
 //! of everything", and [`Cost::source`] says which it was.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ use std::time::Duration;
 use crate::discover::SessionFiles;
 use crate::pricing::{self, Pricing, Tokens};
 use crate::record::{Record, Timestamp, ToolOutput, Usage, View};
-use crate::trace::{Interaction, Thread, DEFAULT_TRACE_INTERACTIONS};
+use crate::trace::{between, Interaction, Thread, DEFAULT_TRACE_INTERACTIONS};
 
 /// How many recent tool calls a session keeps unless told otherwise.
 pub const DEFAULT_RECENT_TOOLS: usize = 20;
@@ -678,6 +678,8 @@ pub struct ToolCall {
     pub input: Option<String>,
     /// The subagent that made the call, if one did.
     pub agent_id: Option<String>,
+    /// `message.id` of the response that made the call.
+    pub message_id: Option<String>,
     pub started_at: Option<Timestamp>,
     /// From the call to its result. `None` while it runs.
     pub duration_ms: Option<u64>,
@@ -718,6 +720,19 @@ enum Mode {
     Preview,
 }
 
+/// One `api-request` record, remembered until its response is read.
+#[derive(Debug, Clone)]
+struct Requested {
+    id: String,
+    /// `querySource`.
+    source: Option<String>,
+    at: Option<Timestamp>,
+    /// Sent without a `base`, and not the first of its thread.
+    rebuilt: bool,
+    /// Its `shapeHash` differs from that of the request before it.
+    reshaped: bool,
+}
+
 /// The bookkeeping behind a session that is not part of its public state.
 #[derive(Debug, Clone, Default)]
 struct Fold {
@@ -725,7 +740,10 @@ struct Fold {
     seen: HashSet<u64>,
     /// Recent `api-request` ids, their `querySource` and when they were
     /// written.
-    requests: VecDeque<(String, String, Option<Timestamp>)>,
+    requests: VecDeque<Requested>,
+    /// The `shapeHash` of the latest `api-request` of each thread (`None`
+    /// is the main thread). A thread that is here has made a request.
+    shapes: HashMap<Option<String>, Option<String>>,
     /// When each response happened and what it is estimated to have cost.
     charges: Vec<Charge>,
     /// The sum of `charges`.
@@ -862,9 +880,10 @@ impl Entry {
                 let request = assistant
                     .request_ref
                     .as_deref()
-                    .and_then(|id| fold.requests.iter().rev().find(|(r, _, _)| r == id));
-                let source = request.map(|(_, source, _)| source.clone());
-                let requested_at = request.and_then(|(_, _, at)| *at).or(previous);
+                    .and_then(|id| fold.requests.iter().rev().find(|r| r.id == id))
+                    .cloned();
+                let source = request.as_ref().and_then(|r| r.source.clone());
+                let requested_at = request.as_ref().and_then(|r| r.at).or(previous);
                 let mut charged = None;
                 if let (true, Some(model), Some(usage)) = (counted, model, assistant.usage) {
                     let tokens = tokens_of(&usage);
@@ -891,6 +910,7 @@ impl Entry {
                     charged = Some((tokens, usd));
                 }
 
+                let request_marks = request.as_ref().map(|r| (r.rebuilt, r.reshaped));
                 // The response's span, and after it the calls it makes.
                 let mut thread = session.thread_mut(agent, at, limit.interactions);
                 if let Some(request) = thread.as_mut().and_then(|thread| {
@@ -909,6 +929,17 @@ impl Entry {
                     if assistant.stop_reason.is_some() {
                         request.stop_reason.clone_from(&assistant.stop_reason);
                     }
+                    if request.text.is_none() {
+                        request.text.clone_from(&assistant.text);
+                    }
+                    if assistant.thinking {
+                        // The block is written when the thinking is over.
+                        request.thinking_ms = between(requested_at, at);
+                    }
+                    if let Some(requested) = &request_marks {
+                        request.rebuilt = requested.0;
+                        request.reshaped = requested.1;
+                    }
                 }
                 let mut calls = Vec::new();
                 for call in &assistant.tool_uses {
@@ -921,6 +952,7 @@ impl Entry {
                         summary: call.summary.clone(),
                         input: call.input.clone(),
                         agent_id: agent.map(str::to_owned),
+                        message_id: assistant.message_id.clone(),
                         started_at: at,
                         duration_ms: None,
                         success: None,
@@ -1029,8 +1061,21 @@ impl Entry {
             }
             View::ApiRequest(request) => {
                 if mode == Mode::Fold {
-                    if let (Some(id), Some(source)) = (&request.id, &request.query_source) {
-                        fold.requests.push_back((id.clone(), source.clone(), at));
+                    if let Some(id) = &request.id {
+                        // Against the request before it on the same thread.
+                        let before = fold
+                            .shapes
+                            .insert(agent.map(str::to_owned), request.shape_hash.clone());
+                        fold.requests.push_back(Requested {
+                            id: id.clone(),
+                            source: request.query_source.clone(),
+                            at,
+                            rebuilt: before.is_some() && !request.has_base,
+                            reshaped: matches!(
+                                (&before, &request.shape_hash),
+                                (Some(Some(before)), Some(now)) if before != now
+                            ),
+                        });
                         while fold.requests.len() > RECENT_REQUESTS {
                             fold.requests.pop_front();
                         }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iktinos::discover::{discover, SessionFiles};
-use iktinos::output::{read_tool_output, WholeOutput};
+use iktinos::output::{read_response, read_tool_output, WholeOutput, WholeResponse};
 use iktinos::place::Place;
 use iktinos::record::{Record, Timestamp};
 use iktinos::session::{
@@ -275,6 +275,9 @@ pub struct App {
     files: BTreeMap<String, SessionFiles>,
     /// The whole output of one call, read when it was asked for (`o`).
     pub whole: Option<Loaded>,
+    /// The whole text of one response, read the same way. One of the two
+    /// is held at a time.
+    pub said: Option<Said>,
     pub page: Page,
     /// The detail pane has the focus, not the list above it.
     pub in_detail: bool,
@@ -352,6 +355,16 @@ pub struct Loaded {
     pub call: String,
     /// `Ok(None)`: the session's files hold no result of the call.
     pub output: Result<Option<WholeOutput>, String>,
+}
+
+/// The whole text of one response, as it was read on demand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Said {
+    pub session: String,
+    /// The response's `message.id`.
+    pub message: String,
+    /// `Ok(None)`: the response said nothing, or is not in the files.
+    pub text: Result<Option<WholeResponse>, String>,
 }
 
 /// How many rows the Tool calls page lists at most.
@@ -468,6 +481,7 @@ impl App {
             tails: BTreeMap::new(),
             files: BTreeMap::new(),
             whole: None,
+            said: None,
             page: Page::Sessions,
             in_detail: false,
             sort: Sort::Updated,
@@ -1402,9 +1416,27 @@ impl App {
     /// files, and shows it in place of the excerpt; again, the excerpt.
     /// One call's at a time: the text is dropped when another is asked for.
     pub fn load_output(&mut self) {
+        if let Some((session, message)) = self.shown_request() {
+            self.whole = None;
+            if self.said_for(&session, &message).is_some() {
+                self.said = None;
+                return;
+            }
+            let text = match self.files.get(&session) {
+                Some(files) => read_response(files, &message).map_err(|e| e.to_string()),
+                None => Ok(None),
+            };
+            self.said = Some(Said {
+                session,
+                message,
+                text,
+            });
+            return;
+        }
         let Some((session, call)) = self.shown_call() else {
             return;
         };
+        self.said = None;
         if self.whole_for(&session, &call).is_some() {
             self.whole = None;
             return;
@@ -1418,6 +1450,31 @@ impl App {
             call,
             output,
         });
+    }
+
+    /// The LLM request the trace's tree is on, with its session: the
+    /// response's `message.id`.
+    fn shown_request(&self) -> Option<(String, String)> {
+        if self.page != Page::Trace || !self.in_tree() {
+            return None;
+        }
+        let row = self.selected_span()?;
+        match row.item {
+            TraceItem::Span(span) => match &span.kind {
+                SpanKind::LlmRequest(request) => {
+                    Some((row.session.id.clone(), request.message_id.clone()?))
+                }
+                _ => None,
+            },
+            TraceItem::Subagent(_) => None,
+        }
+    }
+
+    /// The whole text of a response, if it is the one that was read.
+    pub fn said_for(&self, session: &str, message: &str) -> Option<&Said> {
+        self.said
+            .as_ref()
+            .filter(|said| said.session == session && said.message == message)
     }
 
     /// The whole output of a call, if it is the one that was read.
@@ -2131,11 +2188,11 @@ pub mod tests {
             tree(&app),
             [
                 "llm_request",
-                "Bash",
-                "Read",
-                "  + agent a1b2c3d4e5f60718",
+                "  Bash",
+                "  Read",
+                "    + agent a1b2c3d4e5f60718",
                 "llm_request",
-                "mcp__example__lookup",
+                "  mcp__example__lookup",
                 "llm_request",
                 "+ agent b2c3d4e5f6071829",
             ]
@@ -2161,10 +2218,10 @@ pub mod tests {
         assert_eq!(
             tree(&app)[3..7],
             [
-                "  - agent a1b2c3d4e5f60718",
-                "    llm_request",
-                "    Grep",
-                "    llm_request",
+                "    - agent a1b2c3d4e5f60718",
+                "      llm_request",
+                "        Grep",
+                "      llm_request",
             ]
         );
         app.enter();
@@ -2199,15 +2256,19 @@ pub mod tests {
         // `h` goes to the row this one is under, then out of the tree; it
         // does not fold anything.
         app.leave_detail();
-        assert_eq!(app.span_selected, 3, "the subagent that made the call");
+        assert_eq!(app.span_selected, 4, "the response that made the call");
         assert_eq!(app.call_scroll, 0, "another span starts at its top");
+        app.leave_detail();
+        assert_eq!(app.span_selected, 3, "the subagent whose response it is");
         app.leave_detail();
         assert_eq!(app.span_selected, 2, "the call that spawned it");
         assert_eq!(tree(&app).len(), 11);
         app.leave_detail();
+        assert_eq!(app.span_selected, 0, "the response that made that call");
+        app.leave_detail();
         assert!(
             !app.in_detail,
-            "a call is under nothing but the interaction"
+            "a response is under nothing but the interaction"
         );
 
         // From the list, `l` is the same pane, showing the interaction, and
@@ -2242,7 +2303,10 @@ pub mod tests {
         // Another interaction's tree starts at its top.
         app.focus_detail();
         app.move_by(2);
+        // To the response the call is under, then out of the tree.
         app.leave_detail();
+        app.leave_detail();
+        assert!(!app.in_detail);
         app.move_by(1);
         app.focus_detail();
         assert_eq!(app.span_selected, 0);
@@ -2398,7 +2462,7 @@ pub mod tests {
         assert!(!tree(&app).contains(&"Edit".to_owned()));
         app.back();
         app.move_by(-1);
-        assert_eq!(tree(&app), ["llm_request", "Edit"]);
+        assert_eq!(tree(&app), ["llm_request", "  Edit"]);
 
         let _ = std::fs::remove_dir_all(projects);
     }
