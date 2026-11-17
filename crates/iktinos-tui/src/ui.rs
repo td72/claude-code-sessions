@@ -5,13 +5,17 @@ use std::collections::BTreeMap;
 
 use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
+use iktinos::trace::{between, Interaction, Item, LlmRequest, SpanKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use crate::app::{self, App, LiveStatus, Page, StatusKind};
+use crate::app::{
+    self, App, InteractionRow, LiveStatus, Page, StatusKind, TimeStyle, Times, TraceItem, TraceRow,
+    TREE,
+};
 use crate::format;
 use crate::highlight;
 
@@ -32,18 +36,31 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
         match app.page {
             Page::Sessions => draw_session_list(frame, list, app, now),
             Page::Tools => draw_tool_list(frame, list, app, now),
-            _ => draw_subagent_list(frame, list, app, now),
+            Page::Subagents => draw_subagent_list(frame, list, app, now),
+            _ => {
+                // The interactions, and beside them what is chosen: the interaction, or
+                // the span chosen in its tree below.
+                let [interactions, span] =
+                    Layout::horizontal([Constraint::Percentage(60), Constraint::Min(0)])
+                        .areas(list);
+                draw_interaction_list(frame, interactions, app, now);
+                draw_span(frame, span, app, now);
+            }
         }
-        if app.page == Page::Subagents {
-            // The subagent, and beside it the tool call chosen in it. The
-            // subagent's side is as wide as its tables, where there is room.
-            let left = 72.min(detail.width * 11 / 20);
-            let [subagent, call] =
-                Layout::horizontal([Constraint::Length(left), Constraint::Min(0)]).areas(detail);
-            draw_detail(frame, subagent, app, now);
-            draw_call(frame, call, app, now);
-        } else {
-            draw_detail(frame, detail, app, now);
+        match app.page {
+            Page::Subagents => {
+                // The subagent, and beside it the tool call chosen in it.
+                // The subagent's side is as wide as its tables, where there
+                // is room.
+                let left = 72.min(detail.width * 11 / 20);
+                let [subagent, call] =
+                    Layout::horizontal([Constraint::Length(left), Constraint::Min(0)])
+                        .areas(detail);
+                draw_detail(frame, subagent, app, now);
+                draw_call(frame, call, app, now);
+            }
+            Page::Trace => draw_tree(frame, detail, app, now),
+            _ => draw_detail(frame, detail, app, now),
         }
     } else {
         draw_usage_page(frame, body, app);
@@ -140,6 +157,25 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
     title
 }
 
+/// When something happened, the way the lists are set to say it: how
+/// long ago, or the date and time once it is no longer new.
+fn when(times: Times, now: Timestamp, at: Timestamp) -> String {
+    let age = now.as_millis() - at.as_millis();
+    let new = age >= 0 && (age as u128) < times.ago_within.as_millis();
+    match times.style {
+        TimeStyle::Clock if !new => format::when(now, at),
+        _ => format::ago(now, at),
+    }
+}
+
+/// The width of the column [`when`] fills.
+fn when_width(times: Times) -> u16 {
+    match times.style {
+        TimeStyle::Clock => format::WHEN_WIDTH,
+        TimeStyle::Relative => 4,
+    }
+}
+
 /// The style of a row the search matches.
 fn row_style(matches: &[usize], index: usize) -> Style {
     if matches.contains(&index) {
@@ -194,7 +230,8 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
             Row::new([
                 Cell::from(if scoped { "●" } else { "" }).style(Style::new().fg(Color::Cyan)),
                 session_cell(session),
-                Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned())),
+                Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned()))
+                    .style(cwd_style()),
                 Cell::from(session.git_branch.clone().unwrap_or_else(|| "—".to_owned())),
                 Cell::from(status.text).style(style_of(status.kind)),
                 Cell::from(Line::from(updated).right_aligned()),
@@ -247,11 +284,12 @@ fn outcome(call: &ToolCall) -> (&'static str, Style) {
     match call.success {
         Some(true) => ("ok", Style::new().fg(Color::Green)),
         Some(false) => ("failed", Style::new().fg(Color::Red)),
-        None => ("running", dim()),
+        None => ("running", running()),
     }
 }
 
 fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let time = app.times();
     let matches = app.matches(Page::Tools, now);
     // The session column says nothing once the page is narrowed to one.
     let scoped = app.scope.is_some();
@@ -269,25 +307,26 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
             );
             let when = call
                 .started_at
-                .map_or("—".to_owned(), |at| format::ago(now, at));
+                .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
             if !scoped {
                 cells.push(session_cell(session));
             }
             cells.extend([
-                Cell::from(name),
+                Cell::from(name).style(tool_style()),
                 Cell::from(call.summary.clone().unwrap_or_default()),
                 Cell::from(
                     Line::from(call.duration_ms.map(format::duration).unwrap_or_default())
                         .right_aligned(),
-                ),
+                )
+                .style(took_style(call.duration_ms)),
                 Cell::from(mark).style(style),
             ]);
             Row::new(cells).style(row_style(&matches, index))
         })
         .collect();
     // What the call was about gets every column the others can spare.
-    let mut widths = vec![Constraint::Length(4)];
+    let mut widths = vec![Constraint::Length(when_width(time))];
     let mut header = vec!["when"];
     if !scoped {
         widths.push(Constraint::Max(22));
@@ -317,6 +356,7 @@ fn subagent_name(subagent: &Subagent) -> &str {
 }
 
 fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let time = app.times();
     let matches = app.matches(Page::Subagents, now);
     let scoped = app.scope.is_some();
     let subagents = app.subagents();
@@ -326,12 +366,12 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         .enumerate()
         .map(|(index, (session, subagent))| {
             let done = match subagent.finished {
-                Some(true) => Span::styled("done", dim()),
-                _ => Span::styled("running", Style::new().fg(Color::Green)),
+                Some(true) => Span::styled("done", done()),
+                _ => Span::styled("running", running()),
             };
             let when = subagent
                 .last_activity
-                .map_or("—".to_owned(), |at| format::ago(now, at));
+                .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
             if !scoped {
                 cells.push(session_cell(session));
@@ -343,15 +383,15 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
                     "{}{}",
                     if entered { "● " } else { "" },
                     subagent.agent_type.as_deref().unwrap_or("agent")
-                )),
+                ))
+                .style(agent_style()),
                 Cell::from(subagent_name(subagent).to_owned()),
                 Cell::from(
                     subagent
                         .model
                         .as_deref()
                         .map_or("—".to_owned(), format::model_name),
-                )
-                .style(dim()),
+                ),
                 Cell::from(
                     Line::from(format::tokens(subagent.usage.total_tokens())).right_aligned(),
                 ),
@@ -372,7 +412,7 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         })
         .collect();
     // The task gets every column the others can spare.
-    let mut widths = vec![Constraint::Length(4)];
+    let mut widths = vec![Constraint::Length(when_width(time))];
     let mut header = vec!["when"];
     if !scoped {
         widths.push(Constraint::Max(22));
@@ -393,6 +433,651 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.subagent_selected);
     draw_list(frame, area, app, 2, table, selected);
+}
+
+/// Whether an interaction is still going: it has no end, it is its session's latest
+/// and the session is at work. The transcript alone cannot tell an interaction that
+/// runs from one that was cut off.
+fn interaction_runs(session: &Session, interaction: &Interaction, now: Timestamp) -> bool {
+    interaction.ended_at.is_none()
+        && session
+            .trace
+            .back()
+            .is_some_and(|last| std::ptr::eq(last, interaction))
+        && app::status(session, now).kind == StatusKind::Busy
+}
+
+/// A span as a bar on a time axis from `from` to `to`, `width` columns wide.
+/// One without an end is a single column.
+fn bar(
+    start: Option<Timestamp>,
+    end: Option<Timestamp>,
+    (from, to): (Timestamp, Timestamp),
+    width: usize,
+) -> String {
+    let (Some(start), true) = (start, width > 0) else {
+        return String::new();
+    };
+    let total = (to.as_millis() - from.as_millis()).max(1) as f64;
+    let column = |at: Timestamp| {
+        ((at.as_millis() - from.as_millis()) as f64 / total).clamp(0.0, 1.0) * width as f64
+    };
+    let first = (column(start).floor() as usize).min(width - 1);
+    let last = end
+        .map_or(first + 1, |end| column(end).ceil() as usize)
+        .clamp(first + 1, width);
+    format!("{}{}", " ".repeat(first), "█".repeat(last - first))
+}
+
+/// What an interaction's main thread did, in a few words.
+fn interaction_summary(interaction: &Interaction) -> String {
+    let spans = &interaction.thread.spans;
+    let calls = spans
+        .iter()
+        .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
+        .count();
+    format!(
+        "{}, {}",
+        format::count((spans.len() - calls) as u64, "LLM request"),
+        format::count(calls as u64, "tool call")
+    )
+}
+
+/// What an interaction's row says it was: what was asked, or, where the
+/// prompt is not known, the tools it used and how often (`Bash×3 Read×2`).
+fn interaction_text(interaction: &Interaction) -> (String, Style) {
+    if let Some(prompt) = &interaction.prompt {
+        return (prompt.clone(), Style::new());
+    }
+    // In the order they were first used.
+    let mut tools: Vec<(String, usize)> = Vec::new();
+    for span in &interaction.thread.spans {
+        if let SpanKind::Tool(call) = &span.kind {
+            let name = format::tool_name(&call.name);
+            match tools.iter_mut().find(|(known, _)| *known == name) {
+                Some((_, count)) => *count += 1,
+                None => tools.push((name, 1)),
+            }
+        }
+    }
+    let text = tools
+        .iter()
+        .map(|(name, count)| match count {
+            1 => name.clone(),
+            _ => format!("{name}×{count}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (text, tool_style())
+}
+
+/// How an interaction ended, as far as can be told.
+fn interaction_state(
+    session: &Session,
+    interaction: &Interaction,
+    now: Timestamp,
+) -> (&'static str, Style) {
+    if interaction.ended_at.is_some() {
+        ("done", done())
+    } else if interaction_runs(session, interaction, now) {
+        ("running", running())
+    } else {
+        ("no end", dim())
+    }
+}
+
+fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let time = app.times();
+    let matches = app.matches(Page::Trace, now);
+    // Flat, the rows name their session unless the page is narrowed to one;
+    // by session, the session is the row they are under, in that column.
+    let names = app.by_session || app.scope.is_none();
+    let by_session = app.by_session;
+    // How many LLM requests and tool calls a main thread holds.
+    let counts = |interaction: &Interaction| {
+        let spans = &interaction.thread.spans;
+        let calls = spans
+            .iter()
+            .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
+            .count();
+        (spans.len() - calls, calls)
+    };
+    let number = |n: usize| Cell::from(Line::from(n.to_string()).right_aligned());
+    let listed = app.trace_list();
+    let count = listed.len();
+    let rows: Vec<Row<'static>> = listed
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let session = row.session;
+            let Some(InteractionRow {
+                interaction, end, ..
+            }) = row.interaction
+            else {
+                // A session: its name, where it runs, what it is doing.
+                let status = app::status(session, now);
+                let when = session
+                    .trace
+                    .iter()
+                    .filter_map(|i| i.started_at)
+                    .max()
+                    .map_or("—".to_owned(), |at| when(time, now, at));
+                let name = app::label(session).lines().next().unwrap_or_default();
+                return Row::new([
+                    Cell::from(Line::from(when).right_aligned()),
+                    Cell::from(Line::from(vec![
+                        Span::raw(if row.open { "▾ " } else { "▸ " }),
+                        // Where it runs first: what tells sessions apart.
+                        Span::styled(
+                            app::project(session).unwrap_or_else(|| "—".to_owned()),
+                            cwd_style(),
+                        ),
+                        Span::raw("  "),
+                        Span::styled(name.to_owned(), Style::new().fg(Color::Cyan)),
+                    ])),
+                    number(session.trace.iter().map(|i| counts(i).0).sum()),
+                    number(session.trace.iter().map(|i| counts(i).1).sum()),
+                    Cell::from(""),
+                    Cell::from(status.text).style(style_of(status.kind)),
+                ])
+                .style(row_style(&matches, index));
+            };
+            let end = if interaction_runs(session, interaction, now) {
+                Some(now)
+            } else {
+                end
+            };
+            let took = interaction
+                .duration_ms
+                .or_else(|| between(interaction.started_at, end));
+            let (state, style) = interaction_state(session, interaction, now);
+            let when = interaction
+                .started_at
+                .map_or("—".to_owned(), |at| when(time, now, at));
+            let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
+            let (text, text_style) = interaction_text(interaction);
+            if by_session {
+                // Under its session, in the session's column.
+                cells.push(Cell::from(Line::from(vec![
+                    Span::styled("  └ ", dim()),
+                    Span::styled(text, text_style),
+                ])));
+            } else {
+                if names {
+                    // Where it runs, then its name.
+                    cells.push(Cell::from(Line::from(vec![
+                        Span::styled(
+                            app::project(session).unwrap_or_else(|| "—".to_owned()),
+                            cwd_style(),
+                        ),
+                        Span::raw("  "),
+                        Span::raw(
+                            app::label(session)
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                                .to_owned(),
+                        ),
+                    ])));
+                }
+                cells.push(Cell::from(text).style(text_style));
+            }
+            let (requests, calls) = counts(interaction);
+            cells.extend([
+                number(requests),
+                number(calls),
+                Cell::from(
+                    Line::from(took.map(format::duration).unwrap_or_default()).right_aligned(),
+                )
+                .style(took_style(took)),
+                Cell::from(state).style(style),
+            ]);
+            Row::new(cells).style(row_style(&matches, index))
+        })
+        .collect();
+    let mut widths = vec![Constraint::Length(when_width(time))];
+    let mut header = vec!["when"];
+    if by_session {
+        widths.push(Constraint::Fill(1));
+        header.push("session / prompt");
+    } else {
+        if names {
+            widths.push(Constraint::Fill(2));
+            header.push("session");
+        }
+        // The session and what was asked share what the short columns
+        // leave, the prompt with the larger part.
+        widths.push(Constraint::Fill(3));
+        header.push("prompt");
+    }
+    widths.extend([Constraint::Length(4), Constraint::Length(5)]);
+    header.extend(["llm", "tools"]);
+    widths.extend([Constraint::Length(7), Constraint::Length(8)]);
+    header.extend(["took", ""]);
+    let title = list_title(
+        app,
+        format!(
+            "Trace ({} · {})",
+            format::count(app.interaction_count() as u64, "interaction"),
+            if app.by_session {
+                "by session"
+            } else {
+                "latest first"
+            }
+        ),
+        matches.len(),
+    );
+    let table = Table::new(rows, widths)
+        .header(Row::new(header).style(dim()))
+        .block(pane_block(title, !app.in_detail));
+    let selected = (count > 0).then_some(app.trace_selected);
+    draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
+}
+
+/// The pane beside the interactions: the interaction under the cursor, or, with the focus
+/// in its tree, the span chosen there.
+fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let width = area.width.saturating_sub(2) as usize;
+    let chosen = app.selected_span().filter(|_| app.in_tree());
+    let (title, lines) = match (chosen, app.selected_interaction()) {
+        (Some(row), _) => ("Span", trace_lines(&row, now, width)),
+        (
+            None,
+            Some(InteractionRow {
+                session,
+                interaction,
+                end,
+            }),
+        ) => {
+            // The interaction's end with its subagents, where it has spans.
+            let end = app
+                .span_rows()
+                .first()
+                .and_then(|row| row.interaction_end)
+                .or(end);
+            (
+                "Interaction",
+                interaction_lines(session, interaction, end, now),
+            )
+        }
+        (None, None) => (
+            "Interaction",
+            vec![Line::styled(
+                app.notice
+                    .clone()
+                    .unwrap_or_else(|| "no interactions".to_owned()),
+                dim(),
+            )],
+        ),
+    };
+    let rows = area.height.saturating_sub(2) as usize;
+    app.viewport.call_rows = rows;
+    app.viewport.call_lines = lines.len();
+    app.call_scroll = app.call_scroll.min(lines.len().saturating_sub(rows));
+    let title = if lines.len() > rows {
+        format!(
+            "{title} [{}-{}/{}]",
+            app.call_scroll + 1,
+            (app.call_scroll + rows).min(lines.len()),
+            lines.len()
+        )
+    } else {
+        title.to_owned()
+    };
+    let paragraph = Paragraph::new(lines)
+        .scroll((u16::try_from(app.call_scroll).unwrap_or(u16::MAX), 0))
+        .block(pane_block(title, app.in_call()));
+    frame.render_widget(paragraph, area);
+}
+
+/// What a row of the interaction's tree is called, and what is said beside it.
+fn trace_label(row: &TraceRow) -> (String, Style, String) {
+    match row.item {
+        TraceItem::Span(span) => match &span.kind {
+            SpanKind::Tool(call) => (
+                format::tool_name(&call.name),
+                tool_style(),
+                call.summary.clone().unwrap_or_default(),
+            ),
+            SpanKind::LlmRequest(request) => (
+                "llm_request".to_owned(),
+                Style::new().fg(Color::LightBlue),
+                request
+                    .model
+                    .as_deref()
+                    .map(format::model_name)
+                    .unwrap_or_default(),
+            ),
+            _ => (String::new(), Style::new(), String::new()),
+        },
+        TraceItem::Subagent(subagent) => (
+            format!("↳ {}", subagent.agent_type.as_deref().unwrap_or("agent")),
+            agent_style(),
+            subagent_name(subagent).to_owned(),
+        ),
+    }
+}
+
+/// The pane under the interactions: the interaction under the cursor as a tree, each row
+/// with a bar on a time axis as long as the interaction.
+fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    app.viewport.detail_rows = (area.height as usize).saturating_sub(3);
+    let inner = area.width.saturating_sub(2) as usize;
+    // The time axis takes two fifths of the pane, where there is room.
+    let axis = if inner >= 70 { inner * 2 / 5 } else { 0 };
+    let listed = app.span_rows();
+    let count = listed.len();
+    let rows: Vec<Row<'static>> = listed
+        .iter()
+        .map(|row| {
+            let runs = interaction_runs(row.session, row.interaction, now);
+            // The axis: the interaction from its start to its end, or to now.
+            let window =
+                row.interaction
+                    .started_at
+                    .zip(if runs { Some(now) } else { row.interaction_end });
+            let (start, end) = match row.item {
+                TraceItem::Span(span) => (span.started_at, span.ended_at),
+                TraceItem::Subagent(subagent) => (subagent.started_at, subagent.last_activity),
+            };
+            // What has not ended reaches to now while the interaction runs.
+            let end = end.or(runs.then_some(now));
+            let (mark, mark_style, colour) = match row.item {
+                TraceItem::Span(span) => match &span.kind {
+                    SpanKind::Tool(call) => {
+                        let (mark, style) = outcome(call);
+                        let colour = if call.success == Some(false) {
+                            Color::Red
+                        } else {
+                            Color::Green
+                        };
+                        (mark.to_owned(), style, colour)
+                    }
+                    SpanKind::LlmRequest(request) => {
+                        let stop = request.stop_reason.clone().unwrap_or_default();
+                        // The end of the answer, more to do, or cut short.
+                        let style = match stop.as_str() {
+                            "end_turn" => done(),
+                            "tool_use" | "" => dim(),
+                            _ => Style::new().fg(Color::Red),
+                        };
+                        (stop, style, Color::LightBlue)
+                    }
+                    _ => (String::new(), dim(), Color::LightBlue),
+                },
+                TraceItem::Subagent(subagent) => match subagent.finished {
+                    Some(true) => ("done".to_owned(), done(), Color::Magenta),
+                    _ => ("running".to_owned(), running(), Color::Magenta),
+                },
+            };
+            let (name, style, beside) = trace_label(row);
+            let fold = match row.open {
+                Some(true) => "▾ ",
+                Some(false) => "▸ ",
+                None => "  ",
+            };
+            let mut cells = vec![
+                Cell::from(Line::from(vec![
+                    Span::raw(format!("{}{fold}", "  ".repeat(row.depth))),
+                    Span::styled(name, style),
+                    Span::raw(format!("  {beside}")),
+                ])),
+                Cell::from(
+                    Line::from(
+                        between(start, end)
+                            .map(format::duration)
+                            .unwrap_or_default(),
+                    )
+                    .right_aligned(),
+                )
+                .style(took_style(between(start, end))),
+                Cell::from(mark).style(mark_style),
+            ];
+            if axis > 0 {
+                let drawn = window.map_or(String::new(), |window| bar(start, end, window, axis));
+                cells.push(Cell::from(drawn).style(Style::new().fg(colour)));
+            }
+            Row::new(cells)
+        })
+        .collect();
+
+    let title = match app.selected_interaction() {
+        Some(InteractionRow { interaction, .. }) => {
+            format!("Interaction: {}", interaction_summary(interaction))
+        }
+        None => "Interaction".to_owned(),
+    };
+    let block = pane_block(title, app.choosing_span());
+    if count == 0 {
+        let text = if app.selected_interaction().is_some() {
+            "nothing was read of this interaction but its prompt"
+        } else {
+            "no interactions"
+        };
+        frame.render_widget(Paragraph::new(Line::styled(text, dim())).block(block), area);
+        return;
+    }
+    let mut widths = vec![
+        Constraint::Fill(1),
+        Constraint::Length(7),
+        Constraint::Length(8),
+    ];
+    let mut header = vec!["span", "took", ""];
+    if axis > 0 {
+        widths.push(Constraint::Length(axis as u16));
+        header.push("time");
+    }
+    let table = Table::new(rows, widths)
+        .header(Row::new(header).style(dim()))
+        .block(block);
+    // The cursor shows once the tree has been entered.
+    let selected = app.in_tree().then_some(app.span_selected.min(count - 1));
+    draw_list(frame, area, app, TREE, table, selected);
+}
+
+/// The detail of a row of the interaction's tree.
+fn trace_lines(row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static>> {
+    match row.item {
+        TraceItem::Span(span) => match &span.kind {
+            SpanKind::Tool(call) => tool_lines(row.session, call, now, width),
+            SpanKind::LlmRequest(request) => {
+                llm_request_lines(request, span.started_at, span.duration_ms(), now)
+            }
+            _ => Vec::new(),
+        },
+        TraceItem::Subagent(subagent) => {
+            subagent_lines(row.session, subagent, now, width, 0, false).0
+        }
+    }
+}
+
+/// An interaction: how long it took and where the time went.
+fn interaction_lines(
+    session: &Session,
+    interaction: &Interaction,
+    end: Option<Timestamp>,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let runs = interaction_runs(session, interaction, now);
+    let end = if runs { Some(now) } else { end };
+    let mut lines = vec![
+        Line::styled("Interaction", headline()),
+        field(
+            "session",
+            app::label(session)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+        ),
+        field(
+            "state",
+            match (interaction.ended_at.is_some(), runs) {
+                (true, _) => "done",
+                (false, true) => "running",
+                (false, false) => "no end recorded: cut off, or not read to its end",
+            }
+            .to_owned(),
+        ),
+    ];
+    if let Some(path) = session.project_path.as_ref().or(session.cwd.as_ref()) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "cwd"), label()),
+            Span::styled(path.display().to_string(), cwd_style()),
+        ]));
+    }
+    if let Some(prompt) = &interaction.prompt {
+        lines.push(field("prompt", prompt.clone()));
+    }
+    if let Some(at) = interaction.started_at {
+        lines.push(field("started", format::started(now, at)));
+    }
+    let took = interaction
+        .duration_ms
+        .or_else(|| between(interaction.started_at, end));
+    if let Some(ms) = took {
+        let note = if interaction.duration_ms.is_some() {
+            ""
+        } else {
+            " so far, by the records read"
+        };
+        lines.push(field("took", format!("{}{note}", format::duration(ms))));
+    }
+
+    // Where the time went, on the main thread; a subagent's time is inside
+    // the call that spawned it.
+    let (mut requests, mut request_ms, mut calls, mut call_ms) = (0u64, 0u64, 0u64, 0u64);
+    for span in &interaction.thread.spans {
+        let ms = span.duration_ms().unwrap_or(0);
+        match span.kind {
+            SpanKind::Tool(_) => {
+                calls += 1;
+                call_ms += ms;
+            }
+            _ => {
+                requests += 1;
+                request_ms += ms;
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(field(
+        "llm",
+        format!(
+            "{requests} requests, {} in all (approximate)",
+            format::duration(request_ms)
+        ),
+    ));
+    lines.push(field(
+        "tools",
+        format!("{calls}, {} in all", format::duration(call_ms)),
+    ));
+    if let Some(ms) = took {
+        let rest = ms.saturating_sub(request_ms).saturating_sub(call_ms);
+        lines.push(field("the rest", format::duration(rest)));
+    }
+
+    // Tokens and cost, subagents included.
+    let (mut subagents, mut tokens, mut usd, mut unpriced) = (0u64, 0u64, 0.0, false);
+    for node in session.walk(interaction) {
+        match node.item {
+            Item::Subagent(_) => subagents += 1,
+            Item::Span(span) => {
+                if let SpanKind::LlmRequest(request) = &span.kind {
+                    if let Some(used) = request.tokens {
+                        tokens += used.input
+                            + used.output
+                            + used.cache_write_5m
+                            + used.cache_write_1h
+                            + used.cache_read;
+                        match request.usd {
+                            Some(cost) => usd += cost,
+                            None => unpriced = true,
+                        }
+                    }
+                }
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(field("subagents", subagents.to_string()));
+    lines.push(field("tokens", format::tokens(tokens)));
+    lines.push(field(
+        "cost",
+        format!(
+            "~{}{}",
+            format::usd_amount(usd),
+            if unpriced {
+                "  without the requests of an unknown model"
+            } else {
+                ""
+            }
+        ),
+    ));
+    if interaction.thread.dropped > 0 {
+        lines.push(field(
+            "",
+            format!("{} more spans were not kept", interaction.thread.dropped),
+        ));
+    }
+    if !interaction.id.is_empty() {
+        lines.push(field("id", interaction.id.clone()));
+    }
+    lines
+}
+
+/// One API response.
+fn llm_request_lines(
+    request: &LlmRequest,
+    started_at: Option<Timestamp>,
+    took: Option<u64>,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled("LLM request", headline())];
+    if let Some(model) = &request.model {
+        lines.push(field("model", model.clone()));
+    }
+    if let Some(source) = &request.query_source {
+        lines.push(field("source", source.clone()));
+    }
+    if let Some(stop) = &request.stop_reason {
+        lines.push(field("stop", stop.clone()));
+    }
+    if let Some(at) = started_at {
+        lines.push(field("started", format::started(now, at)));
+    }
+    if let Some(ms) = took {
+        lines.push(field(
+            "took",
+            format!(
+                "{}  approximate: from the request to its last block",
+                format::duration(ms)
+            ),
+        ));
+    }
+    if let Some(tokens) = request.tokens {
+        lines.push(Line::raw(""));
+        lines.push(field("input", format::tokens(tokens.input)));
+        lines.push(field("output", format::tokens(tokens.output)));
+        lines.push(field(
+            "cache",
+            format!(
+                "{} read, {} written",
+                format::tokens(tokens.cache_read),
+                format::tokens(tokens.cache_write_5m + tokens.cache_write_1h)
+            ),
+        ));
+        lines.push(field(
+            "cost",
+            request.usd.map_or("unknown model".to_owned(), |usd| {
+                format!("~{}", format::usd_amount(usd))
+            }),
+        ));
+    }
+    if let Some(id) = &request.message_id {
+        lines.push(field("id", id.clone()));
+    }
+    lines
 }
 
 /// `text` broken into lines of at most `width` columns, at spaces where
@@ -576,20 +1261,20 @@ fn command_lines(call: &ToolCall, width: usize) -> Vec<Line<'static>> {
 fn call_lines(call: &ToolCall, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     let (mark, style) = outcome(call);
     let mut head = vec![
-        Span::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(call.name.clone(), headline()),
         Span::raw("  "),
         Span::styled(mark, style),
     ];
     if let Some(ms) = call.duration_ms {
         head.push(Span::styled(
             format!("  took {}", format::duration(ms)),
-            dim(),
+            Style::new(),
         ));
     }
     if let Some(at) = call.started_at {
         head.push(Span::styled(
             format!("  {} ago", format::ago(now, at)),
-            dim(),
+            Style::new(),
         ));
     }
     let mut lines = vec![Line::from(head)];
@@ -605,7 +1290,7 @@ fn call_lines(call: &ToolCall, now: Timestamp, width: usize) -> Vec<Line<'static
 
 fn field(name: &str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{name:<10}"), dim()),
+        Span::styled(format!("{name:<10}"), label()),
         Span::raw(value),
     ])
 }
@@ -625,17 +1310,17 @@ fn context_line(session: &Session, width: usize) -> Line<'static> {
         f if f >= 0.7 => Color::Yellow,
         _ => Color::Green,
     };
-    let label = format!(
+    let text = format!(
         "{} of {} ({})  ",
         format::tokens(context.tokens),
         format::tokens(context.window.unwrap_or_default()),
         format::percent(fill)
     );
-    let room = width.saturating_sub(10 + label.chars().count()).min(40);
+    let room = width.saturating_sub(10 + text.chars().count()).min(40);
     let filled = ((fill.clamp(0.0, 1.0) * room as f64).round() as usize).min(room);
     Line::from(vec![
-        Span::styled(format!("{:<10}", "context"), dim()),
-        Span::raw(label),
+        Span::styled(format!("{:<10}", "context"), label()),
+        Span::raw(text),
         Span::styled("█".repeat(filled), Style::new().fg(color)),
         Span::styled("░".repeat(room - filled), dim()),
     ])
@@ -647,7 +1332,7 @@ fn usage_header(title: &str) -> Line<'static> {
             "{title:<24}{:>9}{:>9}{:>9}{:>10}{:>7}",
             "in", "out", "cache", "cost", "calls"
         ),
-        dim(),
+        label(),
     )
 }
 
@@ -684,10 +1369,10 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     lines.extend(
         wrap(app::label(session), width)
             .into_iter()
-            .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD))),
+            .map(|line| line.style(headline())),
     );
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<10}", "state"), dim()),
+        Span::styled(format!("{:<10}", "state"), label()),
         Span::styled(status.text, style_of(status.kind)),
     ]));
     if let Some(live) = &session.live {
@@ -702,7 +1387,10 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     }
     lines.push(context_line(session, width));
     if let Some(path) = session.project_path.as_ref().or(session.cwd.as_ref()) {
-        lines.push(field("path", path.display().to_string()));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "cwd"), label()),
+            Span::styled(path.display().to_string(), cwd_style()),
+        ]));
     }
     if let Some(branch) = &session.git_branch {
         lines.push(field("branch", branch.clone()));
@@ -714,16 +1402,13 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
         "activity",
         format!(
             "{}, {}, {}",
-            format::count(session.turns, "turn"),
+            format::count(session.turns, "interaction"),
             format::count(session.tool_calls, "tool call"),
             format::count(session.subagents.len() as u64, "subagent"),
         ),
     ));
     if let Some(started) = session.started_at {
-        lines.push(field(
-            "started",
-            format!("{} ago", format::ago(now, started)),
-        ));
+        lines.push(field("started", format::started(now, started)));
     }
     if let Some(prompt) = &session.last_prompt {
         lines.push(field(
@@ -757,7 +1442,7 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     if let Some(live) = &session.live {
         if !live.rate_limits.is_empty() {
             lines.push(Line::raw(""));
-            lines.push(Line::styled("rate limits", dim()));
+            lines.push(Line::styled("rate limits", label()));
             for limit in &live.rate_limits {
                 lines.push(Line::raw(format!(
                     "  {:<22}{:>4.0}%",
@@ -777,9 +1462,9 @@ fn tool_lines(
 ) -> Vec<Line<'static>> {
     let (mark, style) = outcome(call);
     let mut lines = vec![
-        Line::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Line::styled(call.name.clone(), headline()),
         Line::from(vec![
-            Span::styled(format!("{:<10}", "outcome"), dim()),
+            Span::styled(format!("{:<10}", "outcome"), label()),
             Span::styled(mark, style),
         ]),
         field(
@@ -795,7 +1480,7 @@ fn tool_lines(
         lines.push(field("took", format::duration(ms)));
     }
     if let Some(at) = call.started_at {
-        lines.push(field("started", format!("{} ago", format::ago(now, at))));
+        lines.push(field("started", format::started(now, at)));
     }
     let by = match &call.agent_id {
         None => "the main thread".to_owned(),
@@ -828,7 +1513,7 @@ fn subagent_lines(
 ) -> (Vec<Line<'static>>, Option<(usize, bool)>) {
     let mut lines: Vec<Line> = wrap(subagent_name(subagent), width)
         .into_iter()
-        .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD)))
+        .map(|line| line.style(headline()))
         .collect();
     if let Some(kind) = &subagent.agent_type {
         lines.push(field("type", kind.clone()));
@@ -852,7 +1537,7 @@ fn subagent_lines(
         lines.push(field("model", model.clone()));
     }
     if let Some(at) = subagent.started_at {
-        lines.push(field("started", format!("{} ago", format::ago(now, at))));
+        lines.push(field("started", format::started(now, at)));
     }
     if let (Some(from), Some(to)) = (subagent.started_at, subagent.last_activity) {
         let ms = (to.as_millis() - from.as_millis()).max(0) as u64;
@@ -877,7 +1562,7 @@ fn subagent_lines(
             subagent.tool_calls,
             calls.len()
         ),
-        dim(),
+        label(),
     ));
     let room = width.saturating_sub(2 + 15 + 1 + 7 + 2 + 7);
     for (index, call) in calls.into_iter().enumerate() {
@@ -890,16 +1575,19 @@ fn subagent_lines(
         };
         lines.push(
             Line::from(vec![
-                Span::raw(format!(
-                    "{mark_at}{:<15}",
-                    format::truncate(&format::tool_name(&call.name), 14)
-                )),
+                Span::styled(
+                    format!(
+                        "{mark_at}{:<15}",
+                        format::truncate(&format::tool_name(&call.name), 14)
+                    ),
+                    tool_style(),
+                ),
                 Span::styled(
                     format!(
                         "{:<room$}",
                         format::truncate(call.summary.as_deref().unwrap_or_default(), room)
                     ),
-                    dim(),
+                    Style::new(),
                 ),
                 Span::raw(format!(
                     " {:>7}  ",
@@ -980,7 +1668,7 @@ fn draw_usage_page(frame: &mut Frame, area: Rect, app: &App) {
             "{:<24}{:>9}{:>10}{:>10}",
             "repository", "sessions", "tokens", "cost"
         ),
-        dim(),
+        label(),
     )];
     for (name, (sessions, cost, tokens)) in &repos {
         lines.push(Line::raw(format!(
@@ -1054,7 +1742,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         Line::styled(
-            " 1-4 page  j/k move  Enter open  i detail  Esc back  / search  s sort  f filter  ? help  q quit",
+            " 1-5 page  j/k move  Enter open  i detail  Esc back  / search  s sort  f filter  ? help  q quit",
             dim(),
         )
     };
@@ -1062,13 +1750,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("1 2 3 4", "Sessions / Tool calls / Subagents / Usage"),
+    (
+        "1 2 3 4 5",
+        "Sessions / Tool calls / Subagents / Trace / Usage",
+    ),
     ("j / k", "down / up (scrolls the detail pane)"),
     ("gg / G", "top / bottom"),
     ("Ctrl+d / Ctrl+u", "half a page down / up"),
     (
         "Enter (session)",
-        "narrow pages 2 and 3 to it, show its tool calls",
+        "narrow pages 2 to 4 to it, show its tool calls",
     ),
     (
         "Enter (subagent)",
@@ -1082,11 +1773,22 @@ const HELP: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "the page's panes in turn"),
     ("h / Esc", "back a pane, to the list"),
     (
+        "Enter",
+        "unfold or fold a subagent in an interaction's tree",
+    ),
+    ("l / h", "in the trace: the pane on the right, and back"),
+    (
         "Esc (list)",
         "clear the search, then the narrowing, step by step",
     ),
     ("/", "search the list"),
     ("n / N", "next / previous match"),
+    (
+        "t",
+        "in the trace: interactions by session, or latest first",
+    ),
+    ("Enter", "unfold or fold a session in the trace by session"),
+    ("T", "times as a date and time, or as how long ago"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
     ("r", "refresh now"),
@@ -1129,6 +1831,51 @@ fn style_of(kind: StatusKind) -> Style {
     }
 }
 
+/// The names of fields and the headings inside a pane.
+fn label() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+/// The first line of a detail: what it is about.
+fn headline() -> Style {
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+}
+
+/// Where a session runs.
+fn cwd_style() -> Style {
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+}
+
+/// A tool's name.
+fn tool_style() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+/// A subagent.
+fn agent_style() -> Style {
+    Style::new().fg(Color::Magenta)
+}
+
+/// Finished, and well.
+fn done() -> Style {
+    Style::new().fg(Color::Green)
+}
+
+/// Not finished yet.
+fn running() -> Style {
+    Style::new().fg(Color::Yellow)
+}
+
+/// How long something took: the slow stand out.
+fn took_style(ms: Option<u64>) -> Style {
+    match ms {
+        Some(60_000..) => Style::new().fg(Color::Red),
+        Some(10_000..) => Style::new().fg(Color::Yellow),
+        _ => Style::new(),
+    }
+}
+
+/// What matters least: captions, what is absent or unknown.
 fn dim() -> Style {
     Style::new().fg(Color::DarkGray)
 }
@@ -1197,7 +1944,13 @@ mod tests {
 
         // Header: the four pages, the counts, the live state.
         let header = screen.lines().next().unwrap();
-        for page in ["1:Sessions", "2:Tool calls", "3:Subagents", "4:Usage"] {
+        for page in [
+            "1:Sessions",
+            "2:Tool calls",
+            "3:Subagents",
+            "4:Trace",
+            "5:Usage",
+        ] {
             assert!(header.contains(page), "{header}");
         }
         assert!(header.contains("3 sessions"));
@@ -1218,7 +1971,7 @@ mod tests {
         assert!(screen.contains("┌ Session "));
         assert!(screen.contains("/work/other.repo"));
         assert!(screen.contains("claude-fable-5-2"));
-        assert!(screen.contains("1 turn, 5 tool calls, 2 subagents"));
+        assert!(screen.contains("1 interaction, 5 tool calls, 2 subagents"));
         assert!(screen.contains("context   6.7k of 1.0M (1%)"));
         assert!(screen.contains("estimated from the price table"));
         assert!(screen.contains("by model"));
@@ -1320,6 +2073,548 @@ mod tests {
     }
 
     #[test]
+    fn a_bar_is_where_its_span_is_on_the_axis() {
+        let at = |ms: i64| Timestamp::from_millis(ms);
+        let axis = (at(0), at(1000));
+        let draw = |start: i64, end: Option<i64>| bar(Some(at(start)), end.map(at), axis, 10);
+        assert_eq!(draw(0, Some(1000)), "██████████");
+        assert_eq!(draw(0, Some(500)), "█████");
+        assert_eq!(draw(500, Some(1000)), "     █████");
+        assert_eq!(draw(200, Some(400)), "  ██");
+        // Too short to see, without an end, or outside the axis: one column.
+        assert_eq!(draw(300, Some(301)), "   █");
+        assert_eq!(draw(300, None), "   █");
+        assert_eq!(draw(1000, Some(2000)), "         █");
+        assert_eq!(draw(-500, Some(-100)), "█");
+        // Nothing to draw.
+        assert_eq!(bar(None, Some(at(5)), axis, 10), "");
+        assert_eq!(draw(0, Some(1000)).len(), 30);
+        assert_eq!(bar(Some(at(0)), Some(at(5)), axis, 0), "");
+        assert_eq!(bar(Some(at(3)), Some(at(3)), (at(3), at(3)), 4), "█");
+    }
+
+    /// The column a row's bar starts in.
+    fn bar_at(row: &str) -> usize {
+        row.chars()
+            .position(|c| c == '█')
+            .unwrap_or_else(|| panic!("no bar in {row}"))
+    }
+
+    /// The part of the screen from one pane's title to the next pane's.
+    fn pane<'a>(screen: &'a str, title: &str) -> Vec<&'a str> {
+        let top = screen
+            .lines()
+            .position(|line| line.contains(title))
+            .unwrap_or_else(|| panic!("no pane {title}\n{screen}"));
+        let lines: Vec<&str> = screen.lines().collect();
+        let left = lines[top].find(title).unwrap();
+        let chars = |line: &str, to: usize| line[..to.min(line.len())].chars().count();
+        let from = chars(lines[top], left);
+        // Up to the pane's right edge: the next corner on its title row.
+        let width = lines[top][left..]
+            .chars()
+            .position(|c| c == '┐')
+            .map_or(usize::MAX, |at| at + 1);
+        lines[top..]
+            .iter()
+            .take_while(|line| !line.starts_with(' ') || line.trim().is_empty())
+            .map(|line| {
+                let start = line
+                    .char_indices()
+                    .nth(from)
+                    .map_or(line.len(), |(at, _)| at);
+                let end = line
+                    .char_indices()
+                    .nth(from.saturating_add(width))
+                    .map_or(line.len(), |(at, _)| at);
+                &line[start..end]
+            })
+            .take_while(|line| !line.starts_with('└'))
+            .collect()
+    }
+
+    fn pane_text(screen: &str, title: &str) -> String {
+        pane(screen, title).join("\n")
+    }
+
+    #[test]
+    fn the_trace_page_shows_an_interaction_as_a_waterfall() {
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        app.enter();
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+
+        // Three panes: the interactions, beside them the interaction under the cursor,
+        // under them its tree.
+        let shown = screen(&mut app, 150, 44, SOON);
+        let tops = pane_tops(&shown);
+        assert_eq!(tops.len(), 2, "{shown}");
+        assert!(shown
+            .lines()
+            .nth(tops[0])
+            .unwrap()
+            .contains("┐┌ Interaction "));
+        let interactions = pane_text(&shown, "┌ Trace (1 interaction · latest first) of 22222222");
+        // The counts have a column each, named in the header.
+        let lines = pane(&shown, "┌ Trace (");
+        let words = |line: &str| -> Vec<String> {
+            let line = line.replace('│', " ");
+            line.split_whitespace().map(str::to_owned).collect()
+        };
+        assert_eq!(
+            words(lines[1]),
+            ["when", "prompt", "llm", "tools", "took"],
+            "{shown}"
+        );
+        let row = words(lines[2]);
+        assert_eq!(row[row.len() - 4..], ["3", "3", "8.0s", "done"], "{shown}");
+        assert!(lines[2].contains("Synthetic prompt: run the checks"));
+        assert!(interactions.contains("8.0s") && interactions.contains("done"));
+        // The list is never unfolded in place.
+        assert!(!interactions.contains("cargo test"), "{interactions}");
+        assert!(!interactions.contains('█'));
+
+        let interaction = pane_text(&shown, "┌ Interaction ─");
+        assert!(interaction.contains("took      8.0s"), "{shown}");
+        assert!(interaction.contains("llm       3 requests, 5.5s in all (approximate)"));
+        assert!(interaction.contains("tools     3, 3.7s in all"));
+        assert!(interaction.contains("subagents 2"));
+        assert!(interaction.contains("id        prompt-u1"));
+
+        // The tree: each span with a bar where it was in the interaction.
+        let tree = pane(&shown, "┌ Interaction: 3 LLM requests, 3 tool calls");
+        let find = |needle: &str| -> &str {
+            tree.iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{shown}"))
+        };
+        let bash = find("cargo test --workspace");
+        assert!(bash.contains("Bash") && bash.contains("1.5s") && bash.contains("ok"));
+        assert!(find("/work/example/README.md").contains("failed"));
+        assert!(find("▸ ↳ Explore").contains("Synthetic agent task"));
+        assert!(find("▸ ↳ agent").contains("b2c3d4e5f6071829"));
+        let requests: Vec<&&str> = tree
+            .iter()
+            .filter(|l| l.contains("llm_request  "))
+            .collect();
+        assert_eq!(requests.len(), 3, "{shown}");
+        assert!(requests[0].contains("fable-5-2") && requests[0].contains("tool_use"));
+        assert!(requests[2].contains("end_turn"));
+        // In the order they happened, left to right.
+        assert!(bar_at(requests[0]) < bar_at(bash));
+        assert!(bar_at(bash) < bar_at(find("synthetic lookup")));
+        assert!(bar_at(requests[1]) < bar_at(requests[2]));
+        // The last request ends where the interaction does.
+        assert!(requests[2].trim_end_matches('│').ends_with('█'));
+
+        // In the tree, the pane beside the interactions shows the span chosen: a
+        // request, a call, a subagent.
+        app.enter();
+        let request = screen(&mut app, 150, 44, SOON);
+        let span = pane_text(&request, "┌ Span ");
+        assert!(span.contains("LLM request"), "{request}");
+        assert!(span.contains("model     claude-fable-5-2"));
+        assert!(span.contains("source    repl_main_thread"));
+        assert!(span.contains("stop      tool_use"));
+        assert!(span.contains("took      2.4s  approximate"));
+        assert!(span.contains("id        msg_1"));
+        app.move_by(1);
+        let call = screen(&mut app, 150, 44, SOON);
+        let span = pane_text(&call, "┌ Span ");
+        assert!(span.contains("by        the main thread"), "{call}");
+        assert!(span.contains("cargo test --workspace"));
+        app.move_by(2);
+        app.enter();
+        let subagent = screen(&mut app, 150, 44, SOON);
+        let tree = pane_text(&subagent, "┌ Interaction: ");
+        assert!(tree.contains("▾ ↳ Explore"), "{subagent}");
+        assert!(tree.contains("synthetic pattern"));
+        assert!(pane_text(&subagent, "┌ Span ").contains("type      Explore"));
+
+        // Without a session entered, rows name their session, and a narrow
+        // terminal drops the time axis.
+        app.back();
+        app.back();
+        let all = screen(&mut app, 150, 44, SOON);
+        assert!(
+            all.contains("Trace (3 interactions · latest first)"),
+            "{all}"
+        );
+        let interactions = pane_text(&all, "┌ Trace (3 interactions");
+        assert!(interactions.contains("session") && interactions.contains("example  Synthet"));
+        // An interaction of which only the prompt was read.
+        assert!(all.contains("nothing was read of this interaction but its prompt"));
+        app.move_by(1);
+        let narrow = screen(&mut app, 60, 30, SOON);
+        assert!(!narrow.contains('█'), "{narrow}");
+        assert!(narrow.contains("cargo test"));
+    }
+
+    #[test]
+    fn the_trace_list_by_session_puts_interactions_under_their_session() {
+        let mut app = fixture_app();
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+        app.move_by(1);
+        // Flat: the session is a column, and beside it what was asked.
+        let flat = screen(&mut app, 150, 44, SOON);
+        let list = pane_text(&flat, "┌ Trace (3 interactions · latest first)");
+        assert!(
+            list.contains("session") && list.contains("prompt"),
+            "{flat}"
+        );
+        // (They share the room: both are cut at this width.) The session
+        // is where it runs, then its name.
+        assert!(list.contains("other.repo  2222"), "{flat}");
+        assert!(list.contains("example  Synthet"), "{flat}");
+        assert!(list.contains("Synthetic prompt: run the"), "{flat}");
+        // The rest of the prompt is not kept.
+        assert!(!flat.contains("SYNTHETIC-TEXT"));
+
+        // By session: a row a session, its interactions under it.
+        app.toggle_by_session();
+        let tree = screen(&mut app, 150, 44, SOON);
+        let list = pane(&tree, "┌ Trace (3 interactions · by session)");
+        let find = |needle: &str| -> &str {
+            list.iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{tree}"))
+        };
+        // A session's row starts with where it runs.
+        let session = find("▾ other.repo");
+        assert!(session.contains("22222222") && session.contains("active"));
+        assert!(find("Synthetic session title").contains("▾ example"));
+        // An interaction is under its session, with its counts; the
+        // session's row has the totals.
+        let under = find("8.0s").replace('│', " ");
+        let under: Vec<&str> = under.split_whitespace().collect();
+        assert_eq!(
+            under,
+            [
+                "20s",
+                "└",
+                "Synthetic",
+                "prompt:",
+                "run",
+                "the",
+                "checks",
+                "3",
+                "3",
+                "8.0s",
+                "done"
+            ]
+        );
+        assert!(
+            session.split_whitespace().any(|word| word == "3"),
+            "{session}"
+        );
+        assert!(
+            list[1].contains("session / prompt") && list[1].contains("tools"),
+            "{tree}"
+        );
+        // The panes still show the interaction the cursor was on.
+        assert!(tree.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
+
+        // Folded, a session is one row; the panes show its latest
+        // interaction.
+        app.leave_detail();
+        app.enter();
+        let folded = screen(&mut app, 150, 44, SOON);
+        let list = pane_text(&folded, "┌ Trace (3 interactions · by session)");
+        assert!(list.contains("▸ other.repo  22222222"), "{folded}");
+        assert!(!list.contains("8.0s"));
+        assert!(folded.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
+        assert!(pane_text(&folded, "┌ Interaction ─").contains("took      8.0s"));
+    }
+
+    #[test]
+    fn the_pane_beside_the_trace_list_takes_the_focus_from_either_side() {
+        let mut app = fixture_app();
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+        app.move_by(1);
+        // From the list: it shows the interaction, and the tree has no
+        // cursor.
+        app.right();
+        let beside = screen(&mut app, 150, 20, SOON);
+        assert!(beside.contains("┌ Interaction ["), "{beside}");
+        assert!(app.viewport.call_lines > app.viewport.call_rows);
+        app.move_last();
+        let scrolled = screen(&mut app, 150, 20, SOON);
+        assert!(pane_text(&scrolled, "┌ Interaction [").contains("id        prompt-u1"));
+        // From the tree: the span.
+        app.leave_detail();
+        app.enter();
+        app.move_by(1);
+        app.right();
+        let span = screen(&mut app, 150, 44, SOON);
+        assert!(
+            pane_text(&span, "┌ Span ").contains("cargo test --workspace"),
+            "{span}"
+        );
+    }
+
+    #[test]
+    fn an_interaction_without_its_prompt_is_told_by_the_tools_it_used() {
+        use crate::app::tests::{append_call, scratch_projects};
+        let projects = scratch_projects("trace-tools");
+        for (id, name) in [
+            ("toolu_n1", "Bash"),
+            ("toolu_n2", "Read"),
+            ("toolu_n3", "Bash"),
+        ] {
+            append_call(&projects, id, 1, name, r#"{"command":"ls"}"#);
+        }
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+            time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
+        });
+        let session = app.store.get(WITH_SUBAGENTS).unwrap();
+        let known = session.trace.back().unwrap();
+        assert_eq!(
+            interaction_text(known).0,
+            "Synthetic prompt: run the checks"
+        );
+        // The same interaction, had its prompt not been read.
+        let mut unknown = known.clone();
+        unknown.prompt = None;
+        let (text, style) = interaction_text(&unknown);
+        assert_eq!(text, "Bash×3 Read×2 example/lookup");
+        assert_eq!(style, tool_style());
+
+        // A search finds an interaction by what was asked.
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+        app.start_search();
+        app.typing = Some("run the checks".to_owned());
+        app.submit_search();
+        let now = Timestamp::parse(LATER).unwrap();
+        assert_eq!(app.matches(Page::Trace, now).len(), 3);
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn the_tree_follows_its_cursor_and_keeps_its_place() {
+        use crate::app::tests::{append_agent_call, scratch_projects};
+        let projects = scratch_projects("trace-scroll");
+        for index in 2..40 {
+            let input = format!(r#"{{"command":"echo call-{index}"}}"#);
+            append_agent_call(&projects, &format!("toolu_s{index:02}"), index, &input);
+        }
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+            time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
+        });
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+        app.move_by(1);
+        app.enter();
+        app.move_by(3);
+        app.enter();
+        // The subagent's calls are far more than the pane shows.
+        let top = screen(&mut app, 150, 40, LATER);
+        assert!(
+            pane_text(&top, "┌ Interaction: ").contains("synthetic pattern"),
+            "{top}"
+        );
+        assert!(!pane_text(&top, "┌ Interaction: ").contains("call-39"));
+        app.move_last();
+        let bottom = screen(&mut app, 150, 40, LATER);
+        assert!(
+            !pane_text(&bottom, "┌ Interaction: ").contains("cargo test"),
+            "{bottom}"
+        );
+        assert!(bottom.contains("b2c3d4e5f6071829"));
+        assert!(app.offsets[TREE] > 0);
+        // Half a page at a time, by what the tree shows.
+        assert!(app.viewport.detail_rows > 4);
+        assert_eq!(app.half_page() as usize, app.viewport.detail_rows / 2);
+        // Another interaction starts at its top.
+        app.back();
+        app.move_by(1);
+        screen(&mut app, 150, 40, LATER);
+        assert_eq!((app.span_selected, app.offsets[TREE]), (0, 0));
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn an_interaction_without_an_end_runs_or_was_cut_off() {
+        use crate::app::tests::{append_call, append_prompt, scratch_projects};
+        let projects = scratch_projects("trace-running");
+        append_prompt(&projects, "prompt-new", 0);
+        append_call(
+            &projects,
+            "toolu_new1",
+            1,
+            "Bash",
+            r#"{"command":"sleep 600"}"#,
+        );
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+            time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
+        });
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+                                // Under the interaction of a session that is a day later.
+        app.move_by(1);
+        assert_eq!(
+            app.selected_interaction().unwrap().interaction.id,
+            "prompt-new"
+        );
+
+        // Its session was active a moment ago: everything reaches to now.
+        let running = screen(&mut app, 150, 44, "2026-11-02T11:01:30.000Z");
+        let interaction = row(&running, "1m30s");
+        assert!(
+            interaction.contains("running") && interaction.contains("1m30s"),
+            "{running}"
+        );
+        let call = row(&running, "sleep 600");
+        assert!(
+            call.contains("running") && call.contains("30.0s"),
+            "{running}"
+        );
+        assert!(call.trim_end_matches('│').ends_with('█'));
+        let detail = pane_text(&running, "┌ Interaction ─");
+        assert!(detail.contains("state     running"), "{running}");
+        assert!(detail.contains("so far, by the records"));
+
+        // Long after: all that is known is that it has no end.
+        let later = screen(&mut app, 150, 44, LATER);
+        let interaction = row(&later, "1m00s");
+        assert!(
+            interaction.contains("no end") && interaction.contains("1m00s"),
+            "{later}"
+        );
+        assert!(!row(&later, "sleep 600")
+            .trim_end_matches('│')
+            .ends_with("██"));
+        assert!(later.contains("no end recorded"));
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn kinds_states_and_labels_are_told_apart_by_colour() {
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        app.enter();
+        app.go_to(Page::Trace);
+        app.by_session = false; // these are about the flat list
+        let now = Timestamp::parse(SOON).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The colour of the first cell of `word` on the screen, or of the
+        // one `skip` cells into it.
+        let colour_at = |word: &str, skip: u16| -> Color {
+            for y in 0..44u16 {
+                let line: Vec<&str> = (0..150u16).map(|x| buffer[(x, y)].symbol()).collect();
+                let text = line.concat();
+                if let Some(at) = text.find(word) {
+                    let x = text[..at].chars().count() as u16;
+                    return buffer[(x + skip, y)].fg;
+                }
+            }
+            panic!("no {word} on the screen");
+        };
+        let colour = |word: &str| colour_at(word, 0);
+        // What a row is.
+        assert_eq!(colour("llm_request"), Color::LightBlue);
+        assert_eq!(colour("Bash"), Color::Cyan);
+        assert_eq!(colour("↳ Explore"), Color::Magenta);
+        // What a call is about is not greyed out.
+        assert_eq!(colour("cargo test --workspace"), Color::Reset);
+        // How it ended.
+        assert_eq!(colour_at("s  ok ", 3), Color::Green);
+        assert_eq!(colour("failed"), Color::Red);
+        assert_eq!(colour("end_turn"), Color::Green);
+        assert_eq!(colour("tool_use"), Color::DarkGray);
+        assert_eq!(colour("running"), Color::Yellow);
+        // The detail: its headline, its field names, its values.
+        assert_eq!(colour("Interaction  "), Color::Yellow);
+        assert_eq!(colour("started   "), Color::Cyan);
+        assert_eq!(colour("prompt-u1"), Color::Reset);
+
+        // The slow stand out.
+        assert_eq!(took_style(Some(9_999)).fg, None);
+        assert_eq!(took_style(Some(10_000)).fg, Some(Color::Yellow));
+        assert_eq!(took_style(Some(60_000)).fg, Some(Color::Red));
+        assert_eq!(took_style(None).fg, None);
+    }
+
+    #[test]
+    fn times_are_a_date_and_time_or_how_long_ago() {
+        let with = |ago_within: std::time::Duration| {
+            let mut app = App::new(Config {
+                projects_dir: crate::app::tests::fixtures()
+                    .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                    .join("projects"),
+                live: false,
+                socket_dir: None,
+                time: TimeStyle::Clock,
+                ago_within,
+            });
+            app.go_to(Page::Tools);
+            app
+        };
+        let bash = |app: &mut App, now: &str| {
+            let screen = screen(app, 150, 30, now);
+            row(&screen, "cargo test --workspace").to_owned()
+        };
+        // What is new is said as how long ago: within the hour, unless
+        // told otherwise.
+        let mut app = fixture_app();
+        app.go_to(Page::Tools);
+        assert!(bash(&mut app, SOON).contains(" 18s "));
+        assert!(bash(&mut app, "2026-11-02T10:59:00.000Z").contains(" 58m "));
+        // After that, the time; another day, the date too. (Under test the
+        // clock is UTC.)
+        assert!(bash(&mut app, "2026-11-02T11:00:02.000Z").contains("10:00:02"));
+        assert!(bash(&mut app, LATER).contains("11-02 10:00"));
+        // A detail says both, always.
+        assert!(screen(&mut app, 150, 30, LATER).contains("started   11-02 10:00 (1d ago)"));
+
+        // Never "ago", or for longer.
+        let mut never = with(std::time::Duration::ZERO);
+        assert!(bash(&mut never, SOON).contains("10:00:02"));
+        let mut days = with(std::time::Duration::from_secs(3 * 86_400));
+        assert!(bash(&mut days, LATER).contains(" 1d "));
+
+        // `T`: how long ago for everything, and back.
+        app.toggle_time();
+        let relative = bash(&mut app, LATER);
+        assert!(
+            relative.contains(" 1d ") && !relative.contains("11-02"),
+            "{relative}"
+        );
+        // The other lists follow. (A detail pane says both, always.)
+        for (page, title) in [
+            (Page::Subagents, "┌ Subagents ("),
+            (Page::Trace, "┌ Trace ("),
+        ] {
+            app.go_to(page);
+            let list = |app: &mut App| pane_text(&screen(app, 150, 30, LATER), title);
+            assert!(!list(&mut app).contains("11-02 10:00"));
+            app.toggle_time();
+            assert!(list(&mut app).contains("11-02 10:00"));
+            app.toggle_time();
+        }
+    }
+
+    #[test]
     fn the_subagents_page_lists_them_with_their_cost() {
         let mut app = fixture_app();
         app.go_to(Page::Subagents);
@@ -1361,6 +2656,8 @@ mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Subagents);
 
@@ -1631,7 +2928,11 @@ mod tests {
         assert!(screen.contains("Keys (any key closes)"), "{screen}");
         assert!(screen.contains("Ctrl+d / Ctrl+u"));
         assert!(screen.contains("filter sessions"));
-        assert!(screen.contains("narrow pages 2 and 3"));
+        assert!(screen.contains("narrow pages 2 to 4"));
+        assert!(screen.contains("Sessions / Tool calls / Subagents / Trace / Usage"));
+        assert!(screen.contains("unfold or fold a subagent"));
+        assert!(screen.contains("interactions by session, or latest first"));
+        assert!(screen.contains("the pane on the right, and back"));
     }
 
     #[test]
@@ -1640,6 +2941,8 @@ mod tests {
         app.help = true;
         for page in Page::ALL {
             app.go_to(page);
+            // Unfolded on the Trace page; the detail pane elsewhere.
+            app.enter();
             for (width, height) in [(1, 1), (10, 3), (30, 5), (80, 10), (200, 2), (60, 24)] {
                 screen(&mut app, width, height, LATER);
             }
@@ -1652,11 +2955,13 @@ mod tests {
             projects_dir: crate::app::tests::fixtures().join("no-such-directory"),
             live: false,
             socket_dir: None,
+            time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         let sessions = screen(&mut app, 120, 20, LATER);
         assert!(sessions.contains("0 sessions"), "{sessions}");
         assert!(sessions.contains("no projects directory"));
-        for page in [Page::Tools, Page::Subagents, Page::Usage] {
+        for page in [Page::Tools, Page::Subagents, Page::Trace, Page::Usage] {
             app.go_to(page);
             screen(&mut app, 120, 20, LATER);
         }
@@ -1678,6 +2983,24 @@ mod tests {
         app.go_to(Page::Sessions);
         app.enter();
         println!("{}", screen(&mut app, 100, 24, SOON));
+        app.go_to(Page::Trace);
+        println!("{}", screen(&mut app, 150, 36, SOON));
+        app.back();
+        println!("{}", screen(&mut app, 150, 20, SOON));
+        app.toggle_by_session();
+        println!("{}", screen(&mut app, 150, 20, SOON));
+        app.toggle_by_session();
+        app.go_to(Page::Sessions);
+        app.enter();
+        app.go_to(Page::Trace);
+        app.enter();
+        app.move_by(3);
+        app.enter();
+        app.move_by(2);
+        println!("{}", screen(&mut app, 150, 36, SOON));
+        app.back();
+        app.back();
+        println!("{}", screen(&mut app, 110, 30, SOON));
     }
 
     #[test]
@@ -1685,6 +3008,28 @@ mod tests {
         let mut app = fixture_app();
         for page in Page::ALL {
             app.go_to(page);
+            if page == Page::Trace {
+                // Every interaction's tree, with every subagent unfolded.
+                for interaction in 0..4 {
+                    app.in_detail = false;
+                    app.move_first();
+                    app.move_by(interaction);
+                    app.focus_detail();
+                    let agents: Vec<(String, String)> = app
+                        .store
+                        .sessions()
+                        .flat_map(|s| s.subagents.keys().map(|a| (s.id.clone(), a.clone())))
+                        .collect();
+                    app.open_agents.extend(agents);
+                    for _ in 0..12 {
+                        let screen = screen(&mut app, 160, 50, LATER);
+                        assert!(!screen.contains("SYNTHETIC-TEXT"), "{screen}");
+                        app.move_by(1);
+                    }
+                }
+                app.in_detail = false;
+                app.move_first();
+            }
             for _ in 0..6 {
                 let screen = screen(&mut app, 160, 50, LATER);
                 assert!(!screen.contains("SYNTHETIC-TEXT"), "{screen}");

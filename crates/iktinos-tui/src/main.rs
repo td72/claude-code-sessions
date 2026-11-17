@@ -1,5 +1,6 @@
 //! `iktinos`: a terminal viewer for the Claude Code sessions on this machine.
-//! Sessions, recent tool calls, subagents and usage, a page each, over
+//! Sessions, recent tool calls, subagents, the trace of the latest interactions and
+//! usage, a page each, over
 //! `iktinos::session::SessionStore`, with the live layer when the bridge mod
 //! is installed. Its pages and keys follow vig, which renders the same model
 //! as a page of its own.
@@ -34,6 +35,11 @@ Options:
       --projects-dir <DIR>  Read transcripts from DIR instead of ~/.claude/projects
       --socket-dir <DIR>    Listen for live events in DIR instead of the shared default
       --no-live             Do not listen for live events from the bridge mod
+      --time <STYLE>        Show times as `clock` (the local date and time, the
+                            default) or `relative` (how long ago); T switches
+      --ago <DURATION>      With `clock`, still show what is newer than DURATION
+                            as how long ago: 90s, 30m, 1h (the default), 2d;
+                            0 for never
   -h, --help                Print help
   -V, --version             Print version
 ";
@@ -134,11 +140,12 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('q') => return Handled::Quit,
         KeyCode::Char('r') => return Handled::Refresh,
         KeyCode::Char('?') => app.help = true,
-        KeyCode::Char(c @ '1'..='4') => {
+        KeyCode::Char(c @ '1'..='5') => {
             app.go_to(Page::ALL[c as usize - '1' as usize]);
         }
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
-        KeyCode::Char('i') | KeyCode::Char('l') | KeyCode::Right => app.focus_detail(),
+        KeyCode::Char('i') => app.focus_detail(),
+        KeyCode::Char('l') | KeyCode::Right => app.right(),
         KeyCode::Enter => app.enter(),
         KeyCode::Char('h') | KeyCode::Left => app.leave_detail(),
         KeyCode::Esc => app.back(),
@@ -154,6 +161,8 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('n') => app.next_match(1),
         KeyCode::Char('N') => app.next_match(-1),
         KeyCode::Char('s') => app.cycle_sort(),
+        KeyCode::Char('t') => app.toggle_by_session(),
+        KeyCode::Char('T') => app.toggle_time(),
         KeyCode::Char('f') => app.cycle_filter(),
         _ => {}
     }
@@ -170,6 +179,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
     let mut projects_dir = None;
     let mut socket_dir = None;
     let mut live = true;
+    let mut time = app::TimeStyle::default();
+    let mut ago_within = app::DEFAULT_AGO_WITHIN;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -190,6 +201,17 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
             "--projects-dir" => projects_dir = Some(value("--projects-dir")?),
             "--socket-dir" => socket_dir = Some(value("--socket-dir")?),
             "--no-live" => live = false,
+            "--ago" => {
+                let length = inline.clone().or_else(|| args.next()).unwrap_or_default();
+                ago_within = app::parse_duration(&length).ok_or_else(|| {
+                    format!("--ago is a length of time such as 30m or 1h, not '{length}'")
+                })?;
+            }
+            "--time" => {
+                let style = inline.clone().or_else(|| args.next()).unwrap_or_default();
+                time = app::TimeStyle::parse(&style)
+                    .ok_or_else(|| format!("--time is `clock` or `relative`, not '{style}'"))?;
+            }
             "-h" | "--help" => return Ok(Parsed::Print(USAGE.to_owned())),
             "-V" | "--version" => {
                 return Ok(Parsed::Print(format!(
@@ -207,6 +229,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
         projects_dir,
         live,
         socket_dir,
+        time,
+        ago_within,
     }))
 }
 
@@ -224,6 +248,8 @@ mod tests {
             projects_dir: PathBuf::from("/synthetic/projects"),
             live: false,
             socket_dir: Some(PathBuf::from("/synthetic/sockets")),
+            time: app::TimeStyle::default(),
+            ago_within: app::DEFAULT_AGO_WITHIN,
         });
         assert_eq!(
             parse(&[
@@ -239,6 +265,45 @@ mod tests {
         };
         assert!(config.live);
         assert_eq!(config.socket_dir, None);
+        assert_eq!(config.time, app::TimeStyle::Clock);
+        for (args, style) in [
+            (
+                &["--projects-dir=/p", "--time", "relative"][..],
+                app::TimeStyle::Relative,
+            ),
+            (
+                &["--projects-dir=/p", "--time=clock"][..],
+                app::TimeStyle::Clock,
+            ),
+        ] {
+            let Ok(Parsed::Run(config)) = parse(args) else {
+                panic!()
+            };
+            assert_eq!(config.time, style);
+        }
+        assert!(parse(&["--time", "yesterday"])
+            .unwrap_err()
+            .contains("yesterday"));
+        assert!(parse(&["--time"]).is_err());
+
+        assert_eq!(config.ago_within, Duration::from_secs(3600));
+        for (length, seconds) in [
+            ("90s", 90),
+            ("30m", 1800),
+            ("2h", 7200),
+            ("2d", 172_800),
+            ("45", 45),
+            ("0", 0),
+        ] {
+            let Ok(Parsed::Run(config)) = parse(&["--projects-dir=/p", "--ago", length]) else {
+                panic!("{length}")
+            };
+            assert_eq!(config.ago_within, Duration::from_secs(seconds), "{length}");
+        }
+        for wrong in ["soon", "1w", "h", "-5m", "1.5h", ""] {
+            assert!(parse(&["--ago", wrong]).is_err(), "{wrong}");
+        }
+        assert!(parse(&["--ago=99999999999999999999d"]).is_err());
     }
 
     fn press(app: &mut App, keys: &str) {
@@ -322,8 +387,33 @@ mod tests {
             (app.page, app.sort, app.filter),
             (Page::Tools, app::Sort::Cost, app::Filter::All)
         );
-        press(&mut app, "4j\ti");
+        press(&mut app, "5j\ti");
         assert_eq!((app.page, app.in_detail), (Page::Usage, false));
+
+        // The Trace page: `l` and `h` are the pane on the right and back,
+        // `t` the list by session, Enter a fold.
+        app.by_session = false;
+        press(&mut app, "4l");
+        assert!(app.in_call() && app.from_list);
+        press(&mut app, "h");
+        assert!(!app.in_detail);
+        press(&mut app, "t");
+        assert!(app.by_session);
+        // The cursor stayed on its interaction: up to its session.
+        press(&mut app, "k\n");
+        assert_eq!(app.closed_sessions.len(), 1);
+        press(&mut app, "\nt");
+        assert!(app.closed_sessions.is_empty() && !app.by_session);
+        press(&mut app, "j\njl");
+        assert!(app.in_call() && !app.from_list);
+        press(&mut app, "hh");
+        assert!(!app.in_detail);
+
+        // `T` switches how times are shown.
+        press(&mut app, "T");
+        assert_eq!(app.time, app::TimeStyle::Relative);
+        press(&mut app, "T");
+        assert_eq!(app.time, app::TimeStyle::Clock);
 
         // Help.
         press(&mut app, "1?");

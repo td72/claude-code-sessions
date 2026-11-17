@@ -17,7 +17,8 @@
 //!
 //! - **Snapshot fields** are last-write-wins by record timestamp, so a preview
 //!   followed by the full fold ends in the same place.
-//! - **Accumulated fields** (tokens, cost, tool calls, turns) are folded once
+//! - **Accumulated fields** (tokens, cost, tool calls, turns, the trace) are
+//!   folded once
 //!   per record. A record already folded is recognised and skipped, so
 //!   applying the same records again changes nothing.
 //!
@@ -44,6 +45,7 @@ use std::time::Duration;
 use crate::discover::SessionFiles;
 use crate::pricing::{self, Pricing, Tokens};
 use crate::record::{Record, Timestamp, Usage, View};
+use crate::trace::{Interaction, Thread, DEFAULT_TRACE_INTERACTIONS};
 
 /// How many recent tool calls a session keeps unless told otherwise.
 pub const DEFAULT_RECENT_TOOLS: usize = 20;
@@ -60,7 +62,14 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 pub struct SessionStore {
     entries: BTreeMap<String, Entry>,
     pricing: Pricing,
+    limits: Limits,
+}
+
+/// How much recent activity each session keeps.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
     recent_tools: usize,
+    interactions: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -86,13 +95,23 @@ impl SessionStore {
         Self {
             entries: BTreeMap::new(),
             pricing,
-            recent_tools: DEFAULT_RECENT_TOOLS,
+            limits: Limits {
+                recent_tools: DEFAULT_RECENT_TOOLS,
+                interactions: DEFAULT_TRACE_INTERACTIONS,
+            },
         }
     }
 
     /// Sets how many recent tool calls each session keeps.
     pub fn with_recent_tools(mut self, limit: usize) -> Self {
-        self.recent_tools = limit;
+        self.limits.recent_tools = limit;
+        self
+    }
+
+    /// Sets how many of its latest interactions each session keeps as a
+    /// [trace](crate::trace). 0 keeps none.
+    pub fn with_trace_interactions(mut self, limit: usize) -> Self {
+        self.limits.interactions = limit;
         self
     }
 
@@ -109,6 +128,7 @@ impl SessionStore {
             if let Some(meta) = &found.meta {
                 subagent.agent_type.clone_from(&meta.agent_type);
                 subagent.description.clone_from(&meta.description);
+                subagent.tool_use_id.clone_from(&meta.tool_use_id);
                 subagent.finished = meta.finished;
             }
         }
@@ -117,7 +137,7 @@ impl SessionStore {
     /// Folds one record into the session. See the module documentation for
     /// the order records must arrive in.
     pub fn apply(&mut self, session_id: &str, record: &Record) {
-        let limit = self.recent_tools;
+        let limit = self.limits;
         let pricing = &self.pricing;
         let entry = self
             .entries
@@ -139,7 +159,7 @@ impl SessionStore {
 
     /// Updates only the snapshot fields from one record.
     pub fn preview(&mut self, session_id: &str, record: &Record) {
-        let limit = self.recent_tools;
+        let limit = self.limits;
         let pricing = &self.pricing;
         let entry = self
             .entries
@@ -174,6 +194,7 @@ impl SessionStore {
             let kept = entry.session.subagent_mut(&id);
             kept.agent_type = subagent.agent_type;
             kept.description = subagent.description;
+            kept.tool_use_id = subagent.tool_use_id;
             kept.finished = subagent.finished;
         }
     }
@@ -252,6 +273,10 @@ pub struct Session {
     pub tool_calls: u64,
     /// The latest tool calls, oldest first, at most the store's limit.
     pub recent_tools: VecDeque<ToolCall>,
+    /// The latest interactions, oldest first, at most the store's limit, each with
+    /// the spans of its main thread. [`walk`](Session::walk) reads one as a
+    /// tree. See [`trace`](crate::trace).
+    pub trace: VecDeque<Interaction>,
     /// The session's subagents by agent id.
     pub subagents: BTreeMap<String, Subagent>,
     /// What live events have said, if any arrived. Never written by the
@@ -279,6 +304,7 @@ impl Session {
             turns: 0,
             tool_calls: 0,
             recent_tools: VecDeque::new(),
+            trace: VecDeque::new(),
             subagents: BTreeMap::new(),
             live: None,
         }
@@ -310,6 +336,63 @@ impl Session {
             .as_ref()
             .and_then(|live| live.context)
             .or(self.context)
+    }
+
+    /// Adds an interaction to the trace and drops what is past the limit: the oldest
+    /// interactions, and the spans of the subagents that were last active before
+    /// the oldest interaction that is kept.
+    fn start_interaction(&mut self, interaction: Interaction, limit: usize) {
+        self.trace.push_back(interaction);
+        let mut dropped = false;
+        while self.trace.len() > limit {
+            self.trace.pop_front();
+            dropped = true;
+        }
+        let oldest = self
+            .trace
+            .front()
+            .and_then(|interaction| interaction.started_at);
+        if let (true, Some(oldest)) = (dropped, oldest) {
+            for subagent in self.subagents.values_mut() {
+                if subagent.last_activity.is_some_and(|at| at < oldest) {
+                    subagent.thread = Thread::default();
+                }
+            }
+        }
+    }
+
+    /// The thread a record of `agent` (the main thread for `None`) written
+    /// at `at` adds its spans to. `None` where the trace keeps nothing of it.
+    fn thread_mut(
+        &mut self,
+        agent: Option<&str>,
+        at: Option<Timestamp>,
+        limit: usize,
+    ) -> Option<&mut Thread> {
+        if limit == 0 {
+            return None;
+        }
+        match agent {
+            None => {
+                if self.trace.is_empty() {
+                    // The prompt was not read: an interaction without one.
+                    self.trace.push_back(Interaction::new(String::new(), at));
+                }
+                self.trace
+                    .back_mut()
+                    .map(|interaction| &mut interaction.thread)
+            }
+            Some(agent) => {
+                // Older than every interaction that is kept, with the trace full.
+                let oldest = self
+                    .trace
+                    .front()
+                    .and_then(|interaction| interaction.started_at);
+                let gone = self.trace.len() >= limit
+                    && matches!((at, oldest), (Some(at), Some(oldest)) if at < oldest);
+                (!gone).then(|| &mut self.subagent_mut(agent).thread)
+            }
+        }
     }
 
     fn subagent_mut(&mut self, agent_id: &str) -> &mut Subagent {
@@ -595,6 +678,9 @@ pub struct Subagent {
     pub agent_type: Option<String>,
     /// The task the parent gave it (from the metadata file).
     pub description: Option<String>,
+    /// The tool call of its parent that spawned it (from the metadata
+    /// file): where it hangs in the [trace](crate::trace).
+    pub tool_use_id: Option<String>,
     /// From the metadata file; absent while the agent runs.
     pub finished: Option<bool>,
     pub model: Option<String>,
@@ -602,6 +688,9 @@ pub struct Subagent {
     pub last_activity: Option<Timestamp>,
     pub usage: ModelUsage,
     pub tool_calls: u64,
+    /// Its requests and tool calls, while the interactions it was active in are
+    /// kept.
+    pub thread: Thread,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,8 +704,9 @@ enum Mode {
 struct Fold {
     /// Fingerprints of what has been folded.
     seen: HashSet<u64>,
-    /// Recent `api-request` ids and their `querySource`.
-    requests: VecDeque<(String, String)>,
+    /// Recent `api-request` ids, their `querySource` and when they were
+    /// written.
+    requests: VecDeque<(String, String, Option<Timestamp>)>,
     /// When each response happened and what it is estimated to have cost.
     charges: Vec<Charge>,
     /// The sum of `charges`.
@@ -653,12 +743,18 @@ impl Entry {
         }
     }
 
-    fn apply(&mut self, record: &Record, pricing: &Pricing, limit: usize, mode: Mode) {
+    fn apply(&mut self, record: &Record, pricing: &Pricing, limit: Limits, mode: Mode) {
         let common = record.common();
         let agent = common.agent_id.as_deref();
         let at = common.timestamp;
         let session = &mut self.session;
         let fold = &mut self.fold;
+        // The record before this one on the same thread: where a request
+        // without a record of its own is taken to have started.
+        let previous = match agent {
+            None => fold.main_cursor,
+            Some(agent) => session.subagents.get(agent).and_then(|s| s.last_activity),
+        };
 
         if let Some(at) = at {
             session.started_at = Some(session.started_at.map_or(at, |s| s.min(at)));
@@ -744,6 +840,13 @@ impl Entry {
                     .message_id
                     .as_deref()
                     .is_none_or(|id| fold.seen.insert(fingerprint("message", id)));
+                let request = assistant
+                    .request_ref
+                    .as_deref()
+                    .and_then(|id| fold.requests.iter().rev().find(|(r, _, _)| r == id));
+                let source = request.map(|(_, source, _)| source.clone());
+                let requested_at = request.and_then(|(_, _, at)| *at).or(previous);
+                let mut charged = None;
                 if let (true, Some(model), Some(usage)) = (counted, model, assistant.usage) {
                     let tokens = tokens_of(&usage);
                     let usd = pricing.model(model).map(|m| m.cost(&tokens, usage.fast));
@@ -751,12 +854,6 @@ impl Entry {
                         Some(usd) => fold.charge(Charge { at, usd }),
                         None => fold.unpriced = true,
                     }
-                    let source = assistant
-                        .request_ref
-                        .as_deref()
-                        .and_then(|id| fold.requests.iter().rev().find(|(r, _)| r == id))
-                        .map_or("unknown", |(_, source)| source.as_str())
-                        .to_owned();
                     session
                         .usage
                         .by_model
@@ -766,23 +863,40 @@ impl Entry {
                     session
                         .usage
                         .by_query_source
-                        .entry(source)
+                        .entry(source.clone().unwrap_or_else(|| "unknown".to_owned()))
                         .or_default()
                         .count(&tokens, usd);
                     if let Some(agent) = agent {
                         session.subagent_mut(agent).usage.count(&tokens, usd);
                     }
+                    charged = Some((tokens, usd));
                 }
 
+                // The response's span, and after it the calls it makes.
+                let mut thread = session.thread_mut(agent, at, limit.interactions);
+                if let Some(request) = thread.as_mut().and_then(|thread| {
+                    thread.respond(assistant.message_id.as_deref(), requested_at, at)
+                }) {
+                    if model.is_some() {
+                        request.model = model.map(str::to_owned);
+                    }
+                    if source.is_some() {
+                        request.query_source.clone_from(&source);
+                    }
+                    if let Some((tokens, usd)) = charged {
+                        request.tokens = Some(tokens);
+                        request.usd = usd;
+                    }
+                    if assistant.stop_reason.is_some() {
+                        request.stop_reason.clone_from(&assistant.stop_reason);
+                    }
+                }
+                let mut calls = Vec::new();
                 for call in &assistant.tool_uses {
                     let (Some(id), Some(name)) = (&call.id, &call.name) else {
                         continue;
                     };
-                    session.tool_calls += 1;
-                    if let Some(agent) = agent {
-                        session.subagent_mut(agent).tool_calls += 1;
-                    }
-                    session.recent_tools.push_back(ToolCall {
+                    let call = ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         summary: call.summary.clone(),
@@ -791,8 +905,19 @@ impl Entry {
                         started_at: at,
                         duration_ms: None,
                         success: None,
-                    });
-                    while session.recent_tools.len() > limit {
+                    };
+                    if let Some(thread) = thread.as_mut() {
+                        thread.call(call.clone());
+                    }
+                    calls.push(call);
+                }
+                for call in calls {
+                    session.tool_calls += 1;
+                    if let Some(agent) = agent {
+                        session.subagent_mut(agent).tool_calls += 1;
+                    }
+                    session.recent_tools.push_back(call);
+                    while session.recent_tools.len() > limit.recent_tools {
                         session.recent_tools.pop_front();
                     }
                 }
@@ -804,7 +929,35 @@ impl Entry {
                 if !first_time {
                     return;
                 }
+                // A prompt on the main thread starts an interaction. The results of
+                // the interaction's tool calls carry the same `promptId`.
+                let prompts = agent.is_none()
+                    && user.tool_results.is_empty()
+                    && !user.is_meta
+                    && !user.is_compact_summary;
+                if prompts && limit.interactions > 0 {
+                    let id = user
+                        .prompt_id
+                        .clone()
+                        .or_else(|| common.uuid.clone())
+                        .unwrap_or_default();
+                    if session
+                        .trace
+                        .back()
+                        .is_none_or(|interaction| interaction.id != id)
+                    {
+                        let mut interaction = Interaction::new(id, at);
+                        interaction.prompt.clone_from(&user.prompt);
+                        session.start_interaction(interaction, limit.interactions);
+                    }
+                }
                 for result in &user.tool_results {
+                    if let (Some(id), Some(thread)) = (
+                        result.tool_use_id.as_deref(),
+                        session.thread_mut(agent, at, limit.interactions),
+                    ) {
+                        thread.result(id, at, result.success());
+                    }
                     let call = result
                         .tool_use_id
                         .as_deref()
@@ -839,12 +992,18 @@ impl Entry {
                     && system.subtype.as_deref() == Some("turn_duration")
                 {
                     session.turns += 1;
+                    if let Some(interaction) =
+                        session.trace.back_mut().filter(|t| t.ended_at.is_none())
+                    {
+                        interaction.ended_at = at;
+                        interaction.duration_ms = system.duration_ms;
+                    }
                 }
             }
             View::ApiRequest(request) => {
                 if mode == Mode::Fold {
                     if let (Some(id), Some(source)) = (&request.id, &request.query_source) {
-                        fold.requests.push_back((id.clone(), source.clone()));
+                        fold.requests.push_back((id.clone(), source.clone(), at));
                         while fold.requests.len() > RECENT_REQUESTS {
                             fold.requests.pop_front();
                         }
