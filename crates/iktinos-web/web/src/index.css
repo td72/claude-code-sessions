@@ -192,16 +192,17 @@ header h1 {
   background: var(--chosen);
 }
 
-/* The session that is shown stays under the header while the list scrolls. */
-.sessions tbody tr.selected td {
+/* The copy of the session that is shown: the first row, which stays under
+   the header while the list scrolls, with a rule under it and then some
+   room before the list itself. */
+.sessions tbody tr.pinned td {
   position: sticky;
   top: 1.9rem;
   background: var(--chosen);
   border-bottom: 3px solid var(--label);
 }
 
-/* And is set apart from the rest: a rule under it, then some room. */
-.sessions tbody tr.selected + tr td {
+.sessions tbody tr.pinned + tr td {
   padding-top: 0.9rem;
 }
 

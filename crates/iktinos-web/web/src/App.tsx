@@ -125,11 +125,28 @@ function SessionList(props: {
   onSelect: (id: string) => void;
   now: number;
 }) {
-  // The session that is shown stays first: the others move as they are
-  // heard of, the latest first, and the one being read must not move with
-  // them.
-  const shown = props.sessions.filter((session) => session.id === props.selected);
-  const others = props.sessions.filter((session) => session.id !== props.selected);
+  // The session that is shown is also the first row, a copy that stays
+  // put: the list is ordered by when each session was last heard of, so
+  // its own row moves as the others work. That row is marked where it is.
+  const shown = props.sessions.find((session) => session.id === props.selected);
+  const row = (session: SessionSummary, pinned: boolean) => (
+    <tr
+      key={pinned ? `pinned:${session.id}` : session.id}
+      className={
+        pinned ? "selected pinned" : session.id === props.selected ? "selected" : undefined
+      }
+      onClick={() => props.onSelect(session.id)}
+    >
+      <td>
+        <div className="cwd">{session.location_name ?? "—"}</div>
+        <div className="label">{session.label}</div>
+      </td>
+      <td className={session.status.kind}>{session.status.text}</td>
+      <td className="number">{format.ago(props.now, session.last_seen)}</td>
+      <td className="number">{format.tokens(session.tokens)}</td>
+      <td className="number">{format.cost(session.cost)}</td>
+    </tr>
+  );
   return (
     <nav className="sessions">
       <table>
@@ -143,22 +160,8 @@ function SessionList(props: {
           </tr>
         </thead>
         <tbody>
-          {[...shown, ...others].map((session) => (
-            <tr
-              key={session.id}
-              className={session.id === props.selected ? "selected" : undefined}
-              onClick={() => props.onSelect(session.id)}
-            >
-              <td>
-                <div className="cwd">{session.location_name ?? "—"}</div>
-                <div className="label">{session.label}</div>
-              </td>
-              <td className={session.status.kind}>{session.status.text}</td>
-              <td className="number">{format.ago(props.now, session.last_seen)}</td>
-              <td className="number">{format.tokens(session.tokens)}</td>
-              <td className="number">{format.cost(session.cost)}</td>
-            </tr>
-          ))}
+          {shown && row(shown, true)}
+          {props.sessions.map((session) => row(session, false))}
         </tbody>
       </table>
     </nav>
