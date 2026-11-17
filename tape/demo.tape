@@ -3,6 +3,8 @@
 # projects directory, keeps one of them working for a minute and posts the
 # live events the bridge mod would send. No real Claude Code session exists
 # where this runs.
+#
+# The viewer, page by page.
 
 Output assets/demo.gif
 
@@ -40,66 +42,35 @@ Show
 
 Type "iktinos --projects-dir projects --socket-dir sockets"
 Enter
+
+# Trace: every session with its interactions; one is still running
 Sleep 4s
 
 # Sessions: one is working, one waits for a permission
+Type "2"
+Sleep 3s
 Type "j"
-Sleep 1.5s
-Type "j"
-Sleep 1.5s
-Type "gg"
-Sleep 1s
+Sleep 1200ms
+Type "k"
+Sleep 1200ms
 
-# Enter: its tool calls, as they happen
+# Enter: the session's tool calls, as they happen
 Enter
 Sleep 6s
 
-# Subagents
-Type "3"
-Sleep 2.5s
-
-# Trace: the interactions of the session, and one as a tree
+# Its subagents
 Type "4"
-Sleep 2s
-Type "j"
-Sleep 800ms
-Type "j"
-Sleep 800ms
-Type "j"
-Sleep 2s
-Enter
-Sleep 1s
-Type "j"
-Sleep 500ms
-Type "j"
-Sleep 500ms
-Type "j"
-Sleep 1s
-# Unfold the subagent
-Enter
-Sleep 2.5s
-Type "j"
-Sleep 600ms
-Type "j"
-Sleep 2s
+Sleep 2500ms
 
-# Back out, to every session again
-Escape
-Sleep 500ms
-Escape
-Sleep 500ms
-Escape
-Sleep 1s
+# Its trace: the interaction that is running, as a tree
+Type "1"
+Sleep 1500ms
+Type "j"
+Sleep 4s
 
-# Usage
+# Usage, over every session
 Type "5"
 Sleep 3s
-
-# Help
-Type "?"
-Sleep 3s
-Escape
-Sleep 500ms
 
 Type "q"
 Sleep 500ms

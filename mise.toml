@@ -8,6 +8,22 @@ prek = "latest"
 run = "tape/record.sh demo"
 description = "Record the demo GIF (in a container, from synthetic sessions)"
 
+[tasks."demo:trace"]
+run = "tape/record.sh demo-trace"
+description = "Record the Trace page demo GIF"
+
+[tasks."demo:tools"]
+run = "tape/record.sh demo-tools"
+description = "Record the Tool calls page demo GIF"
+
+[tasks."demo:subagents"]
+run = "tape/record.sh demo-subagents"
+description = "Record the Subagents page demo GIF"
+
+[tasks."demo:live"]
+run = "tape/record.sh demo-live"
+description = "Record the live events demo GIF"
+
 [tasks."demo:all"]
-depends = ["demo"]
+depends = ["demo", "demo:trace", "demo:tools", "demo:subagents", "demo:live"]
 description = "Record all demo GIFs"
