@@ -451,10 +451,12 @@ pub struct ListRow<'a> {
 }
 
 impl ListRow<'_> {
-    /// The text the row is searched by.
-    fn text(&self) -> String {
+    /// The text the row is searched by: what the row shows. Under its
+    /// session (`by_session`) an interaction does not show the session, and
+    /// is not found by its name: the session's own row is.
+    fn text(&self, by_session: bool) -> String {
         match &self.interaction {
-            Some(interaction) => interaction.text(),
+            Some(interaction) => interaction.text(!by_session),
             None => format!(
                 "{} {}",
                 label(self.session),
@@ -475,20 +477,31 @@ pub struct InteractionRow<'a> {
 }
 
 impl InteractionRow<'_> {
-    /// The text the interaction is searched by: its session, what was asked
-    /// and what its main thread called.
-    fn text(&self) -> String {
-        let mut text = format!(
-            "interaction {} {}",
-            label(self.session),
-            self.interaction.prompt.as_deref().unwrap_or_default()
-        );
+    /// The text the interaction is searched by: what was asked, what its
+    /// main thread called and what its responses said; with
+    /// `with_session`, its session and where that runs too.
+    fn text(&self, with_session: bool) -> String {
+        let mut text = self.interaction.prompt.clone().unwrap_or_default();
+        if with_session {
+            text.push(' ');
+            text.push_str(label(self.session));
+            text.push(' ');
+            text.push_str(&project(self.session).unwrap_or_default());
+        }
         for span in &self.interaction.thread.spans {
-            if let SpanKind::Tool(call) = &span.kind {
+            let parts = match &span.kind {
+                // The whole command where it is more than its first line.
+                SpanKind::Tool(call) => [
+                    Some(call.name.as_str()),
+                    call.summary.as_deref(),
+                    call.input.as_deref(),
+                ],
+                SpanKind::LlmRequest(request) => [request.text.as_deref(), None, None],
+                _ => [None, None, None],
+            };
+            for part in parts.into_iter().flatten() {
                 text.push(' ');
-                text.push_str(&call.name);
-                text.push(' ');
-                text.push_str(call.summary.as_deref().unwrap_or_default());
+                text.push_str(part);
             }
         }
         text
@@ -1660,11 +1673,15 @@ impl App {
                 .tools()
                 .iter()
                 .map(|(s, c)| {
+                    // The whole command where the row shows its first
+                    // line only, and where the session runs.
                     format!(
-                        "{} {} {}",
+                        "{} {} {} {} {}",
                         c.name,
                         c.summary.as_deref().unwrap_or_default(),
-                        label(s)
+                        c.input.as_deref().unwrap_or_default(),
+                        label(s),
+                        project(s).unwrap_or_default()
                     )
                 })
                 .collect(),
@@ -1673,15 +1690,20 @@ impl App {
                 .iter()
                 .map(|(s, a)| {
                     format!(
-                        "{} {} {} {}",
+                        "{} {} {} {} {}",
                         a.agent_type.as_deref().unwrap_or_default(),
                         a.description.as_deref().unwrap_or_default(),
                         a.agent_id,
-                        label(s)
+                        label(s),
+                        project(s).unwrap_or_default()
                     )
                 })
                 .collect(),
-            Page::Trace => self.trace_list().iter().map(ListRow::text).collect(),
+            Page::Trace => self
+                .trace_list()
+                .iter()
+                .map(|row| row.text(self.by_session))
+                .collect(),
             Page::Usage => Vec::new(),
         };
         rows.into_iter().map(|row| row.to_lowercase()).collect()
@@ -1720,6 +1742,10 @@ impl App {
         }
         let page = self.page;
         self.search = Some(Search { page, query });
+        if page == Page::Trace {
+            // What a folded session holds could not be found: unfold all.
+            self.closed_sessions.clear();
+        }
         let at = *self.cursor_mut(page);
         let matches = self.matches(page, now());
         if let Some(to) = matches.iter().find(|m| **m >= at).or(matches.first()) {

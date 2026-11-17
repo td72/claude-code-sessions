@@ -148,7 +148,7 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `t` in the trace | list the interactions all together, the latest first, or under their sessions again |
 | `Enter` on a session in that list, or on a subagent in an interaction's tree | unfold it, fold it |
 | `l`, `h` in the trace | the pane on the right, and back (`h` in the tree or under a session goes to the row above first) |
-| `/`, `n` / `N` | search the list |
+| `/`, `n` / `N` | search the list: the rows that match are drawn in the search colour, the cursor goes to the first, and `n` / `N` to the next and the one before. A row is found by what it shows and what it stands for: a tool call by every line of its command, an interaction by what was asked, what it called and what its responses said. In the trace, a search unfolds the sessions |
 | `Esc` on a list | clear the search, then the repository, then the narrowing |
 | `o` on a tool call | read its whole output from the transcript and show it; again, the excerpt |
 | `o` on a request in an interaction's tree | read all its response said from the transcript and show it; again, the first line |

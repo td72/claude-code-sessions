@@ -300,6 +300,7 @@ fn draw_list(
     index: usize,
     table: Table<'static>,
     selected: Option<usize>,
+    found: Found,
 ) {
     let table = table
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
@@ -309,6 +310,39 @@ fn draw_list(
         .with_selected(selected);
     frame.render_stateful_widget(table, area, &mut state);
     app.offsets[index] = state.offset();
+
+    // The rows a search matches, painted over whatever colours their cells
+    // have: a match must be seen at a glance. The rows start under the
+    // frame and the header, and end above the footer and the frame.
+    let first = area.y.saturating_add(2);
+    let end = area.bottom().saturating_sub(1 + found.footer);
+    let style = Style::new()
+        .fg(theme::current().search)
+        .add_modifier(Modifier::BOLD);
+    for at in found.matches.iter().filter(|at| **at >= state.offset()) {
+        let Ok(down) = u16::try_from(at - state.offset()) else {
+            continue;
+        };
+        let y = first.saturating_add(down);
+        if y >= end {
+            break;
+        }
+        let row = Rect {
+            x: area.x.saturating_add(1),
+            y,
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        frame.buffer_mut().set_style(row, style);
+    }
+}
+
+/// The rows of a list a search matches, and how many rows its table ends
+/// with that are not rows of the list.
+#[derive(Clone, Copy, Default)]
+struct Found<'a> {
+    matches: &'a [usize],
+    footer: u16,
 }
 
 fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
@@ -386,7 +420,11 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
     .footer(totals_row(&app.totals(now)))
     .block(pane_block(title, !app.in_detail));
     let selected = (!app.order.is_empty()).then_some(app.selected);
-    draw_list(frame, area, app, 0, table, selected);
+    let found = Found {
+        matches: &matches,
+        footer: 1,
+    };
+    draw_list(frame, area, app, 0, table, selected, found);
 }
 
 fn outcome(call: &ToolCall) -> (&'static str, Style) {
@@ -453,7 +491,11 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.tool_selected);
-    draw_list(frame, area, app, 1, table, selected);
+    let found = Found {
+        matches: &matches,
+        footer: 0,
+    };
+    draw_list(frame, area, app, 1, table, selected, found);
 }
 
 /// A status in the one word a narrow column has room for: `running` for
@@ -583,7 +625,11 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.subagent_selected);
-    draw_list(frame, area, app, 2, table, selected);
+    let found = Found {
+        matches: &matches,
+        footer: 0,
+    };
+    draw_list(frame, area, app, 2, table, selected, found);
 }
 
 /// Whether an interaction is still going: it has no end, it is its session's latest
@@ -828,7 +874,19 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.trace_selected);
-    draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
+    let found = Found {
+        matches: &matches,
+        footer: 0,
+    };
+    draw_list(
+        frame,
+        area,
+        app,
+        Page::Trace.list_index(),
+        table,
+        selected,
+        found,
+    );
 }
 
 /// The pane beside the interactions: the interaction or the session under the cursor, or,
@@ -1100,7 +1158,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         .block(block);
     // The cursor shows once the tree has been entered.
     let selected = app.in_tree().then_some(app.span_selected.min(count - 1));
-    draw_list(frame, area, app, TREE, table, selected);
+    draw_list(frame, area, app, TREE, table, selected, Found::default());
 }
 
 /// The detail of a row of the interaction's tree.
@@ -3551,6 +3609,133 @@ mod tests {
         app.focus_detail();
         app.start_search();
         assert_eq!(app.typing, None);
+    }
+
+    /// The foreground colours of the cells of the row that shows `needle`,
+    /// left of the frame's last column and without the blank cells.
+    fn row_colours(app: &mut App, needle: &str, now: &str) -> Vec<Color> {
+        let now = Timestamp::parse(now).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        terminal.draw(|frame| draw(frame, app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..44u16 {
+            let text: String = (0..150u16).map(|x| buffer[(x, y)].symbol()).collect();
+            if text.contains(needle) {
+                return (1..149u16)
+                    .filter(|x| buffer[(*x, y)].symbol() != " ")
+                    .map(|x| buffer[(x, y)].fg)
+                    .collect();
+            }
+        }
+        panic!("no {needle} on the screen");
+    }
+
+    #[test]
+    fn a_row_a_search_matches_is_in_the_search_colour_whatever_its_cells_are() {
+        let mut app = fixture_app();
+        // A row has cells of several colours.
+        let plain = row_colours(&mut app, "Synthetic session title", SOON);
+        assert!(plain.contains(&Color::Yellow) && plain.contains(&Color::Reset));
+
+        app.typing = Some("session title".to_owned());
+        app.submit_search();
+        let found = row_colours(&mut app, "Synthetic session title", SOON);
+        assert!(found.iter().all(|c| *c == Color::Yellow), "{found:?}");
+        // The rows it does not match, the totals under them and the header
+        // over them are as they were.
+        let other = row_colours(&mut app, "other.repo", SOON);
+        assert!(other.contains(&Color::Reset), "{other:?}");
+        let totals = row_colours(&mut app, "1 matching of 3 sessions", SOON);
+        assert!(totals.iter().all(|c| *c == Color::Cyan), "{totals:?}");
+        let header = row_colours(&mut app, "repository", SOON);
+        assert!(header.iter().all(|c| *c == Color::DarkGray), "{header:?}");
+
+        // The same on the other lists.
+        app.go_to(Page::Tools);
+        app.typing = Some("cargo".to_owned());
+        app.submit_search();
+        let call = row_colours(&mut app, "cargo test --workspace", SOON);
+        assert!(call.iter().all(|c| *c == Color::Yellow), "{call:?}");
+        app.go_to(Page::Trace);
+        app.typing = Some("lookup".to_owned());
+        app.submit_search();
+        let interaction = row_colours(&mut app, "└ Synthetic prompt: run the checks", SOON);
+        assert!(!interaction.is_empty());
+    }
+
+    #[test]
+    fn a_search_finds_what_the_rows_stand_for() {
+        use crate::app::tests::{append_call, scratch_projects};
+        let projects = scratch_projects("search");
+        // A command of several lines: the row shows the first.
+        append_call(
+            &projects,
+            "toolu_search",
+            5,
+            "Bash",
+            r#"{"command":"cd /work/other.repo\nmake synthetic-target"}"#,
+        );
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            ..crate::app::tests::fixture_config()
+        });
+        let search = |app: &mut App, page: Page, query: &str| {
+            app.go_to(page);
+            app.search = None;
+            app.typing = Some(query.to_owned());
+            app.submit_search();
+            app.matches(page, Timestamp::parse(LATER).unwrap())
+        };
+
+        // A tool call: by a later line of its command, and by where its
+        // session runs.
+        assert_eq!(search(&mut app, Page::Tools, "synthetic-target").len(), 1);
+        assert_eq!(app.selected_tool().unwrap().1.id, "toolu_search");
+        let here = search(&mut app, Page::Tools, "other.repo").len();
+        assert_eq!(here, app.tools().len(), "every call is that session's");
+
+        // The trace by session: a session's name finds the session, not
+        // every interaction under it.
+        assert!(app.by_session);
+        let named = search(&mut app, Page::Trace, "22222222");
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert!(app.selected_list_row().unwrap().interaction.is_none());
+        // What a response said finds its interaction.
+        let said = search(&mut app, Page::Trace, "synthetic answer");
+        assert!(!said.is_empty());
+        assert!(said
+            .iter()
+            .all(|at| app.trace_list()[*at].interaction.is_some()));
+        // The word "interaction" is not in every row.
+        assert!(search(&mut app, Page::Trace, "interaction").is_empty());
+
+        // A folded session is unfolded by a search: what it holds is
+        // found.
+        app.search = None;
+        app.move_first();
+        while app.selected_list_row().unwrap().interaction.is_some()
+            || app.selected_list_row().unwrap().session.id != WITH_SUBAGENTS
+        {
+            app.move_by(1);
+        }
+        app.enter();
+        assert_eq!(app.closed_sessions.len(), 1);
+        let folded = search(&mut app, Page::Trace, "synthetic-target");
+        assert!(app.closed_sessions.is_empty());
+        assert_eq!(folded.len(), 1);
+        let row = app.selected_list_row().unwrap();
+        assert_eq!(row.session.id, WITH_SUBAGENTS);
+        assert!(row.interaction.is_some());
+
+        // All together, the session is on the row and finds it.
+        app.toggle_by_session();
+        let flat = search(&mut app, Page::Trace, "22222222");
+        assert!(!flat.is_empty());
+        assert!(flat
+            .iter()
+            .all(|at| app.trace_list()[*at].session.id == WITH_SUBAGENTS));
+
+        let _ = std::fs::remove_dir_all(projects);
     }
 
     #[test]
