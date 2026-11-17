@@ -44,7 +44,7 @@ Hard rules:
 ## Layout
 
 ```
-crates/iktinos-core/   the library: record, discover, tail, session, trace, output, place, pricing
+crates/iktinos-core/   the library: record, discover, tail, session, follow, trace, output, place, pricing
 crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
 crates/iktinos-tui/    the terminal viewer, as a library
 crates/iktinos/        the `iktinos` command: the way in, and nothing else

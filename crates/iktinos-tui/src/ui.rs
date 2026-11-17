@@ -219,10 +219,7 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
     let mut title = what;
     if app.page != Page::Sessions {
         if let Some(session) = app.scoped_session() {
-            title.push_str(&format!(
-                " of {}",
-                format::truncate(app::label(session), 40)
-            ));
+            title.push_str(&format!(" of {}", format::truncate(session.label(), 40)));
         } else if let Some(dir) = app.within() {
             title.push_str(&format!(" in {}", place_name(dir)));
         }
@@ -281,7 +278,8 @@ fn when_width(times: Times) -> u16 {
 
 fn session_cell(session: &Session) -> Cell<'static> {
     Cell::from(
-        app::label(session)
+        session
+            .label()
             .lines()
             .next()
             .unwrap_or_default()
@@ -396,14 +394,16 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         .filter_map(|id| app.store.get(id))
         .map(|session| {
             let status = app.status(session, now);
-            let updated = app::latest(session).map_or("—".to_owned(), |at| format::ago(now, at));
+            let updated = session
+                .last_seen()
+                .map_or("—".to_owned(), |at| format::ago(now, at));
             // The session the other pages are narrowed to.
             let scoped = app.scope.as_deref() == Some(session.id.as_str());
             Row::new([
                 Cell::from(if scoped { "●" } else { "" })
                     .style(Style::new().fg(theme::current().session)),
                 session_cell(session),
-                Cell::from(app::project(session).unwrap_or_else(|| "—".to_owned()))
+                Cell::from(session.location_name().unwrap_or_else(|| "—".to_owned()))
                     .style(cwd_style()),
                 Cell::from(session.git_branch.clone().unwrap_or_else(|| "—".to_owned())),
                 Cell::from(status.text).style(style_of(status.kind)),
@@ -809,14 +809,14 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     .filter_map(|i| i.started_at)
                     .max()
                     .map_or("—".to_owned(), |at| when(time, now, at));
-                let name = app::label(session).lines().next().unwrap_or_default();
+                let name = session.label().lines().next().unwrap_or_default();
                 return Row::new([
                     Cell::from(Line::from(when).right_aligned()),
                     Cell::from(Line::from(vec![
                         Span::raw(if row.open { "▾ " } else { "▸ " }),
                         // Where it runs first: what tells sessions apart.
                         Span::styled(
-                            app::project(session).unwrap_or_else(|| "—".to_owned()),
+                            session.location_name().unwrap_or_else(|| "—".to_owned()),
                             cwd_style(),
                         ),
                         Span::raw("  "),
@@ -853,12 +853,13 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     // Where it runs, then its name.
                     cells.push(Cell::from(Line::from(vec![
                         Span::styled(
-                            app::project(session).unwrap_or_else(|| "—".to_owned()),
+                            session.location_name().unwrap_or_else(|| "—".to_owned()),
                             cwd_style(),
                         ),
                         Span::raw("  "),
                         Span::raw(
-                            app::label(session)
+                            session
+                                .label()
                                 .lines()
                                 .next()
                                 .unwrap_or_default()
@@ -1261,7 +1262,8 @@ fn interaction_lines(
         Line::styled("Interaction", headline()),
         field(
             "session",
-            app::label(session)
+            session
+                .label()
                 .lines()
                 .next()
                 .unwrap_or_default()
@@ -1932,7 +1934,7 @@ fn session_lines(app: &App, session: &Session, now: Timestamp, width: usize) -> 
     let status = app.status(session, now);
 
     lines.extend(
-        wrap(app::label(session), width)
+        wrap(session.label(), width)
             .into_iter()
             .map(|line| line.style(headline())),
     );
@@ -2047,7 +2049,8 @@ fn tool_lines(
         ]),
         field(
             "session",
-            app::label(session)
+            session
+                .label()
                 .lines()
                 .next()
                 .unwrap_or_default()
@@ -2098,7 +2101,8 @@ fn subagent_lines(
     }
     lines.push(field(
         "session",
-        app::label(session)
+        session
+            .label()
             .lines()
             .next()
             .unwrap_or_default()
@@ -2194,7 +2198,7 @@ fn draw_usage_page(frame: &mut Frame, area: Rect, app: &App) {
             add(by_source.entry(source.clone()).or_default(), usage);
         }
         let repo = by_repo
-            .entry(app::project(session).unwrap_or_else(|| "—".to_owned()))
+            .entry(session.location_name().unwrap_or_else(|| "—".to_owned()))
             .or_default();
         repo.0 += 1;
         repo.2 += session.usage.total().total_tokens();
