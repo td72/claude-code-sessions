@@ -15,4 +15,28 @@ repo = "local"
 hooks = [
   { id = "cargo-fmt", name = "cargo fmt", language = "system", entry = "cargo fmt", args = ["--all", "--check"], files = "\\.rs$", pass_filenames = false },
   { id = "cargo-clippy", name = "cargo clippy", language = "system", entry = "cargo clippy", args = ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"], files = "\\.rs$", pass_filenames = false },
+  # A tape that is changed is recorded again: its gif is in the same commit.
+  { id = "check-gif-freshness", name = "check gif freshness", language = "system", entry = "bash", args = ["-c", """
+staged=$(git diff --cached --name-only)
+tapes=$(echo "$staged" | grep '\\.tape$' || true)
+if [ -z "$tapes" ]; then exit 0; fi
+for tape in $tapes; do
+  gif="assets/$(basename "${tape%.tape}").gif"
+  if ! echo "$staged" | grep -qF "$gif"; then
+    echo "$tape was modified but $gif is not staged — run: mise run demo:all"
+    exit 1
+  fi
+done
+"""], always_run = true, pass_filenames = false },
+  # A tape never starts iktinos on its default directories: on a real
+  # machine those hold real sessions.
+  { id = "check-tape-isolation", name = "check tape isolation", language = "system", entry = "bash", args = ["-c", """
+starts=$(grep -HnE '^Type.*"iktinos' tape/*.tape 2>/dev/null || true)
+bad=$(echo "$starts" | grep -v -e '--projects-dir.*--socket-dir' | grep . || true)
+if [ -n "$bad" ]; then
+  echo "a tape starts iktinos without --projects-dir and --socket-dir:"
+  echo "$bad"
+  exit 1
+fi
+"""], always_run = true, pass_filenames = false },
 ]

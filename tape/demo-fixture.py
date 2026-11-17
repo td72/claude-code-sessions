@@ -112,10 +112,11 @@ class Session:
 
     def request(self, agent: str | None = None, kind: str = "Explore"):
         """The request to the model that the next response answers."""
+        self.ref = self.uid("ref")
         self.record(
             {
                 "type": "api-request",
-                "id": self.uid("ref"),
+                "id": self.ref,
                 "timestamp": stamp(self.clock),
                 "version": VERSION,
                 "querySource": f"agent:builtin:{kind}" if agent else "repl_main_thread",
@@ -140,6 +141,7 @@ class Session:
                 "isSidechain": agent is not None,
                 "type": "assistant",
                 "uuid": self.uid("a"),
+                "requestRef": self.ref,
                 "message": {
                     "model": AGENT_MODEL if agent else MAIN_MODEL,
                     "id": self.uid("msg"),

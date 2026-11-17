@@ -9,6 +9,10 @@ machine: where it runs, what it is doing, what it has used, which tools and
 subagents it has called. It is a library first; [vig](https://github.com/td72/vig)
 renders it as a page, and a small standalone viewer ships here.
 
+![demo](assets/demo.gif)
+
+(Recorded from invented sessions: see `tape/`.)
+
 *Iktinos* (ἴκτινος) is ancient Greek for the kite, a bird that circles high
 and watches the ground; it was also the name of an architect of the Parthenon.
 
