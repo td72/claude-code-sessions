@@ -574,6 +574,10 @@ pub struct ToolCall {
     pub name: String,
     /// One line of the call's input: the command, the file path.
     pub summary: Option<String>,
+    /// The text the summary was cut from, where the summary is not all of
+    /// it: every line of the command, up to
+    /// [`INPUT_CHARS`](crate::record::INPUT_CHARS).
+    pub input: Option<String>,
     /// The subagent that made the call, if one did.
     pub agent_id: Option<String>,
     pub started_at: Option<Timestamp>,
@@ -782,6 +786,7 @@ impl Entry {
                         id: id.clone(),
                         name: name.clone(),
                         summary: call.summary.clone(),
+                        input: call.input.clone(),
                         agent_id: agent.map(str::to_owned),
                         started_at: at,
                         duration_ms: None,

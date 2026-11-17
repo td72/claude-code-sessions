@@ -302,10 +302,18 @@ impl Assistant {
         let message = obj.get("message").and_then(Value::as_object);
         let tool_uses = content_blocks(obj)
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-            .map(|b| ToolUse {
-                id: string(b, "id"),
-                name: string(b, "name"),
-                summary: b.get("input").and_then(summarize_input),
+            .map(|b| {
+                let input = b.get("input");
+                let summary = input.and_then(summarize_input);
+                ToolUse {
+                    id: string(b, "id"),
+                    name: string(b, "name"),
+                    // Kept only where the summary is not all of it.
+                    input: input
+                        .and_then(whole_input)
+                        .filter(|whole| Some(whole) != summary.as_ref()),
+                    summary,
+                }
             })
             .collect();
         Self {
@@ -334,10 +342,16 @@ pub struct ToolUse {
     /// One line of the call's input: the command, the file path, the search
     /// pattern. See [`summarize_input`].
     pub summary: Option<String>,
+    /// The text the summary was cut from, where the summary is not all of
+    /// it: every line of the command. See [`whole_input`].
+    pub input: Option<String>,
 }
 
 /// The longest summary of a tool input, in characters.
 pub const SUMMARY_CHARS: usize = 120;
+
+/// The most of a tool input that is kept, in characters.
+pub const INPUT_CHARS: usize = 4000;
 
 /// The input fields a summary is taken from, in order of preference.
 const SUMMARY_KEYS: &[&str] = &[
@@ -356,18 +370,37 @@ const SUMMARY_KEYS: &[&str] = &[
 /// [`SUMMARY_CHARS`]. `None` for an input with none of them. The bridge mod
 /// summarises a running call the same way.
 pub fn summarize_input(input: &Value) -> Option<String> {
-    let text = SUMMARY_KEYS
+    let line = described(input)?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_end();
+    Some(cut(line, SUMMARY_CHARS))
+}
+
+/// The text [`summarize_input`] takes its line from, with every line, cut to
+/// [`INPUT_CHARS`]: a view shows it where one line is not enough.
+pub fn whole_input(input: &Value) -> Option<String> {
+    Some(cut(described(input)?, INPUT_CHARS))
+}
+
+/// The first of the summary's fields that holds text.
+fn described(input: &Value) -> Option<&str> {
+    SUMMARY_KEYS
         .iter()
         .filter_map(|key| input.get(key).and_then(Value::as_str))
         .map(str::trim)
-        .find(|text| !text.is_empty())?;
-    let line = text.lines().next().unwrap_or_default().trim_end();
-    if line.chars().count() <= SUMMARY_CHARS {
-        return Some(line.to_owned());
+        .find(|text| !text.is_empty())
+}
+
+/// `text`, or its first `max - 1` characters and an ellipsis.
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
     }
-    let mut cut: String = line.chars().take(SUMMARY_CHARS - 1).collect();
+    let mut cut: String = text.chars().take(max - 1).collect();
     cut.push('…');
-    Some(cut)
+    cut
 }
 
 /// `message.usage` of one API response.
@@ -719,6 +752,30 @@ mod tests {
         assert!(long.ends_with('…'));
         // Nothing to summarise.
         assert_eq!(summary(r#"{"content":"a whole file"}"#), None);
+
+        // The whole text is kept beside a summary that is not all of it.
+        let whole = |input: &str| whole_input(&serde_json::from_str(input).unwrap());
+        assert_eq!(
+            whole(r#"{"command":"echo one\necho two\n"}"#).as_deref(),
+            Some("echo one\necho two")
+        );
+        let long = whole(&format!(r#"{{"command":"{}"}}"#, "あ".repeat(5000))).unwrap();
+        assert_eq!(long.chars().count(), INPUT_CHARS);
+        assert_eq!(whole(r#"{"content":"a whole file"}"#), None);
+        let uses = |input: &str| {
+            let line = format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t","name":"Bash","input":{input}}}]}}}}"#
+            );
+            match Record::parse(&line).view() {
+                View::Assistant(assistant) => assistant.tool_uses[0].clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(uses(r#"{"command":"cargo test"}"#).input, None);
+        assert_eq!(
+            uses(r#"{"command":"echo one\necho two"}"#).input.as_deref(),
+            Some("echo one\necho two")
+        );
         assert_eq!(summary(r#"{"command":7}"#), None);
         assert_eq!(summary("[]"), None);
     }
