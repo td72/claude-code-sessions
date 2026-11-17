@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION;
-use iktinos_serve::{Config, Server};
+use iktinos_web::{Config, Server};
 use serde_json::Value;
 
 const INDEXED: &str = "11111111-1111-4111-8111-111111111111";
@@ -36,7 +36,7 @@ fn scratch(name: &str) -> PathBuf {
             }
         }
     }
-    let dir = std::env::temp_dir().join(format!("iktinos-serve-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("iktinos-web-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     copy(&fixture_projects(), &dir);
     dir
@@ -176,8 +176,21 @@ fn nothing_is_answered_without_the_token_or_its_cookie() {
         Some("text/html; charset=utf-8")
     );
     assert!(page.body.contains("<title>iktinos</title>"));
-    // No inline script or style: the policy would not run them.
-    assert!(!page.body.contains("<script") && !page.body.contains("<style"));
+    // No inline script or style: the policy would not run them. A script
+    // is a file this server serves, and it is served.
+    assert!(!page.body.contains("<style"));
+    for script in page.body.split("<script").skip(1) {
+        let tag = script.split('>').next().unwrap();
+        let src = tag.split("src=\"").nth(1).expect("an inline script");
+        let address = src.split('"').next().unwrap();
+        assert!(address.starts_with('/'), "{address}");
+        let served = get(&server, address);
+        assert_eq!(served.status, 200, "{address}");
+        assert_eq!(
+            served.header("content-type"),
+            Some("text/javascript; charset=utf-8")
+        );
+    }
 }
 
 #[test]

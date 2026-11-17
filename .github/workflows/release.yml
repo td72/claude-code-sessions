@@ -7,7 +7,7 @@
 # the tag and GitHub release `<crate>-v<version>`.
 #
 # Publish order when several crates change: core, then live, then tui, then
-# serve, then the command (iktinos) — one release pull request each.
+# web, then the command (iktinos) — one release pull request each.
 
 name: Release
 

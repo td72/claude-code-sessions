@@ -235,7 +235,7 @@ impl Server {
         };
 
         let watcher = thread::Builder::new()
-            .name("iktinos-serve-watch".to_owned())
+            .name("iktinos-web-watch".to_owned())
             .spawn({
                 let shared = Arc::clone(&shared);
                 let refresh = config.refresh;
@@ -274,7 +274,7 @@ impl Server {
             })?;
 
         let acceptor = thread::Builder::new()
-            .name("iktinos-serve-accept".to_owned())
+            .name("iktinos-web-accept".to_owned())
             .spawn({
                 let shared = Arc::clone(&shared);
                 move || {
@@ -288,7 +288,7 @@ impl Server {
                         let shared = Arc::clone(&shared);
                         // A connection that cannot get a thread is dropped.
                         let _ = thread::Builder::new()
-                            .name("iktinos-serve-conn".to_owned())
+                            .name("iktinos-web-conn".to_owned())
                             .spawn(move || connection(stream, &shared));
                     }
                 }

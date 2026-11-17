@@ -2,6 +2,6 @@
 *.key
 tmp/
 
-# The page of `iktinos serve`, built with npm (crates/iktinos-serve/web)
+# The page of `iktinos serve`, built with npm (crates/iktinos-web/web)
 node_modules/
-crates/iktinos-serve/web/dist/
+crates/iktinos-web/web/dist/

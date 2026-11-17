@@ -57,7 +57,7 @@ know yet.
 | [`iktinos-core`](crates/iktinos-core) | the library: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`, and what is derived from a session: its status, its name, where it runs), `follow` (the loop that keeps a store current), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the terminal viewer, as a library |
-| [`iktinos-serve`](crates/iktinos-serve) | `iktinos serve`, as a library: a local server for a browser |
+| [`iktinos-web`](crates/iktinos-web) | the sessions in a browser, as a library: the page, and the local server `iktinos serve` starts |
 | [`iktinos`](crates/iktinos) | the `iktinos` command: the way in. Without a subcommand it starts the viewer; `iktinos serve` starts the server |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
 

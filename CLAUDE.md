@@ -53,7 +53,7 @@ Hard rules:
 crates/iktinos-core/   the library: record, discover, tail, session, follow, trace, output, place, pricing
 crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
 crates/iktinos-tui/    the terminal viewer, as a library
-crates/iktinos-serve/  `iktinos serve`, as a library: a local server for a browser
+crates/iktinos-web/    the page and the local server behind `iktinos serve`, as a library
 crates/iktinos/        the `iktinos` command: the way in, and nothing else
 mods/iktinos-bridge/               the Claude Code mod (TS) that speaks the protocol
 tests/fixtures/<claude code version>/   synthetic transcripts and event samples
@@ -61,7 +61,7 @@ tape/, assets/                     demo tapes (recorded in a container) and thei
 ```
 
 Crates are versioned independently (core stays stable while live follows the
-mod API). Publish order: core → live → tui → serve → iktinos.
+mod API). Publish order: core → live → tui → web → iktinos.
 
 The crate named after the project is the command, so that
 `cargo install iktinos` installs it. What the command does belongs in the
@@ -92,7 +92,7 @@ One crate per release pull request, from a branch named
 `release/<crate>-<version>` (for example `release/iktinos-core-0.3.1`)
 that sets the crate's `version`. Merging it runs `release.yml`: publish to
 crates.io through Trusted Publishing, then the tag and GitHub release
-`<crate>-v<version>`. Several crates: core → live → tui → serve → iktinos, each in its own pull
+`<crate>-v<version>`. Several crates: core → live → tui → web → iktinos, each in its own pull
 request, each merged after the previous one is on crates.io.
 
 A crate's first version cannot use Trusted Publishing (the crate must exist to

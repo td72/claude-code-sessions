@@ -1,7 +1,7 @@
 [package]
-name = "iktinos-serve"
+name = "iktinos-web"
 version = "0.1.0"
-description = "A local server to watch the Claude Code sessions on this machine in a browser: the `iktinos serve` command, as a library"
+description = "The Claude Code sessions on this machine in a browser: the page and the local server behind `iktinos serve`, as a library"
 readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
