@@ -11,6 +11,12 @@
 //! answered `200`; anything else is answered with an error status and
 //! dropped. Nothing is ever sent to Claude Code beyond that status line.
 //!
+//! The server counts the requests it turned away ([`Server::rejected`]): a
+//! consumer that hears nothing can then tell a mod that does not send from
+//! one that sends what this crate does not read. A connection that sends
+//! nothing at all (another consumer checking whether the socket is alive)
+//! is not a request and is not counted.
+//!
 //! On start, sockets in the directory that refuse a connection (left behind
 //! by a consumer that was killed) are removed. On drop the server removes its
 //! own.
@@ -20,7 +26,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -50,6 +56,7 @@ pub fn default_socket_dir() -> Option<PathBuf> {
 pub struct Server {
     path: PathBuf,
     stopping: Arc<AtomicBool>,
+    rejected: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -76,17 +83,20 @@ impl Server {
         let listener = UnixListener::bind(&path).map_err(io(&path))?;
         let (sender, receiver) = mpsc::channel();
         let stopping = Arc::new(AtomicBool::new(false));
+        let rejected = Arc::new(AtomicU64::new(0));
         let thread = thread::Builder::new()
             .name("iktinos-live".to_owned())
             .spawn({
                 let stopping = Arc::clone(&stopping);
-                move || serve(&listener, &sender, &stopping)
+                let rejected = Arc::clone(&rejected);
+                move || serve(&listener, &sender, &stopping, &rejected)
             })
             .map_err(io(&path))?;
         Ok((
             Self {
                 path,
                 stopping,
+                rejected,
                 thread: Some(thread),
             },
             receiver,
@@ -96,6 +106,13 @@ impl Server {
     /// The socket this server listens on.
     pub fn socket_path(&self) -> &Path {
         &self.path
+    }
+
+    /// How many requests were answered with an error so far: not a
+    /// `POST /events`, a body that is not an event, a protocol version this
+    /// crate does not speak.
+    pub fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
     }
 }
 
@@ -143,7 +160,12 @@ fn remove_stale_sockets(dir: &Path) {
     }
 }
 
-fn serve(listener: &UnixListener, events: &Sender<Event>, stopping: &AtomicBool) {
+fn serve(
+    listener: &UnixListener,
+    events: &Sender<Event>,
+    stopping: &AtomicBool,
+    rejected: &AtomicU64,
+) {
     for stream in listener.incoming() {
         if stopping.load(Ordering::SeqCst) {
             return;
@@ -161,7 +183,11 @@ fn serve(listener: &UnixListener, events: &Sender<Event>, stopping: &AtomicBool)
                 }
                 Status::Ok
             }
-            Err(status) => status,
+            Err(Status::Empty) => continue,
+            Err(status) => {
+                rejected.fetch_add(1, Ordering::Relaxed);
+                status
+            }
         };
         let _ = stream.write_all(status.response().as_bytes());
     }
@@ -171,6 +197,8 @@ fn serve(listener: &UnixListener, events: &Sender<Event>, stopping: &AtomicBool)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Ok,
+    /// The client sent nothing: not a request, and not answered.
+    Empty,
     BadRequest,
     NotFound,
     MethodNotAllowed,
@@ -182,7 +210,7 @@ impl Status {
     fn response(self) -> String {
         let line = match self {
             Self::Ok => "200 OK",
-            Self::BadRequest => "400 Bad Request",
+            Self::BadRequest | Self::Empty => "400 Bad Request",
             Self::NotFound => "404 Not Found",
             Self::MethodNotAllowed => "405 Method Not Allowed",
             Self::LengthRequired => "411 Length Required",
@@ -206,6 +234,7 @@ fn read_event(stream: &mut impl Read) -> Result<Event, Status> {
             return Err(Status::BadRequest);
         }
         match stream.read(&mut chunk) {
+            Ok(0) | Err(_) if buf.is_empty() => return Err(Status::Empty),
             Ok(0) | Err(_) => return Err(Status::BadRequest),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }

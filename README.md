@@ -121,7 +121,24 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `r`, `?`, `q` | refresh, help, quit |
 
 It reads the transcripts once a second and, unless `--no-live` is given,
-listens for live events on its own socket. A cost shown as `~$1.23` contains
+listens for live events on its own socket. The end of the header says what
+that socket has heard, since an open socket says nothing about a mod that
+sends:
+
+| header | |
+| --- | --- |
+| `live off` | not listening (`--no-live`) |
+| `live failed` | the socket could not be opened; the footer says why |
+| `live on, no events yet` | listening, and nothing has arrived: the mod is not installed, is disabled, or posts to another directory |
+| `live 128 events, last 3s ago` | receiving. It turns yellow when a session is busy and nothing has arrived for a minute |
+
+A session's detail says when its own last event arrived, which tells a
+session the mod does not report on from one that is idle. The help (`?`) ends
+with the socket's path, to compare with where the mod posts, and with how
+many events were of a type the viewer does not know and how many requests it
+turned away: the signs of a mod and a viewer that do not match.
+
+A cost shown as `~$1.23` contains
 an estimate; `$1.23` is Claude Code's own figure.
 
 ## Two inputs, one state

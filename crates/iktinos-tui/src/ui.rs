@@ -67,7 +67,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
     }
     draw_footer(frame, footer, app);
     if app.help {
-        draw_help(frame, frame.area());
+        draw_help(frame, frame.area(), app);
     }
 }
 
@@ -112,12 +112,84 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
         ));
     }
     spans.push(Span::raw("  "));
-    spans.push(match &app.live {
-        LiveStatus::Off => Span::styled("live off", dim()),
-        LiveStatus::Listening(_) => Span::styled("live on", Style::new().fg(Color::Green)),
-        LiveStatus::Failed(_) => Span::styled("live failed", Style::new().fg(Color::Red)),
-    });
+    spans.push(live_span(app, now, counts[0] > 0));
     frame.render_widget(Line::from(spans), area);
+}
+
+/// How long the socket may be silent while a session is busy before the
+/// header says so in colour.
+const QUIET: i64 = 60_000;
+
+/// The header's live part: whether the viewer listens, and what it has
+/// heard. An open socket alone says nothing about a mod that sends.
+fn live_span(app: &App, now: Timestamp, busy: bool) -> Span<'static> {
+    let warn = Style::new().fg(Color::Yellow);
+    match &app.live {
+        LiveStatus::Off => Span::styled("live off", dim()),
+        LiveStatus::Failed(_) => Span::styled("live failed", Style::new().fg(Color::Red)),
+        LiveStatus::Listening(_) => match app.received.last_at {
+            None => Span::styled("live on, no events yet", warn),
+            Some(at) => {
+                let quiet = busy && now.as_millis() - at.as_millis() > QUIET;
+                Span::styled(
+                    format!(
+                        "live {}, last {}",
+                        events(app.received.events),
+                        when_said(app.times(), now, at)
+                    ),
+                    if quiet {
+                        warn
+                    } else {
+                        Style::new().fg(Color::Green)
+                    },
+                )
+            }
+        },
+    }
+}
+
+fn events(count: u64) -> String {
+    match count {
+        1 => "1 event".to_owned(),
+        _ => format!("{count} events"),
+    }
+}
+
+/// [`when`] in a sentence: `3s ago`, `at 10:00:08`.
+fn when_said(times: Times, now: Timestamp, at: Timestamp) -> String {
+    let age = now.as_millis() - at.as_millis();
+    let new = age >= 0 && (age as u128) < times.ago_within.as_millis();
+    match times.style {
+        TimeStyle::Clock if !new => format!("at {}", format::when(now, at)),
+        _ => match format::ago(now, at).as_str() {
+            "now" => "now".to_owned(),
+            ago => format!("{ago} ago"),
+        },
+    }
+}
+
+/// What the socket has received, for the help: where it listens, and the
+/// signs of a mod and a viewer that do not match.
+fn live_lines(app: &App) -> Vec<String> {
+    match &app.live {
+        LiveStatus::Off => Vec::new(),
+        LiveStatus::Failed(reason) => vec![format!("unavailable: {reason}")],
+        LiveStatus::Listening(socket) => {
+            let received = &app.received;
+            vec![
+                socket.display().to_string(),
+                format!(
+                    "{}, {} of an unknown type, {} rejected",
+                    events(received.events),
+                    received.unknown,
+                    match received.rejected {
+                        1 => "1 request".to_owned(),
+                        n => format!("{n} requests"),
+                    }
+                ),
+            ]
+        }
+    }
 }
 
 /// A pane's frame: its title and whether it has the focus.
@@ -1170,7 +1242,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         _ => (
             "Session",
             match app.selected_session() {
-                Some(session) => session_lines(session, now, width),
+                Some(session) => session_lines(app, session, now, width),
                 None => vec![Line::raw(
                     app.notice
                         .clone()
@@ -1482,7 +1554,7 @@ fn cost_note(session: &Session) -> &'static str {
     }
 }
 
-fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'static>> {
+fn session_lines(app: &App, session: &Session, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let status = app::status(session, now);
 
@@ -1504,6 +1576,19 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
                 ));
             }
         }
+    }
+    // A session the mod does not report on, told from one that is idle.
+    if matches!(app.live, LiveStatus::Listening(_)) {
+        lines.push(match app.received.sessions.get(&session.id) {
+            Some(at) => field(
+                "live",
+                format!("last event {}", when_said(app.times(), now, *at)),
+            ),
+            None => Line::from(vec![
+                Span::styled(format!("{:<10}", "live"), label()),
+                Span::styled("no events from this session", dim()),
+            ]),
+        });
     }
     lines.push(context_line(session, width));
     if let Some(path) = session.project_path.as_ref().or(session.cwd.as_ref()) {
@@ -1917,16 +2002,17 @@ const HELP: &[(&str, &str)] = &[
     ("q / Ctrl+c", "quit"),
 ];
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
+    let live = live_lines(app);
     let width = 76.min(area.width);
-    let height = (HELP.len() as u16 + 2).min(area.height);
+    let height = ((HELP.len() + live.len()) as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
         width,
         height,
     };
-    let lines: Vec<Line> = HELP
+    let mut lines: Vec<Line> = HELP
         .iter()
         .map(|(keys, what)| {
             Line::from(vec![
@@ -1935,6 +2021,14 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             ])
         })
         .collect();
+    let shown = usize::from(width).saturating_sub(21);
+    lines.extend(live.into_iter().enumerate().map(|(index, text)| {
+        let name = if index == 0 { "live events" } else { "" };
+        Line::from(vec![
+            Span::styled(format!(" {name:<18}"), label()),
+            Span::raw(format::truncate(&text, shown)),
+        ])
+    }));
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Keys (any key closes) ")),
@@ -3190,6 +3284,102 @@ mod tests {
         // $0.019256 + 2 × $0.0002388 + $0.008896, to the cent.
         assert!(screen.contains("$0.03"));
         assert!(screen.contains("1 session without a known cost"));
+    }
+
+    /// Posts a body to the viewer's socket and waits for the answer.
+    #[cfg(unix)]
+    fn post(socket: &std::path::Path, body: &str) -> String {
+        use std::io::{Read, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        write!(
+            stream,
+            "POST /events HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_header_says_what_the_socket_has_received() {
+        use crate::app::tests::{fixtures, WITH_SUBAGENTS};
+
+        let socket_dir = std::env::temp_dir().join(format!("ccs-tui-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&socket_dir);
+        let mut app = App::new(Config {
+            projects_dir: fixtures()
+                .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                .join("projects"),
+            live: true,
+            socket_dir: Some(socket_dir.clone()),
+            time: TimeStyle::Clock,
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
+        });
+        let LiveStatus::Listening(socket) = app.live.clone() else {
+            panic!("{:?}", app.live)
+        };
+        select(&mut app, WITH_SUBAGENTS);
+
+        // Listening is not receiving.
+        let quiet = screen(&mut app, 150, 44, SOON);
+        let header = quiet.lines().next().unwrap();
+        assert!(header.ends_with("live on, no events yet"), "{header}");
+        assert!(quiet.contains("no events from this session"), "{quiet}");
+
+        // Two events of this session, one of a type nobody knows, and a
+        // request that is not an event.
+        for name in ["turn-start", "tool-check-ask", "unknown-type"] {
+            let body =
+                std::fs::read_to_string(fixtures().join("events").join(format!("{name}.json")))
+                    .unwrap();
+            assert!(post(&socket, &body).starts_with("HTTP/1.1 200"), "{name}");
+        }
+        assert!(post(&socket, "{}").starts_with("HTTP/1.1 400"));
+        app.refresh_at(Timestamp::parse(SOON).unwrap());
+        select(&mut app, WITH_SUBAGENTS);
+
+        let now = screen(&mut app, 150, 44, SOON);
+        let header = now.lines().next().unwrap();
+        assert!(header.ends_with("live 3 events, last now"), "{header}");
+        assert!(now.contains("last event now"), "{now}");
+
+        let soon = screen(&mut app, 150, 44, "2026-11-02T10:00:50.000Z");
+        let header = soon.lines().next().unwrap();
+        assert!(header.ends_with("live 3 events, last 30s ago"), "{header}");
+
+        // Past what is said as how long ago, the time itself.
+        let later = screen(&mut app, 150, 44, LATER);
+        let header = later.lines().next().unwrap();
+        assert!(
+            header.ends_with("live 3 events, last at 11-02 10:00"),
+            "{header}"
+        );
+        assert!(later.contains("last event at 11-02 10:00"), "{later}");
+
+        // The help has the rest: where it listens, and what did not fit.
+        app.help = true;
+        let help = screen(&mut app, 150, 44, LATER);
+        assert!(help.contains("live events"), "{help}");
+        assert!(
+            help.contains("3 events, 1 of an unknown type, 1 request rejected"),
+            "{help}"
+        );
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(socket_dir);
+    }
+
+    #[test]
+    fn a_viewer_that_does_not_listen_says_nothing_about_events() {
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        app.help = true;
+        let screen = screen(&mut app, 150, 44, SOON);
+        assert!(!screen.contains("live events"), "{screen}");
+        assert!(!screen.contains("this session"), "{screen}");
     }
 
     #[test]

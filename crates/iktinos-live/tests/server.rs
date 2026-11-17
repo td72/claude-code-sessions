@@ -107,6 +107,9 @@ fn a_malformed_request_is_answered_and_ignored() {
     let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(matches!(event.body, Body::TurnStart(_)));
     assert!(events.try_recv().is_err());
+    // The three that were turned away are counted; the client that said
+    // nothing is not.
+    assert_eq!(server.rejected(), 3);
 
     drop(server);
     let _ = fs::remove_dir_all(dir);
