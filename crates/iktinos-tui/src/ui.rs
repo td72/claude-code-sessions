@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
@@ -75,7 +76,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
     let mut counts = [0usize; 3];
     for session in app.shown() {
-        match app::status(session, now).kind {
+        match app.status(session, now).kind {
             StatusKind::Busy => counts[0] += 1,
             StatusKind::NeedsApproval => counts[1] += 1,
             StatusKind::Waiting => counts[2] += 1,
@@ -83,7 +84,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
         }
     }
     let mut spans = Vec::new();
-    for (index, page) in Page::ALL.into_iter().enumerate() {
+    for (index, page) in app.config.pages.iter().copied().enumerate() {
         let style = if app.page == page {
             Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
@@ -117,10 +118,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, now: Timestamp) {
     frame.render_widget(Line::from(spans), area);
 }
 
-/// How long the socket may be silent while a session is busy before the
-/// header says so in colour.
-const QUIET: i64 = 60_000;
-
 /// The header's live part: whether the viewer listens, and what it has
 /// heard. An open socket alone says nothing about a mod that sends.
 fn live_span(app: &App, now: Timestamp, busy: bool) -> Span<'static> {
@@ -131,7 +128,9 @@ fn live_span(app: &App, now: Timestamp, busy: bool) -> Span<'static> {
         LiveStatus::Listening(_) => match app.received.last_at {
             None => Span::styled("live on, no events yet", warn),
             Some(at) => {
-                let quiet = busy && now.as_millis() - at.as_millis() > QUIET;
+                let quiet = busy
+                    && (now.as_millis() - at.as_millis()) as i128
+                        > app.config.quiet_after.as_millis() as i128;
                 Span::styled(
                     format!(
                         "live {}, last {}",
@@ -314,7 +313,7 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         .filter_map(|id| app.store.get(id))
         .enumerate()
         .map(|(index, session)| {
-            let status = app::status(session, now);
+            let status = app.status(session, now);
             let updated = app::latest(session).map_or("—".to_owned(), |at| format::ago(now, at));
             // The session the other pages are narrowed to.
             let scoped = app.scope.as_deref() == Some(session.id.as_str());
@@ -422,7 +421,7 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
                     Line::from(call.duration_ms.map(format::duration).unwrap_or_default())
                         .right_aligned(),
                 )
-                .style(took_style(call.duration_ms)),
+                .style(took_style(app.config.slow, call.duration_ms)),
                 Cell::from(mark).style(style),
             ]);
             Row::new(cells).style(row_style(&matches, index))
@@ -583,13 +582,18 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
 /// Whether an interaction is still going: it has no end, it is its session's latest
 /// and the session is at work. The transcript alone cannot tell an interaction that
 /// runs from one that was cut off.
-fn interaction_runs(session: &Session, interaction: &Interaction, now: Timestamp) -> bool {
+fn interaction_runs(
+    app: &App,
+    session: &Session,
+    interaction: &Interaction,
+    now: Timestamp,
+) -> bool {
     interaction.ended_at.is_none()
         && session
             .trace
             .back()
             .is_some_and(|last| std::ptr::eq(last, interaction))
-        && app::status(session, now).kind == StatusKind::Busy
+        && app.status(session, now).kind == StatusKind::Busy
 }
 
 /// A span as a bar on a time axis from `from` to `to`, `width` columns wide.
@@ -658,13 +662,14 @@ fn interaction_text(interaction: &Interaction) -> (String, Style) {
 
 /// How an interaction ended, as far as can be told.
 fn interaction_state(
+    app: &App,
     session: &Session,
     interaction: &Interaction,
     now: Timestamp,
 ) -> (&'static str, Style) {
     if interaction.ended_at.is_some() {
         ("done", done())
-    } else if interaction_runs(session, interaction, now) {
+    } else if interaction_runs(app, session, interaction, now) {
         ("running", running())
     } else {
         ("no end", dim())
@@ -700,7 +705,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
             }) = row.interaction
             else {
                 // A session: its name, where it runs, what it is doing.
-                let status = app::status(session, now);
+                let status = app.status(session, now);
                 let when = session
                     .trace
                     .iter()
@@ -727,7 +732,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 ])
                 .style(row_style(&matches, index));
             };
-            let end = if interaction_runs(session, interaction, now) {
+            let end = if interaction_runs(app, session, interaction, now) {
                 Some(now)
             } else {
                 end
@@ -735,7 +740,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
             let took = interaction
                 .duration_ms
                 .or_else(|| between(interaction.started_at, end));
-            let (state, style) = interaction_state(session, interaction, now);
+            let (state, style) = interaction_state(app, session, interaction, now);
             let when = interaction
                 .started_at
                 .map_or("—".to_owned(), |at| when(time, now, at));
@@ -774,7 +779,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 Cell::from(
                     Line::from(took.map(format::duration).unwrap_or_default()).right_aligned(),
                 )
-                .style(took_style(took)),
+                .style(took_style(app.config.slow, took)),
                 Cell::from(state).style(style),
             ]);
             Row::new(cells).style(row_style(&matches, index))
@@ -848,7 +853,7 @@ fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                 .or(end);
             (
                 "Interaction",
-                interaction_lines(session, interaction, end, now),
+                interaction_lines(app, session, interaction, end, now),
             )
         }
         (None, None) => (
@@ -968,7 +973,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let rows: Vec<Row<'static>> = listed
         .iter()
         .map(|row| {
-            let runs = interaction_runs(row.session, row.interaction, now);
+            let runs = interaction_runs(app, row.session, row.interaction, now);
             // The axis: the interaction from its start to its end, or to now.
             let window =
                 row.interaction
@@ -1043,7 +1048,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                     )
                     .right_aligned(),
                 )
-                .style(took_style(between(start, end))),
+                .style(took_style(app.config.slow, between(start, end))),
                 Cell::from(mark).style(mark_style),
             ];
             if axis > 0 {
@@ -1121,12 +1126,13 @@ fn trace_lines(app: &App, row: &TraceRow, now: Timestamp, width: usize) -> Vec<L
 
 /// An interaction: how long it took and where the time went.
 fn interaction_lines(
+    app: &App,
     session: &Session,
     interaction: &Interaction,
     end: Option<Timestamp>,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
-    let runs = interaction_runs(session, interaction, now);
+    let runs = interaction_runs(app, session, interaction, now);
     let end = if runs { Some(now) } else { end };
     let mut lines = vec![
         Line::styled("Interaction", headline()),
@@ -1797,7 +1803,7 @@ fn cost_note(session: &Session) -> &'static str {
 
 fn session_lines(app: &App, session: &Session, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let status = app::status(session, now);
+    let status = app.status(session, now);
 
     lines.extend(
         wrap(app::label(session), width)
@@ -2188,7 +2194,13 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         Line::styled(
-            " 1-5 page  j/k move  Enter open  i detail  Esc back  / search  s sort  f filter  ? help  q quit",
+            format!(
+                " {} page  j/k move  Enter open  i detail  Esc back  / search  s sort  f filter  ? help  q quit",
+                match app.config.pages.len() {
+                    1 => "1".to_owned(),
+                    n => format!("1-{n}"),
+                }
+            ),
             dim(),
         )
     };
@@ -2196,10 +2208,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 const HELP: &[(&str, &str)] = &[
-    (
-        "1 2 3 4 5",
-        "Trace / Sessions / Tool calls / Subagents / Usage",
-    ),
     ("j / k", "down / up (scrolls the detail pane)"),
     ("gg / G", "top / bottom"),
     ("Ctrl+d / Ctrl+u", "half a page down / up"),
@@ -2251,22 +2259,30 @@ const HELP: &[(&str, &str)] = &[
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let live = live_lines(app);
     let width = 76.min(area.width);
-    let height = ((HELP.len() + live.len()) as u16 + 2).min(area.height);
+    let height = ((HELP.len() + 1 + live.len()) as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
         width,
         height,
     };
-    let mut lines: Vec<Line> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::styled(format!(" {keys:<18}"), Style::new().fg(Color::Cyan)),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
+    // The pages that are shown, under the keys they have.
+    let pages = &app.config.pages;
+    let keys: Vec<String> = (1..=pages.len()).map(|key| key.to_string()).collect();
+    let titles: Vec<&str> = pages.iter().map(|page| page.title()).collect();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!(" {:<18}", keys.join(" ")),
+            Style::new().fg(Color::Cyan),
+        ),
+        Span::raw(titles.join(" / ")),
+    ])];
+    lines.extend(HELP.iter().map(|(keys, what)| {
+        Line::from(vec![
+            Span::styled(format!(" {keys:<18}"), Style::new().fg(Color::Cyan)),
+            Span::raw(*what),
+        ])
+    }));
     let shown = usize::from(width).saturating_sub(21);
     lines.extend(live.into_iter().enumerate().map(|(index, text)| {
         let name = if index == 0 { "live events" } else { "" };
@@ -2328,11 +2344,16 @@ fn running() -> Style {
 }
 
 /// How long something took: the slow stand out.
-fn took_style(ms: Option<u64>) -> Style {
-    match ms {
-        Some(60_000..) => Style::new().fg(Color::Red),
-        Some(10_000..) => Style::new().fg(Color::Yellow),
-        _ => Style::new(),
+fn took_style(slow: [Duration; 2], ms: Option<u64>) -> Style {
+    let Some(ms) = ms.map(u128::from) else {
+        return Style::new();
+    };
+    if ms >= slow[1].as_millis() {
+        Style::new().fg(Color::Red)
+    } else if ms >= slow[0].as_millis() {
+        Style::new().fg(Color::Yellow)
+    } else {
+        Style::new()
     }
 }
 
@@ -2846,6 +2867,7 @@ mod tests {
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         let session = app.store.get(WITH_SUBAGENTS).unwrap();
         let known = session.trace.back().unwrap();
@@ -2887,6 +2909,7 @@ mod tests {
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         app.go_to(Page::Trace);
         app.by_session = false; // these are about the flat list
@@ -2940,6 +2963,7 @@ mod tests {
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         app.go_to(Page::Trace);
         app.by_session = false; // these are about the flat list
@@ -3025,10 +3049,11 @@ mod tests {
         assert_eq!(colour("prompt-u1"), Color::Reset);
 
         // The slow stand out.
-        assert_eq!(took_style(Some(9_999)).fg, None);
-        assert_eq!(took_style(Some(10_000)).fg, Some(Color::Yellow));
-        assert_eq!(took_style(Some(60_000)).fg, Some(Color::Red));
-        assert_eq!(took_style(None).fg, None);
+        let slow = app.config.slow;
+        assert_eq!(took_style(slow, Some(9_999)).fg, None);
+        assert_eq!(took_style(slow, Some(10_000)).fg, Some(Color::Yellow));
+        assert_eq!(took_style(slow, Some(60_000)).fg, Some(Color::Red));
+        assert_eq!(took_style(slow, None).fg, None);
     }
 
     /// An app on the fixture session whose calls return every kind of
@@ -3043,6 +3068,7 @@ mod tests {
             time: TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         app.go_to(Page::Tools);
         let at = app
@@ -3202,6 +3228,7 @@ mod tests {
                 time: TimeStyle::Clock,
                 ago_within,
                 within: None,
+                ..Config::new(std::path::PathBuf::new())
             });
             app.go_to(Page::Tools);
             app
@@ -3295,6 +3322,7 @@ mod tests {
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         app.go_to(Page::Subagents);
 
@@ -3589,6 +3617,7 @@ mod tests {
             time: TimeStyle::Clock,
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         let LiveStatus::Listening(socket) = app.live.clone() else {
             panic!("{:?}", app.live)
@@ -4071,6 +4100,111 @@ mod tests {
     }
 
     #[test]
+    fn only_the_pages_the_configuration_lists_are_shown() {
+        let mut app = App::new(Config {
+            pages: vec![Page::Usage, Page::Sessions],
+            start: Page::Usage,
+            ..crate::app::tests::fixture_config()
+        });
+        // It starts where it is told to, and the header has two pages,
+        // numbered in their order.
+        let usage = screen(&mut app, 150, 44, SOON);
+        let header = usage.lines().next().unwrap();
+        assert!(
+            header.contains("1:Usage   2:Sessions    3 sessions"),
+            "{header}"
+        );
+        for hidden in ["Trace", "Tool calls", "Subagents"] {
+            assert!(!header.contains(hidden), "{header}");
+        }
+        assert!(
+            usage.lines().last().unwrap().starts_with(" 1-2 page"),
+            "{usage}"
+        );
+
+        // The help names the pages under the keys they have.
+        app.help = true;
+        let help = screen(&mut app, 150, 44, SOON);
+        assert!(row(&help, "Usage / Sessions").contains(" 1 2  "), "{help}");
+        app.help = false;
+
+        // A page that is not shown cannot be gone to.
+        app.go_to(Page::Trace);
+        assert_eq!(app.page, Page::Usage);
+        app.go_to(Page::Sessions);
+        assert!(screen(&mut app, 150, 44, SOON).contains("Sessions (all · updated ↓)"));
+
+        // One page: no range of keys.
+        let mut app = App::new(Config {
+            pages: vec![Page::Trace],
+            ..crate::app::tests::fixture_config()
+        });
+        let trace = screen(&mut app, 150, 44, SOON);
+        assert!(
+            trace
+                .lines()
+                .next()
+                .unwrap()
+                .starts_with("  1:Trace    3 sessions"),
+            "{trace}"
+        );
+        assert!(
+            trace.lines().last().unwrap().starts_with(" 1 page"),
+            "{trace}"
+        );
+    }
+
+    #[test]
+    fn the_settings_decide_how_the_lists_start_and_what_stands_out() {
+        let mut app = App::new(Config {
+            sort: Sort::Tokens,
+            filter: Filter::Open,
+            by_session: false,
+            // The session whose last record is 11 seconds old is no longer
+            // active: two are busy otherwise.
+            active_within: Duration::from_secs(1),
+            // Everything that took a second is slow.
+            slow: [Duration::from_secs(1), Duration::from_secs(2)],
+            ..crate::app::tests::fixture_config()
+        });
+        let trace = screen(&mut app, 150, 44, SOON);
+        assert!(trace.contains("· latest first)"), "{trace}");
+        let header = trace.lines().next().unwrap();
+        assert!(header.contains("1 busy"), "{header}");
+        app.go_to(Page::Sessions);
+        let sessions = screen(&mut app, 150, 44, SOON);
+        assert!(
+            sessions.contains("Sessions (open · tokens ↓)"),
+            "{sessions}"
+        );
+
+        assert_eq!(took_style(app.config.slow, Some(999)).fg, None);
+        assert_eq!(
+            took_style(app.config.slow, Some(1_000)).fg,
+            Some(Color::Yellow)
+        );
+        assert_eq!(
+            took_style(app.config.slow, Some(2_000)).fg,
+            Some(Color::Red)
+        );
+
+        // How much of a session is kept.
+        let app = App::new(Config {
+            recent_tools: 2,
+            interactions: 0,
+            output_chars: 0,
+            ..crate::app::tests::fixture_config()
+        });
+        let session = app.store.get(WITH_SUBAGENTS).unwrap();
+        assert_eq!(session.recent_tools.len(), 2);
+        assert!(session.trace.is_empty());
+        assert!(session
+            .recent_tools
+            .iter()
+            .all(|call| call.output.is_none()));
+    }
+
+    #[test]
     fn the_help_lists_the_keys_over_the_page() {
         let mut app = fixture_app();
         app.help = true;
@@ -4109,6 +4243,7 @@ mod tests {
             time: crate::app::TimeStyle::default(),
             ago_within: crate::app::DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(std::path::PathBuf::new())
         });
         let sessions = screen(&mut app, 120, 20, LATER);
         assert!(sessions.contains("0 sessions"), "{sessions}");

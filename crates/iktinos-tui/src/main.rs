@@ -5,9 +5,11 @@
 //! is installed. Its pages and keys follow vig, which renders the same model
 //! as a page of its own.
 //!
-//! Read-only: it reads the transcripts and listens on its own socket.
+//! Read-only: it reads the transcripts and its configuration file, and
+//! listens on its own socket.
 
 mod app;
+mod config;
 mod format;
 mod highlight;
 mod ui;
@@ -16,15 +18,13 @@ use std::env;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use iktinos::discover::default_projects_dir;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use app::{App, Config, Page};
-
-/// How often the transcripts are read again.
-const REFRESH_EVERY: Duration = Duration::from_secs(1);
+use app::{App, Config};
+use config::{Args, Env};
 
 const USAGE: &str = "\
 A small viewer for the Claude Code sessions on this machine.
@@ -35,6 +35,9 @@ Options:
       --projects-dir <DIR>  Read transcripts from DIR instead of ~/.claude/projects
       --socket-dir <DIR>    Listen for live events in DIR instead of the shared default
       --no-live             Do not listen for live events from the bridge mod
+      --config <FILE>       Read the configuration from FILE instead of
+                            ~/.config/iktinos/config.toml; an argument goes
+                            before the file, the file before the defaults
       --cwd                 Show only the sessions that run in the current directory,
                             below it, or in a worktree of its git repository
                             (the Usage page still totals every session)
@@ -48,14 +51,23 @@ Options:
 ";
 
 fn main() -> ExitCode {
-    let config = match parse_args(env::args().skip(1)) {
-        Ok(Parsed::Run(config)) => config,
+    let args = match parse_args(env::args().skip(1)) {
+        Ok(Parsed::Run(args)) => args,
         Ok(Parsed::Print(text)) => {
             print!("{text}");
             return ExitCode::SUCCESS;
         }
         Err(message) => {
             eprintln!("iktinos: {message}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    // What is wrong with a configuration file is said as it is: the usage
+    // would not help.
+    let config = match configure(args) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("iktinos: {message}");
             return ExitCode::from(2);
         }
     };
@@ -81,7 +93,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()>
         let now = app::now();
         terminal.draw(|frame| ui::draw(frame, app, now))?;
 
-        let wait = REFRESH_EVERY.saturating_sub(refreshed.elapsed());
+        let wait = app.config.refresh.saturating_sub(refreshed.elapsed());
         if event::poll(wait)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -98,7 +110,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()>
                 }
             }
         }
-        if refreshed.elapsed() >= REFRESH_EVERY {
+        if refreshed.elapsed() >= app.config.refresh {
             app.refresh();
             refreshed = Instant::now();
         }
@@ -143,8 +155,11 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('q') => return Handled::Quit,
         KeyCode::Char('r') => return Handled::Refresh,
         KeyCode::Char('?') => app.help = true,
-        KeyCode::Char(c @ '1'..='5') => {
-            app.go_to(Page::ALL[c as usize - '1' as usize]);
+        // A digit past the pages that are shown does nothing.
+        KeyCode::Char(c @ '1'..='9') => {
+            if let Some(page) = app.page_at(c as usize - '1' as usize) {
+                app.go_to(page);
+            }
         }
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
         KeyCode::Char('i') => app.focus_detail(),
@@ -176,17 +191,12 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Parsed {
-    Run(Config),
+    Run(Args),
     Print(String),
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
-    let mut projects_dir = None;
-    let mut socket_dir = None;
-    let mut live = true;
-    let mut time = app::TimeStyle::default();
-    let mut ago_within = app::DEFAULT_AGO_WITHIN;
-    let mut within = None;
+    let mut asked = Args::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -195,36 +205,37 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
             }
             _ => (arg, None),
         };
-        let mut value = |name: &str| {
+        let mut value = |name: &str, what: &str| {
             inline
                 .clone()
                 .or_else(|| args.next())
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
-                .ok_or_else(|| format!("{name} needs a directory"))
+                .ok_or_else(|| format!("{name} needs a {what}"))
         };
         match flag.as_str() {
-            "--projects-dir" => projects_dir = Some(value("--projects-dir")?),
-            "--socket-dir" => socket_dir = Some(value("--socket-dir")?),
-            "--no-live" => live = false,
+            "--config" => asked.config = Some(value("--config", "file")?),
+            "--projects-dir" => asked.projects_dir = Some(value("--projects-dir", "directory")?),
+            "--socket-dir" => asked.socket_dir = Some(value("--socket-dir", "directory")?),
+            "--no-live" => asked.no_live = true,
             "--cwd" => {
                 if inline.is_some() {
                     return Err("--cwd takes no value".to_owned());
                 }
-                let dir = env::current_dir()
-                    .map_err(|e| format!("--cwd: cannot tell the current directory: {e}"))?;
-                within = Some(dir);
+                asked.cwd = true;
             }
             "--ago" => {
                 let length = inline.clone().or_else(|| args.next()).unwrap_or_default();
-                ago_within = app::parse_duration(&length).ok_or_else(|| {
+                asked.ago = Some(app::parse_duration(&length).ok_or_else(|| {
                     format!("--ago is a length of time such as 30m or 1h, not '{length}'")
-                })?;
+                })?);
             }
             "--time" => {
                 let style = inline.clone().or_else(|| args.next()).unwrap_or_default();
-                time = app::TimeStyle::parse(&style)
-                    .ok_or_else(|| format!("--time is `clock` or `relative`, not '{style}'"))?;
+                asked.time =
+                    Some(app::TimeStyle::parse(&style).ok_or_else(|| {
+                        format!("--time is `clock` or `relative`, not '{style}'")
+                    })?);
             }
             "-h" | "--help" => return Ok(Parsed::Print(USAGE.to_owned())),
             "-V" | "--version" => {
@@ -236,22 +247,35 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
             other => return Err(format!("unexpected argument '{other}'")),
         }
     }
-    let projects_dir = projects_dir
-        .or_else(default_projects_dir)
-        .ok_or("no home directory; pass --projects-dir")?;
-    Ok(Parsed::Run(Config {
-        projects_dir,
-        live,
-        socket_dir,
-        time,
-        ago_within,
-        within,
-    }))
+    Ok(Parsed::Run(asked))
+}
+
+/// The settings to run with: the arguments, then the configuration file,
+/// then the defaults.
+fn configure(args: Args) -> Result<Config, String> {
+    let home = env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+    let file = match &args.config {
+        Some(path) => config::load(path, true)?,
+        None => match config::default_path(env::var_os("XDG_CONFIG_HOME"), home.as_deref()) {
+            Some(path) => config::load(&path, false)?,
+            None => config::File::default(),
+        },
+    };
+    let env = Env {
+        home,
+        current_dir: env::current_dir().ok(),
+        default_projects_dir: default_projects_dir(),
+    };
+    config::resolve(args, file, &env)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Page;
+    use std::time::Duration;
 
     fn parse(args: &[&str]) -> Result<Parsed, String> {
         parse_args(args.iter().map(|a| (*a).to_owned()))
@@ -259,34 +283,40 @@ mod tests {
 
     #[test]
     fn options_are_read_in_both_spellings() {
-        let expected = Parsed::Run(Config {
-            projects_dir: PathBuf::from("/synthetic/projects"),
-            live: false,
+        let expected = Args {
+            projects_dir: Some(PathBuf::from("/synthetic/projects")),
             socket_dir: Some(PathBuf::from("/synthetic/sockets")),
-            time: app::TimeStyle::default(),
-            ago_within: app::DEFAULT_AGO_WITHIN,
-            within: None,
-        });
+            no_live: true,
+            config: Some(PathBuf::from("/synthetic/config.toml")),
+            ..Args::default()
+        };
         assert_eq!(
             parse(&[
                 "--projects-dir",
                 "/synthetic/projects",
                 "--socket-dir=/synthetic/sockets",
-                "--no-live"
+                "--no-live",
+                "--config",
+                "/synthetic/config.toml"
             ]),
-            Ok(expected)
+            Ok(Parsed::Run(expected))
         );
-        let Ok(Parsed::Run(config)) = parse(&["--projects-dir=/p"]) else {
-            panic!()
+        // What is not asked for is left to the configuration file.
+        assert_eq!(parse(&[]), Ok(Parsed::Run(Args::default())));
+        assert_eq!(
+            parse(&["--config"]),
+            Err("--config needs a file".to_owned())
+        );
+        assert_eq!(
+            parse(&["--projects-dir="]),
+            Err("--projects-dir needs a directory".to_owned())
+        );
+
+        let asked = |args: &[&str]| match parse(args) {
+            Ok(Parsed::Run(args)) => args,
+            other => panic!("{other:?}"),
         };
-        assert!(config.live);
-        assert_eq!(config.socket_dir, None);
-        // Every session unless asked otherwise.
-        assert_eq!(config.within, None);
-        let Ok(Parsed::Run(config)) = parse(&["--projects-dir=/p", "--cwd"]) else {
-            panic!()
-        };
-        assert_eq!(config.within, Some(env::current_dir().unwrap()));
+        assert!(asked(&["--cwd"]).cwd);
         // A flag: the directory is where the viewer was started, not named.
         assert_eq!(
             parse(&["--cwd=/work/example"]),
@@ -296,28 +326,16 @@ mod tests {
             parse(&["--cwd", "/work/example"]),
             Err("unexpected argument '/work/example'".to_owned())
         );
-        assert_eq!(config.time, app::TimeStyle::Clock);
-        for (args, style) in [
-            (
-                &["--projects-dir=/p", "--time", "relative"][..],
-                app::TimeStyle::Relative,
-            ),
-            (
-                &["--projects-dir=/p", "--time=clock"][..],
-                app::TimeStyle::Clock,
-            ),
-        ] {
-            let Ok(Parsed::Run(config)) = parse(args) else {
-                panic!()
-            };
-            assert_eq!(config.time, style);
-        }
+        assert_eq!(
+            asked(&["--time", "relative"]).time,
+            Some(app::TimeStyle::Relative)
+        );
+        assert_eq!(asked(&["--time=clock"]).time, Some(app::TimeStyle::Clock));
         assert!(parse(&["--time", "yesterday"])
             .unwrap_err()
             .contains("yesterday"));
         assert!(parse(&["--time"]).is_err());
 
-        assert_eq!(config.ago_within, Duration::from_secs(3600));
         for (length, seconds) in [
             ("90s", 90),
             ("30m", 1800),
@@ -326,15 +344,38 @@ mod tests {
             ("45", 45),
             ("0", 0),
         ] {
-            let Ok(Parsed::Run(config)) = parse(&["--projects-dir=/p", "--ago", length]) else {
-                panic!("{length}")
-            };
-            assert_eq!(config.ago_within, Duration::from_secs(seconds), "{length}");
+            assert_eq!(
+                asked(&["--ago", length]).ago,
+                Some(Duration::from_secs(seconds)),
+                "{length}"
+            );
         }
         for wrong in ["soon", "1w", "h", "-5m", "1.5h", ""] {
             assert!(parse(&["--ago", wrong]).is_err(), "{wrong}");
         }
         assert!(parse(&["--ago=99999999999999999999d"]).is_err());
+    }
+
+    #[test]
+    fn a_digit_shows_the_page_the_configuration_puts_there() {
+        let mut app = App::new(Config {
+            pages: vec![Page::Usage, Page::Sessions],
+            start: Page::Usage,
+            ..app::tests::fixture_config()
+        });
+        assert_eq!(app.page, Page::Usage);
+        press(&mut app, "2");
+        assert_eq!(app.page, Page::Sessions);
+        // Past the pages that are shown, nothing.
+        press(&mut app, "3");
+        assert_eq!(app.page, Page::Sessions);
+        // Enter on a session narrows the other lists, but the Tool calls
+        // page is not shown: it stays.
+        press(&mut app, "\n");
+        assert!(app.scope.is_some());
+        assert_eq!(app.page, Page::Sessions);
+        press(&mut app, "1");
+        assert_eq!(app.page, Page::Usage);
     }
 
     fn press(app: &mut App, keys: &str) {

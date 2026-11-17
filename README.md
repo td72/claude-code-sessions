@@ -165,6 +165,74 @@ turned away: the signs of a mod and a viewer that do not match.
 A cost shown as `~$1.23` contains
 an estimate; `$1.23` is Claude Code's own figure.
 
+## Configuration
+
+The viewer reads `~/.config/iktinos/config.toml` (under `XDG_CONFIG_HOME`
+where that is set), or the file `--config` names. Without a file everything
+is at its default. An argument goes before the file, the file before the
+defaults. The viewer only reads the file.
+
+```toml
+projects_dir = "~/.claude/projects"
+cwd = false
+refresh = "1s"
+
+[pages]
+order = ["trace", "sessions", "tools", "subagents", "usage"]
+start = "trace"
+
+[time]
+style = "clock"
+ago = "1h"
+
+[live]
+enabled = true
+quiet_after = "1m"
+
+[sessions]
+sort = "updated"
+filter = "all"
+active_within = "1m"
+
+[trace]
+by_session = true
+interactions = 20
+slow = ["10s", "1m"]
+
+[tools]
+recent = 200
+output_chars = 2000
+```
+
+| key | default | |
+| --- | --- | --- |
+| `projects_dir` | `~/.claude/projects` | where the transcripts are (`--projects-dir`) |
+| `cwd` | `false` | show only the sessions of where the viewer was started (`--cwd`) |
+| `refresh` | `1s` | how often the transcripts are read again |
+| `pages.order` | all five | the pages shown, in the order of their keys from `1`: `trace`, `sessions`, `tools`, `subagents`, `usage`. A page left out is not shown |
+| `pages.start` | the first of `order` | the page the viewer starts on |
+| `time.style` | `clock` | `clock` or `relative` (`--time`) |
+| `time.ago` | `1h` | with `clock`, what is newer is still shown as how long ago (`--ago`) |
+| `live.enabled` | `true` | listen for live events (`--no-live` turns it off) |
+| `live.socket_dir` | the shared default | where to listen (`--socket-dir`) |
+| `live.quiet_after` | `1m` | a session is busy and nothing has arrived for this long: the header turns yellow |
+| `sessions.sort` | `updated` | `updated`, `cost` or `tokens`, to begin with |
+| `sessions.filter` | `all` | `all`, `live` or `open`, to begin with |
+| `sessions.active_within` | `1m` | how recent a record makes a session active when no live event says more |
+| `trace.by_session` | `true` | list the interactions under their sessions to begin with |
+| `trace.interactions` | `20` | how many of its latest interactions a session keeps |
+| `trace.slow` | `["10s", "1m"]` | how long something takes before it is yellow, then red |
+| `tools.recent` | `200` | how many of its latest tool calls a session keeps |
+| `tools.output_chars` | `2000` | how much of a call's output is kept as its excerpt, in characters; `0` keeps none |
+
+A length of time is written as `90s`, `30m`, `1h` or `2d`. A leading `~` in a
+path is the home directory.
+
+A key the viewer does not know, a value of the wrong type, a length of time
+or a name it cannot read, a page listed twice, an empty list of pages: each
+stops the viewer at startup, with the file, the line and what is wrong. A
+setting that is silently ignored is one nobody notices was misspelt.
+
 ## Two inputs, one state
 
 | | transcripts (JSONL) | mod (live events) |
