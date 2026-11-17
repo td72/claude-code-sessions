@@ -70,6 +70,11 @@ pub fn tool_name(name: &str) -> String {
     }
 }
 
+/// A model id without the prefix every one of them has: `fable-5-2`.
+pub fn model_name(id: &str) -> String {
+    id.strip_prefix("claude-").unwrap_or(id).to_owned()
+}
+
 /// `1 turn`, `5 turns`.
 pub fn count(n: u64, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
@@ -149,6 +154,8 @@ mod tests {
         assert_eq!(duration(125_000), "2m05s");
         assert_eq!(percent(0.4249), "42%");
         assert_eq!(count(1, "turn"), "1 turn");
+        assert_eq!(model_name("claude-haiku-5-5"), "haiku-5-5");
+        assert_eq!(model_name("gpt-x"), "gpt-x");
         assert_eq!(tool_name("Bash"), "Bash");
         assert_eq!(tool_name("mcp__example__lookup"), "example/lookup");
         assert_eq!(

@@ -66,17 +66,46 @@ for session in store.sessions() {
 ## The viewer
 
 ```bash
-cargo run -p iktinos-tui            # the sessions on this machine
-cargo run -p iktinos-tui -- --projects-dir tests/fixtures/2.1.325/projects --no-live
+cargo install iktinos-tui     # installs the `iktinos` binary
+iktinos                       # the sessions on this machine
+iktinos --projects-dir tests/fixtures/2.1.325/projects --no-live
 ```
 
-A session list (title, repository, branch, state, last update, cost) and a
-detail pane for the selected session: tokens and cost by model, the context
-gauge, recent tool calls, subagents, rate limits. It reads the transcripts
-once a second and, unless `--no-live` is given, listens for live events on its
-own socket. A cost shown as `~$1.23` contains an estimate; `$1.23` is Claude
-Code's own figure. It is a small development tool; vig renders the same model
-as a full page.
+Four pages, in the shape and with the keys of [vig](https://github.com/td72/vig).
+Each list page is a list over a detail pane, in fixed proportions:
+
+- **1:Sessions** — every session: title, repository, branch, state, last
+  update, tokens, cost. The detail pane shows the selected session's context,
+  its tokens and cost by model and by source, and its rate limits.
+- **2:Tool calls** — recent tool calls, the latest first: what ran, how long
+  it took, how it ended. The detail pane shows the whole command, every line
+  of it, a shell command in colour.
+- **3:Subagents** — subagents with their type, task, model, tokens and cost;
+  the detail is two panes, the subagent with its own tool calls and, beside
+  it, the call chosen there with its whole command.
+- **4:Usage** — tokens and estimated cost by model and by source over every
+  session, and sessions, tokens and cost by repository.
+
+Pages 2 and 3 cover every session until `Enter` is pressed on one in the
+Sessions page; then they are narrowed to it. `Enter` on a subagent narrows the
+Tool calls page further, to that subagent. `Esc` undoes one step at a time.
+
+| key | |
+| --- | --- |
+| `1` – `4` | switch page |
+| `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the list (or scroll the detail pane) |
+| `Enter` on a session | narrow pages 2 and 3 to it and show its tool calls |
+| `Enter` on a subagent | narrow page 2 to it and show its tool calls |
+| `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
+| `j` / `k` in a subagent's detail; then `i` / `Enter` | choose one of its tool calls; into the pane that shows it |
+| `/`, `n` / `N` | search the list |
+| `Esc` on a list | clear the search, then the narrowing |
+| `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
+| `r`, `?`, `q` | refresh, help, quit |
+
+It reads the transcripts once a second and, unless `--no-live` is given,
+listens for live events on its own socket. A cost shown as `~$1.23` contains
+an estimate; `$1.23` is Claude Code's own figure.
 
 ## Two inputs, one state
 

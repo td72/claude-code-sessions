@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iktinos::discover::{discover, SessionFiles};
 use iktinos::record::{Record, Timestamp};
-use iktinos::session::{Activity, LiveState, Session, SessionStore};
+use iktinos::session::{Activity, LiveState, Session, SessionStore, Subagent, ToolCall};
 use iktinos::tail::Tail;
 
 /// How recent a record makes a session "active" when no live event says more.
@@ -55,14 +55,139 @@ pub enum StatusKind {
     Exited,
 }
 
+/// The pages, in header order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Sessions,
+    Tools,
+    Subagents,
+    Usage,
+}
+
+impl Page {
+    pub const ALL: [Page; 4] = [Page::Sessions, Page::Tools, Page::Subagents, Page::Usage];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Sessions => "Sessions",
+            Page::Tools => "Tool calls",
+            Page::Subagents => "Subagents",
+            Page::Usage => "Usage",
+        }
+    }
+
+    /// Whether the page is a list over a detail pane.
+    pub fn has_list(self) -> bool {
+        self != Page::Usage
+    }
+}
+
+/// How the session list is ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    Updated,
+    Cost,
+    Tokens,
+}
+
+impl Sort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Updated => "updated",
+            Sort::Cost => "cost",
+            Sort::Tokens => "tokens",
+        }
+    }
+}
+
+/// Which sessions the list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    All,
+    /// Working, or wanting someone's attention.
+    Live,
+    /// Everything whose process has not exited.
+    Open,
+}
+
+impl Filter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Filter::All => "all",
+            Filter::Live => "live",
+            Filter::Open => "open",
+        }
+    }
+
+    fn admits(self, kind: StatusKind) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Live => matches!(
+                kind,
+                StatusKind::Busy | StatusKind::NeedsApproval | StatusKind::Waiting
+            ),
+            Filter::Open => kind != StatusKind::Exited,
+        }
+    }
+}
+
+/// A search within one page's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Search {
+    pub page: Page,
+    /// Lower-cased: matching ignores case.
+    pub query: String,
+}
+
+/// What the last draw measured, for keys that move by what is visible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Viewport {
+    /// Rows the list pane shows.
+    pub list_rows: usize,
+    /// Rows the detail pane shows.
+    pub detail_rows: usize,
+    /// Lines the detail pane holds.
+    pub detail_lines: usize,
+    /// Rows and lines of the tool call pane beside a subagent's detail.
+    pub call_rows: usize,
+    pub call_lines: usize,
+}
+
 pub struct App {
     config: Config,
     pub store: SessionStore,
     /// A tail per transcript, with the session it belongs to.
     tails: BTreeMap<PathBuf, (String, Tail)>,
-    /// Session ids in display order: latest activity first.
+    pub page: Page,
+    /// The detail pane has the focus, not the list above it.
+    pub in_detail: bool,
+    pub sort: Sort,
+    pub filter: Filter,
+    /// The ids of the sessions the Sessions page lists, in display order.
     pub order: Vec<String>,
+    /// The session the Tool calls and Subagents pages are narrowed to.
+    pub scope: Option<String>,
+    /// Within that session, the subagent the Tool calls page is narrowed to.
+    pub agent_scope: Option<String>,
     pub selected: usize,
+    pub tool_selected: usize,
+    pub subagent_selected: usize,
+    pub detail_scroll: usize,
+    /// The tool call under the cursor of a subagent's detail pane, which
+    /// lists the subagent's calls.
+    pub call_selected: usize,
+    /// The pane beside a subagent's detail, which shows that call, has the
+    /// focus. Only ever set while `in_detail` is.
+    pub call_focus: bool,
+    pub call_scroll: usize,
+    /// The first visible row of each list (Sessions, Tool calls, Subagents),
+    /// kept between draws so a list scrolls only when the cursor leaves it.
+    pub offsets: [usize; 3],
+    pub search: Option<Search>,
+    /// The search being typed, after `/`.
+    pub typing: Option<String>,
+    pub help: bool,
+    pub viewport: Viewport,
     /// Something the user should know: a missing directory, a failed socket.
     pub notice: Option<String>,
     pub live: LiveStatus,
@@ -70,13 +195,36 @@ pub struct App {
     listener: Option<live::Listener>,
 }
 
+/// How many recent tool calls per session the viewer keeps.
+const RECENT_TOOLS: usize = 200;
+
+/// How many rows the Tool calls page lists at most.
+const TOOL_ROWS: usize = 500;
+
 impl App {
     pub fn new(config: Config) -> Self {
         let mut app = Self {
-            store: SessionStore::new(),
+            store: SessionStore::new().with_recent_tools(RECENT_TOOLS),
             tails: BTreeMap::new(),
+            page: Page::Sessions,
+            in_detail: false,
+            sort: Sort::Updated,
+            filter: Filter::All,
             order: Vec::new(),
+            scope: None,
+            agent_scope: None,
             selected: 0,
+            tool_selected: 0,
+            subagent_selected: 0,
+            detail_scroll: 0,
+            call_selected: 0,
+            call_focus: false,
+            call_scroll: 0,
+            offsets: [0; 3],
+            search: None,
+            typing: None,
+            help: false,
+            viewport: Viewport::default(),
             notice: None,
             live: LiveStatus::Off,
             #[cfg(unix)]
@@ -108,6 +256,58 @@ impl App {
     /// Looks for new transcripts, reads what was appended to the known ones
     /// and applies the live events that arrived.
     pub fn refresh(&mut self) {
+        // New rows arrive at the top of the Tool calls and Subagents lists.
+        // A cursor further down stays on its row; one on the first row keeps
+        // following the latest.
+        let tool = (self.tool_selected > 0)
+            .then(|| self.selected_tool())
+            .flatten()
+            .map(|(session, call)| (session.id.clone(), call.id.clone()));
+        let subagent = (self.subagent_selected > 0)
+            .then(|| self.selected_subagent())
+            .flatten()
+            .map(|(session, agent)| (session.id.clone(), agent.agent_id.clone()));
+        let call = (self.call_selected > 0)
+            .then(|| self.selected_call())
+            .flatten()
+            .map(|call| call.id.clone());
+
+        self.load();
+
+        if let Some((session, id)) = tool {
+            let found = self
+                .tools()
+                .iter()
+                .position(|(s, c)| s.id == session && c.id == id);
+            self.follow(Page::Tools, found);
+        }
+        if let Some((session, id)) = subagent {
+            let found = self
+                .subagents()
+                .iter()
+                .position(|(s, a)| s.id == session && a.agent_id == id);
+            self.follow(Page::Subagents, found);
+        }
+        if let Some(id) = call {
+            if let Some(at) = self.subagent_calls().iter().position(|c| c.id == id) {
+                self.call_selected = at;
+            }
+        }
+    }
+
+    /// Moves a list's cursor to where its row went, and the list's scroll
+    /// position by as much, so the row stays where it was on screen.
+    fn follow(&mut self, page: Page, found: Option<usize>) {
+        let Some(to) = found else {
+            return;
+        };
+        let index = if page == Page::Tools { 1 } else { 2 };
+        let from = *self.cursor_mut(page);
+        *self.cursor_mut(page) = to;
+        self.offsets[index] = (self.offsets[index] + to).saturating_sub(from);
+    }
+
+    fn load(&mut self) {
         match discover(&self.config.projects_dir) {
             Ok(found) => {
                 self.notice = None;
@@ -122,7 +322,7 @@ impl App {
         if let Some(listener) = &self.listener {
             listener.drain(&mut self.store);
         }
-        self.sort();
+        self.arrange(now());
     }
 
     fn track(&mut self, files: &SessionFiles) {
@@ -161,41 +361,525 @@ impl App {
         }
     }
 
-    fn sort(&mut self) {
+    /// Rebuilds the session list for the filter and the sort in force,
+    /// keeping the cursor on the session it was on.
+    pub fn arrange(&mut self, now: Timestamp) {
         let selected = self.order.get(self.selected).cloned();
-        let mut sessions: Vec<&Session> = self.store.sessions().collect();
-        sessions.sort_by(|a, b| latest(b).cmp(&latest(a)).then_with(|| a.id.cmp(&b.id)));
+        let mut sessions: Vec<&Session> = self
+            .store
+            .sessions()
+            .filter(|s| self.filter.admits(status(s, now).kind))
+            .collect();
+        sessions.sort_by(|a, b| {
+            let by = match self.sort {
+                Sort::Updated => std::cmp::Ordering::Equal,
+                // An unknown cost sorts below every known one.
+                Sort::Cost => b
+                    .cost
+                    .usd
+                    .partial_cmp(&a.cost.usd)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                Sort::Tokens => b
+                    .usage
+                    .total()
+                    .total_tokens()
+                    .cmp(&a.usage.total().total_tokens()),
+            };
+            by.then_with(|| latest(b).cmp(&latest(a)))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         self.order = sessions.into_iter().map(|s| s.id.clone()).collect();
-        // Keep the cursor on the same session while the list reorders.
-        self.selected = selected
-            .and_then(|id| self.order.iter().position(|other| *other == id))
-            .unwrap_or(0)
-            .min(self.order.len().saturating_sub(1));
+        let kept = selected.and_then(|id| self.order.iter().position(|other| *other == id));
+        if kept.is_none() && self.page == Page::Sessions {
+            // Another session is under the cursor now.
+            self.reset_detail();
+        }
+        self.selected = kept.unwrap_or(0);
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|id| self.store.get(id).is_none())
+        {
+            self.scope = None;
+            self.agent_scope = None;
+        }
+        self.clamp();
     }
 
+    /// The session under the cursor of the Sessions page.
     pub fn selected_session(&self) -> Option<&Session> {
         self.order
             .get(self.selected)
             .and_then(|id| self.store.get(id))
     }
 
-    pub fn select_next(&mut self) {
-        if self.selected + 1 < self.order.len() {
-            self.selected += 1;
+    /// The session the other pages are narrowed to.
+    pub fn scoped_session(&self) -> Option<&Session> {
+        self.scope.as_ref().and_then(|id| self.store.get(id))
+    }
+
+    /// The sessions the Tool calls and Subagents pages draw from.
+    fn in_scope(&self) -> Vec<&Session> {
+        match self.scoped_session() {
+            Some(session) => vec![session],
+            None => self.store.sessions().collect(),
         }
     }
 
-    pub fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+    /// Recent tool calls, the latest first, each with its session.
+    pub fn tools(&self) -> Vec<(&Session, &ToolCall)> {
+        let mut calls: Vec<(&Session, &ToolCall)> = self
+            .in_scope()
+            .into_iter()
+            .flat_map(|session| session.recent_tools.iter().map(move |call| (session, call)))
+            .filter(|(_, call)| self.agent_scope.is_none() || call.agent_id == self.agent_scope)
+            .collect();
+        calls.sort_by(|a, b| latest_first(a.1, b.1));
+        calls.truncate(TOOL_ROWS);
+        calls
     }
 
-    pub fn select_first(&mut self) {
-        self.selected = 0;
+    /// Subagents, the latest active first, each with its session.
+    pub fn subagents(&self) -> Vec<(&Session, &Subagent)> {
+        let mut subagents: Vec<(&Session, &Subagent)> = self
+            .in_scope()
+            .into_iter()
+            .flat_map(|session| {
+                session
+                    .subagents
+                    .values()
+                    .map(move |agent| (session, agent))
+            })
+            .collect();
+        subagents.sort_by(|a, b| {
+            b.1.last_activity
+                .cmp(&a.1.last_activity)
+                .then_with(|| a.1.agent_id.cmp(&b.1.agent_id))
+        });
+        subagents
     }
 
-    pub fn select_last(&mut self) {
-        self.selected = self.order.len().saturating_sub(1);
+    pub fn selected_tool(&self) -> Option<(&Session, &ToolCall)> {
+        self.tools().get(self.tool_selected).copied()
     }
+
+    pub fn selected_subagent(&self) -> Option<(&Session, &Subagent)> {
+        self.subagents().get(self.subagent_selected).copied()
+    }
+
+    /// The tool calls of the subagent under the cursor, the latest first:
+    /// what its detail pane lists.
+    pub fn subagent_calls(&self) -> Vec<&ToolCall> {
+        self.selected_subagent()
+            .map(|(session, agent)| calls_of(session, &agent.agent_id))
+            .unwrap_or_default()
+    }
+
+    /// The tool call under the cursor of the subagent's detail pane.
+    pub fn selected_call(&self) -> Option<&ToolCall> {
+        self.subagent_calls().get(self.call_selected).copied()
+    }
+
+    /// The detail pane lists tool calls to choose from, not text to scroll,
+    /// and it has the focus.
+    pub fn choosing_call(&self) -> bool {
+        self.in_detail && self.page == Page::Subagents && !self.call_focus
+    }
+
+    /// The pane showing the chosen tool call has the focus.
+    pub fn in_call(&self) -> bool {
+        self.in_detail && self.page == Page::Subagents && self.call_focus
+    }
+
+    /// Another row is under the list's cursor: its detail starts at the top.
+    fn reset_detail(&mut self) {
+        self.detail_scroll = 0;
+        self.call_selected = 0;
+        self.call_scroll = 0;
+    }
+
+    fn list_len(&self, page: Page) -> usize {
+        match page {
+            Page::Sessions => self.order.len(),
+            Page::Tools => self.tools().len(),
+            Page::Subagents => self.subagents().len(),
+            Page::Usage => 0,
+        }
+    }
+
+    fn cursor_mut(&mut self, page: Page) -> &mut usize {
+        match page {
+            Page::Sessions => &mut self.selected,
+            Page::Tools => &mut self.tool_selected,
+            Page::Subagents | Page::Usage => &mut self.subagent_selected,
+        }
+    }
+
+    fn clamp(&mut self) {
+        for page in [Page::Sessions, Page::Tools, Page::Subagents] {
+            let last = self.list_len(page).saturating_sub(1);
+            let cursor = self.cursor_mut(page);
+            *cursor = (*cursor).min(last);
+        }
+    }
+
+    /// Moves the list's cursor, or scrolls the detail pane when it has the
+    /// focus, to `to`, clamped to what there is.
+    fn move_to(&mut self, to: usize) {
+        if !self.page.has_list() {
+            return;
+        }
+        if self.choosing_call() {
+            // The pane scrolls to keep the call in view when it is drawn.
+            let to = to.min(self.subagent_calls().len().saturating_sub(1));
+            if self.call_selected != to {
+                self.call_selected = to;
+                self.call_scroll = 0;
+            }
+            return;
+        }
+        if self.in_call() {
+            let last = self
+                .viewport
+                .call_lines
+                .saturating_sub(self.viewport.call_rows);
+            self.call_scroll = to.min(last);
+            return;
+        }
+        if self.in_detail {
+            let last = self
+                .viewport
+                .detail_lines
+                .saturating_sub(self.viewport.detail_rows);
+            self.detail_scroll = to.min(last);
+            return;
+        }
+        let page = self.page;
+        let to = to.min(self.list_len(page).saturating_sub(1));
+        if *self.cursor_mut(page) != to {
+            *self.cursor_mut(page) = to;
+            self.reset_detail();
+        }
+    }
+
+    pub fn move_by(&mut self, by: isize) {
+        let at = if self.choosing_call() {
+            self.call_selected
+        } else if self.in_call() {
+            self.call_scroll
+        } else if self.in_detail {
+            self.detail_scroll
+        } else {
+            *self.cursor_mut(self.page)
+        };
+        self.move_to(at.saturating_add_signed(by));
+    }
+
+    pub fn move_first(&mut self) {
+        self.move_to(0);
+    }
+
+    pub fn move_last(&mut self) {
+        self.move_to(usize::MAX);
+    }
+
+    /// Half of what the focused pane shows, as `Ctrl+d` / `Ctrl+u` move.
+    pub fn half_page(&self) -> isize {
+        let rows = if self.in_call() {
+            self.viewport.call_rows
+        } else if self.in_detail {
+            self.viewport.detail_rows
+        } else {
+            self.viewport.list_rows
+        };
+        (rows / 2).max(1) as isize
+    }
+
+    pub fn go_to(&mut self, page: Page) {
+        if self.page != page {
+            self.page = page;
+            self.in_detail = false;
+            self.call_focus = false;
+            self.reset_detail();
+        }
+    }
+
+    /// `Tab` / `Shift+Tab`: the page's panes in turn. The Subagents page
+    /// has a third, the chosen tool call.
+    pub fn toggle_focus(&mut self) {
+        if !self.page.has_list() {
+            return;
+        }
+        if self.choosing_call() && self.selected_call().is_some() {
+            self.call_focus = true;
+        } else {
+            self.in_detail = !self.in_detail;
+            self.call_focus = false;
+        }
+    }
+
+    /// `i`: into the detail pane; from a subagent's, into the pane of the
+    /// tool call chosen there.
+    pub fn focus_detail(&mut self) {
+        if !self.page.has_list() {
+            return;
+        }
+        if self.choosing_call() {
+            self.call_focus = self.selected_call().is_some();
+        }
+        self.in_detail = true;
+    }
+
+    /// One pane back towards the list. `false` on the list itself.
+    fn step_out(&mut self) -> bool {
+        if self.in_call() {
+            self.call_focus = false;
+        } else if self.in_detail {
+            self.in_detail = false;
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// The subagent the Tool calls page is narrowed to.
+    pub fn scoped_subagent(&self) -> Option<&Subagent> {
+        let agent = self.agent_scope.as_ref()?;
+        self.scoped_session()?.subagents.get(agent)
+    }
+
+    /// `Enter`. On a session: narrow the Tool calls and Subagents pages to it
+    /// and show its tool calls. On a subagent: narrow the Tool calls page to
+    /// it and show them. Elsewhere: into the detail pane, and from a
+    /// subagent's into the pane of the tool call chosen there.
+    pub fn enter(&mut self) {
+        if self.in_detail {
+            self.focus_detail();
+            return;
+        }
+        match self.page {
+            Page::Sessions => {
+                let Some(id) = self.order.get(self.selected).cloned() else {
+                    return;
+                };
+                self.narrow(Some(id), None);
+                self.go_to(Page::Tools);
+            }
+            Page::Subagents => {
+                let Some((session, agent)) = self
+                    .selected_subagent()
+                    .map(|(s, a)| (s.id.clone(), a.agent_id.clone()))
+                else {
+                    return;
+                };
+                // Narrowing to the session may reorder this list: stay on
+                // the subagent.
+                self.narrow(Some(session), Some(agent.clone()));
+                if let Some(at) = self
+                    .subagents()
+                    .iter()
+                    .position(|(_, a)| a.agent_id == agent)
+                {
+                    self.subagent_selected = at;
+                }
+                self.go_to(Page::Tools);
+            }
+            _ => self.focus_detail(),
+        }
+    }
+
+    fn narrow(&mut self, scope: Option<String>, agent: Option<String>) {
+        if self.scope == scope && self.agent_scope == agent {
+            return;
+        }
+        if self.scope != scope {
+            self.subagent_selected = 0;
+            self.offsets[2] = 0;
+        }
+        self.scope = scope;
+        self.agent_scope = agent;
+        self.tool_selected = 0;
+        self.offsets[1] = 0;
+        if self.page != Page::Sessions {
+            self.reset_detail();
+        }
+        // A search's matches were rows of the old lists.
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.page != Page::Sessions)
+        {
+            self.search = None;
+        }
+    }
+
+    /// `Esc`: out of the pane in focus. On a list it drops the search; with
+    /// no search, the narrowing to a subagent, then the narrowing to a session.
+    pub fn back(&mut self) {
+        if self.step_out() {
+            return;
+        }
+        if self.search.as_ref().is_some_and(|s| s.page == self.page) {
+            self.search = None;
+        } else if self.agent_scope.is_some() {
+            self.narrow(self.scope.clone(), None);
+        } else {
+            self.narrow(None, None);
+        }
+    }
+
+    /// `h`: out of the pane in focus only.
+    pub fn leave_detail(&mut self) {
+        self.step_out();
+    }
+
+    pub fn cycle_sort(&mut self) {
+        if self.page != Page::Sessions {
+            return;
+        }
+        self.sort = match self.sort {
+            Sort::Updated => Sort::Cost,
+            Sort::Cost => Sort::Tokens,
+            Sort::Tokens => Sort::Updated,
+        };
+        self.arrange(now());
+    }
+
+    pub fn cycle_filter(&mut self) {
+        if self.page != Page::Sessions {
+            return;
+        }
+        self.filter = match self.filter {
+            Filter::All => Filter::Live,
+            Filter::Live => Filter::Open,
+            Filter::Open => Filter::All,
+        };
+        self.arrange(now());
+    }
+
+    /// The text each row of `page` is searched by, lower-cased.
+    fn haystacks(&self, page: Page, now: Timestamp) -> Vec<String> {
+        let rows: Vec<String> = match page {
+            Page::Sessions => self
+                .order
+                .iter()
+                .filter_map(|id| self.store.get(id))
+                .map(|s| {
+                    format!(
+                        "{} {} {} {} {}",
+                        label(s),
+                        project(s).unwrap_or_default(),
+                        s.git_branch.as_deref().unwrap_or_default(),
+                        status(s, now).text,
+                        s.id
+                    )
+                })
+                .collect(),
+            Page::Tools => self
+                .tools()
+                .iter()
+                .map(|(s, c)| {
+                    format!(
+                        "{} {} {}",
+                        c.name,
+                        c.summary.as_deref().unwrap_or_default(),
+                        label(s)
+                    )
+                })
+                .collect(),
+            Page::Subagents => self
+                .subagents()
+                .iter()
+                .map(|(s, a)| {
+                    format!(
+                        "{} {} {} {}",
+                        a.agent_type.as_deref().unwrap_or_default(),
+                        a.description.as_deref().unwrap_or_default(),
+                        a.agent_id,
+                        label(s)
+                    )
+                })
+                .collect(),
+            Page::Usage => Vec::new(),
+        };
+        rows.into_iter().map(|row| row.to_lowercase()).collect()
+    }
+
+    /// The rows of `page` the search in force matches.
+    pub fn matches(&self, page: Page, now: Timestamp) -> Vec<usize> {
+        let Some(search) = self.search.as_ref().filter(|s| s.page == page) else {
+            return Vec::new();
+        };
+        self.haystacks(page, now)
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.contains(&search.query))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Starts typing a search in the page's list.
+    pub fn start_search(&mut self) {
+        if self.page.has_list() && !self.in_detail {
+            self.typing = Some(String::new());
+        }
+    }
+
+    /// `Enter` while typing: search, and go to the first match from the
+    /// cursor on.
+    pub fn submit_search(&mut self) {
+        let Some(typed) = self.typing.take() else {
+            return;
+        };
+        let query = typed.trim().to_lowercase();
+        if query.is_empty() {
+            self.search = None;
+            return;
+        }
+        let page = self.page;
+        self.search = Some(Search { page, query });
+        let at = *self.cursor_mut(page);
+        let matches = self.matches(page, now());
+        if let Some(to) = matches.iter().find(|m| **m >= at).or(matches.first()) {
+            self.move_to(*to);
+        }
+    }
+
+    /// `n` / `N`: the next or the previous match, wrapping around.
+    pub fn next_match(&mut self, by: isize) {
+        if self.in_detail {
+            return;
+        }
+        let page = self.page;
+        let matches = self.matches(page, now());
+        let at = *self.cursor_mut(page);
+        let to = if by > 0 {
+            matches.iter().find(|m| **m > at).or(matches.first())
+        } else {
+            matches.iter().rev().find(|m| **m < at).or(matches.last())
+        };
+        if let Some(to) = to {
+            self.move_to(*to);
+        }
+    }
+}
+
+/// The order of the tool call lists: the latest first.
+fn latest_first(a: &ToolCall, b: &ToolCall) -> std::cmp::Ordering {
+    b.started_at
+        .cmp(&a.started_at)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// The recent tool calls a subagent of `session` made, the latest first.
+pub fn calls_of<'a>(session: &'a Session, agent_id: &str) -> Vec<&'a ToolCall> {
+    let mut calls: Vec<&ToolCall> = session
+        .recent_tools
+        .iter()
+        .filter(|call| call.agent_id.as_deref() == Some(agent_id))
+        .collect();
+    calls.sort_by(|a, b| latest_first(a, b));
+    calls
 }
 
 /// The time of the last thing known about a session, from either input.
@@ -371,18 +1055,331 @@ pub mod tests {
     #[test]
     fn the_cursor_moves_within_the_list_and_follows_its_session() {
         let mut app = fixture_app();
-        app.select_previous();
+        app.move_by(-1);
         assert_eq!(app.selected, 0);
-        app.select_last();
+        app.move_last();
         assert_eq!(app.selected, 2);
-        app.select_next();
+        app.move_by(1);
         assert_eq!(app.selected, 2);
-        app.select_first();
-        app.select_next();
+        app.move_first();
+        app.move_by(1);
         assert_eq!(app.selected_session().unwrap().id, WITH_SUBAGENTS);
         // The list is re-sorted on refresh; the cursor stays on its session.
         app.refresh();
         assert_eq!(app.selected_session().unwrap().id, WITH_SUBAGENTS);
+    }
+
+    #[test]
+    fn the_other_pages_list_every_session_until_one_is_entered() {
+        let mut app = fixture_app();
+        // Unscoped: everything, the latest first.
+        assert_eq!(app.scope, None);
+        assert_eq!(app.tools().len(), 5);
+        assert_eq!(app.subagents().len(), 2);
+        let (session, call) = app.tools()[4];
+        assert_eq!(
+            (session.id.as_str(), call.name.as_str()),
+            (WITH_SUBAGENTS, "Bash")
+        );
+
+        // Enter on a session narrows the other pages to it and shows its
+        // tool calls.
+        app.enter(); // the damaged transcript: no tool calls at all
+        assert_eq!(app.page, Page::Tools);
+        assert_eq!(app.scope.as_deref(), Some(UNINDEXED));
+        assert!(app.tools().is_empty());
+        assert!(app.subagents().is_empty());
+        assert!(app.selected_tool().is_none());
+
+        app.go_to(Page::Sessions);
+        app.move_by(1);
+        app.enter();
+        assert_eq!(app.scope.as_deref(), Some(WITH_SUBAGENTS));
+        assert_eq!(app.tools().len(), 5);
+        app.move_by(3);
+        assert_eq!(app.selected_tool().unwrap().1.name, "Read");
+        app.go_to(Page::Subagents);
+        app.move_by(1);
+        assert_eq!(
+            app.selected_subagent().unwrap().1.agent_id,
+            "b2c3d4e5f6071829"
+        );
+        app.go_to(Page::Tools);
+        assert_eq!(app.tool_selected, 3, "each page keeps its cursor");
+
+        // Esc on a list drops the narrowing, and the cursors start again.
+        app.back();
+        assert_eq!(app.scope, None);
+        assert_eq!((app.tool_selected, app.subagent_selected), (0, 0));
+        assert_eq!(app.page, Page::Tools);
+    }
+
+    /// A copy of the fixture projects that a test may append to.
+    pub fn scratch_projects(name: &str) -> PathBuf {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.path().is_dir() {
+                    copy(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("iktinos-tui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy(
+            &fixtures().join(KNOWN_CLAUDE_CODE_VERSION).join("projects"),
+            &dir,
+        );
+        dir
+    }
+
+    /// Appends one more tool call, later than every other, to the session
+    /// with subagents.
+    fn append_tool_call(projects: &Path, id: &str, minute: u8) {
+        append_call(
+            projects,
+            id,
+            minute,
+            "Edit",
+            r#"{"file_path":"/work/other.repo/src/lib.rs"}"#,
+        );
+    }
+
+    /// Appends a call of `name` with `input` (JSON) to the same session.
+    pub fn append_call(projects: &Path, id: &str, minute: u8, name: &str, input: &str) {
+        use std::io::Write;
+        let line = format!(
+            r#"{{"parentUuid":"a4","isSidechain":false,"type":"assistant","message":{{"model":"claude-fable-5-2","id":"msg_{id}","type":"message","role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}],"stop_reason":"tool_use","usage":{{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}},"uuid":"uuid-{id}","timestamp":"2026-11-02T11:{minute:02}:00.000Z","cwd":"/work/other.repo","sessionId":"{WITH_SUBAGENTS}","version":"2.1.325","gitBranch":"main"}}"#
+        );
+        let path = projects
+            .join("-work-other-repo")
+            .join(format!("{WITH_SUBAGENTS}.jsonl"));
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    /// Appends a call of the Explore subagent, later than its others.
+    pub fn append_agent_call(projects: &Path, id: &str, minute: u8, input: &str) {
+        use std::io::Write;
+        const AGENT: &str = "a1b2c3d4e5f60718";
+        let line = format!(
+            r#"{{"parentUuid":"sa2","isSidechain":true,"type":"assistant","message":{{"model":"claude-haiku-5-5","id":"msg_{id}","type":"message","role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{input}}}],"stop_reason":"tool_use","usage":{{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}},"uuid":"uuid-{id}","timestamp":"2026-11-02T11:{minute:02}:00.000Z","cwd":"/work/other.repo","sessionId":"{WITH_SUBAGENTS}","agentId":"{AGENT}","version":"2.1.325","gitBranch":"main"}}"#
+        );
+        let path = projects
+            .join("-work-other-repo")
+            .join(WITH_SUBAGENTS)
+            .join("subagents")
+            .join(format!("agent-{AGENT}.jsonl"));
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    #[test]
+    fn a_call_in_a_subagents_detail_is_chosen_and_shown_beside_it() {
+        let projects = scratch_projects("calls");
+        append_agent_call(&projects, "toolu_s2", 0, r#"{"command":"ls"}"#);
+        append_agent_call(&projects, "toolu_s3", 1, r#"{"command":"pwd"}"#);
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+        });
+        app.go_to(Page::Subagents);
+        assert_eq!(
+            app.selected_subagent().unwrap().1.agent_id,
+            "a1b2c3d4e5f60718"
+        );
+        let ids = |app: &App| -> Vec<String> {
+            app.subagent_calls().iter().map(|c| c.id.clone()).collect()
+        };
+        assert_eq!(ids(&app), ["toolu_s3", "toolu_s2", "toolu_s1"]);
+
+        // On the list, moving changes the subagent, not the call.
+        assert!(!app.choosing_call());
+        app.focus_detail();
+        assert!(app.choosing_call());
+        app.move_by(1);
+        assert_eq!((app.subagent_selected, app.call_selected), (0, 1));
+        app.move_last();
+        assert_eq!(app.call_selected, 2);
+        app.move_by(1);
+        assert_eq!(app.call_selected, 2);
+        app.move_by(-1);
+        assert_eq!(app.selected_call().unwrap().id, "toolu_s2");
+
+        // A newer call arrives above: the cursor stays on its call.
+        append_agent_call(&projects, "toolu_s4", 2, r#"{"command":"date"}"#);
+        app.refresh();
+        assert_eq!(app.selected_call().unwrap().id, "toolu_s2");
+        assert_eq!(app.call_selected, 2);
+
+        // Enter, `i` or Tab: the pane showing that call, which scrolls.
+        app.enter();
+        assert!(app.in_call() && !app.choosing_call());
+        app.viewport.call_rows = 4;
+        app.viewport.call_lines = 10;
+        app.move_by(2);
+        app.move_by(app.half_page());
+        assert_eq!((app.call_scroll, app.call_selected), (4, 2));
+        app.move_last();
+        assert_eq!(app.call_scroll, 6);
+        app.enter();
+        assert!(app.in_call(), "there is nothing further in");
+
+        // Back out a pane at a time; another call starts at its top.
+        app.leave_detail();
+        assert!(app.choosing_call());
+        assert_eq!(app.call_scroll, 6);
+        app.move_by(-1);
+        assert_eq!((app.call_selected, app.call_scroll), (1, 0));
+        app.focus_detail();
+        assert!(app.in_call());
+        app.back();
+        app.back();
+        assert!(!app.in_detail);
+        assert_eq!(app.page, Page::Subagents);
+        // Tab goes round the three panes.
+        app.toggle_focus();
+        assert!(app.choosing_call());
+        app.toggle_focus();
+        assert!(app.in_call());
+        app.toggle_focus();
+        assert!(!app.in_detail && !app.call_focus);
+
+        // Another subagent's detail starts on its first call.
+        app.move_by(1);
+        app.focus_detail();
+        app.move_by(3);
+        assert_eq!(app.call_selected, 0, "it made one call");
+        // Leaving the page from the call pane leaves the pane too.
+        app.focus_detail();
+        assert!(app.in_call());
+        app.go_to(Page::Tools);
+        app.go_to(Page::Subagents);
+        assert!(!app.in_detail && !app.in_call());
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn a_new_row_does_not_move_the_cursor_off_its_row() {
+        let projects = scratch_projects("follow");
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+        });
+        app.go_to(Page::Tools);
+        app.move_by(3);
+        app.offsets[1] = 2; // scrolled, as after moving through a long list
+        let watched = app.selected_tool().unwrap().1.id.clone();
+        assert_eq!(watched, "toolu_02");
+
+        // A newer call arrives at the top of the list.
+        append_tool_call(&projects, "toolu_new1", 0);
+        app.refresh();
+        assert_eq!(app.tools().len(), 6);
+        assert_eq!(app.tools()[0].1.id, "toolu_new1");
+        // The cursor is still on its row, one further down, and the list
+        // scrolled with it, so the row has not moved on screen.
+        assert_eq!(app.selected_tool().unwrap().1.id, watched);
+        assert_eq!((app.tool_selected, app.offsets[1]), (4, 3));
+
+        // A cursor on the first row keeps following the latest.
+        app.move_first();
+        app.offsets[1] = 0;
+        append_tool_call(&projects, "toolu_new2", 1);
+        app.refresh();
+        assert_eq!(app.tool_selected, 0);
+        assert_eq!(app.selected_tool().unwrap().1.id, "toolu_new2");
+
+        // Nothing new: nothing moves.
+        app.move_by(2);
+        let before = (app.tool_selected, app.offsets[1]);
+        app.refresh();
+        assert_eq!((app.tool_selected, app.offsets[1]), before);
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn entering_a_subagent_narrows_the_tool_calls_to_it() {
+        let mut app = fixture_app();
+        app.go_to(Page::Subagents);
+        app.move_by(1);
+        let agent = app.selected_subagent().unwrap().1.agent_id.clone();
+        app.enter();
+        assert_eq!(app.page, Page::Tools);
+        assert_eq!(app.scope.as_deref(), Some(WITH_SUBAGENTS));
+        assert_eq!(app.agent_scope.as_deref(), Some(agent.as_str()));
+        assert_eq!(app.scoped_subagent().unwrap().agent_id, agent);
+        // Its one call, and the detail pane is reachable from there.
+        let calls = app.tools();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1.agent_id.as_deref(), Some(agent.as_str()));
+        app.enter();
+        assert!(app.in_detail);
+        app.back();
+
+        // The Subagents page still lists the session's subagents, and its
+        // cursor is still on the one entered.
+        app.go_to(Page::Subagents);
+        assert_eq!(app.subagents().len(), 2);
+        assert_eq!(app.selected_subagent().unwrap().1.agent_id, agent);
+
+        // Esc: first the subagent, then the session.
+        app.go_to(Page::Tools);
+        app.back();
+        assert_eq!(
+            (app.scope.is_some(), app.agent_scope.is_some()),
+            (true, false)
+        );
+        assert_eq!(app.tools().len(), 5);
+        app.back();
+        assert_eq!(app.scope, None);
+
+        // Entering a session forgets a subagent of another.
+        app.go_to(Page::Subagents);
+        app.enter();
+        assert!(app.agent_scope.is_some());
+        app.go_to(Page::Sessions);
+        app.move_last();
+        app.enter();
+        assert_eq!(
+            (app.scope.as_deref(), app.agent_scope.clone()),
+            (Some(INDEXED), None)
+        );
+    }
+
+    #[test]
+    fn enter_elsewhere_and_i_go_into_the_detail_pane() {
+        let mut app = fixture_app();
+        app.focus_detail();
+        assert!(app.in_detail);
+        // Enter in the detail pane does not narrow anything.
+        app.enter();
+        assert_eq!((app.page, app.scope.clone()), (Page::Sessions, None));
+        app.back();
+        assert!(!app.in_detail);
+
+        app.go_to(Page::Tools);
+        app.enter();
+        assert!(app.in_detail);
+        app.leave_detail();
+        app.toggle_focus();
+        assert!(app.in_detail);
+        // Changing page starts on its list.
+        app.go_to(Page::Subagents);
+        assert!(!app.in_detail);
+        // The Usage page has no panes to move between.
+        app.go_to(Page::Usage);
+        app.toggle_focus();
+        app.focus_detail();
+        assert!(!app.in_detail);
     }
 
     #[test]
