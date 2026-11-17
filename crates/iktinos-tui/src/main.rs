@@ -37,6 +37,9 @@ Options:
       --no-live             Do not listen for live events from the bridge mod
       --time <STYLE>        Show times as `clock` (the local date and time, the
                             default) or `relative` (how long ago); T switches
+      --ago <DURATION>      With `clock`, still show what is newer than DURATION
+                            as how long ago: 90s, 30m, 1h (the default), 2d;
+                            0 for never
   -h, --help                Print help
   -V, --version             Print version
 ";
@@ -177,6 +180,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
     let mut socket_dir = None;
     let mut live = true;
     let mut time = app::TimeStyle::default();
+    let mut ago_within = app::DEFAULT_AGO_WITHIN;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -197,6 +201,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
             "--projects-dir" => projects_dir = Some(value("--projects-dir")?),
             "--socket-dir" => socket_dir = Some(value("--socket-dir")?),
             "--no-live" => live = false,
+            "--ago" => {
+                let length = inline.clone().or_else(|| args.next()).unwrap_or_default();
+                ago_within = app::parse_duration(&length).ok_or_else(|| {
+                    format!("--ago is a length of time such as 30m or 1h, not '{length}'")
+                })?;
+            }
             "--time" => {
                 let style = inline.clone().or_else(|| args.next()).unwrap_or_default();
                 time = app::TimeStyle::parse(&style)
@@ -220,6 +230,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
         live,
         socket_dir,
         time,
+        ago_within,
     }))
 }
 
@@ -238,6 +249,7 @@ mod tests {
             live: false,
             socket_dir: Some(PathBuf::from("/synthetic/sockets")),
             time: app::TimeStyle::default(),
+            ago_within: app::DEFAULT_AGO_WITHIN,
         });
         assert_eq!(
             parse(&[
@@ -273,6 +285,25 @@ mod tests {
             .unwrap_err()
             .contains("yesterday"));
         assert!(parse(&["--time"]).is_err());
+
+        assert_eq!(config.ago_within, Duration::from_secs(3600));
+        for (length, seconds) in [
+            ("90s", 90),
+            ("30m", 1800),
+            ("2h", 7200),
+            ("2d", 172_800),
+            ("45", 45),
+            ("0", 0),
+        ] {
+            let Ok(Parsed::Run(config)) = parse(&["--projects-dir=/p", "--ago", length]) else {
+                panic!("{length}")
+            };
+            assert_eq!(config.ago_within, Duration::from_secs(seconds), "{length}");
+        }
+        for wrong in ["soon", "1w", "h", "-5m", "1.5h", ""] {
+            assert!(parse(&["--ago", wrong]).is_err(), "{wrong}");
+        }
+        assert!(parse(&["--ago=99999999999999999999d"]).is_err());
     }
 
     fn press(app: &mut App, keys: &str) {

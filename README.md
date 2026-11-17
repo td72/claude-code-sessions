@@ -111,7 +111,7 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `l`, `h` in the trace | the pane on the right, and back (`h` in the tree or under a session goes to the row above first) |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
-| `T` | show times as a local date and time, or as how long ago (`--time clock` or `--time relative` sets which to start with) |
+| `T` | show times as a local date and time, or as how long ago (`--time clock` or `--time relative` sets which to start with; with `clock`, what is newer than `--ago`, an hour unless told otherwise, is still shown as how long ago) |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
 | `r`, `?`, `q` | refresh, help, quit |
 

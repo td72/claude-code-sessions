@@ -24,12 +24,40 @@ pub struct Config {
     pub socket_dir: Option<PathBuf>,
     /// How the lists say when something happened, to begin with.
     pub time: TimeStyle,
+    /// With [`TimeStyle::Clock`], what is newer than this is still shown as
+    /// how long ago it was.
+    pub ago_within: Duration,
+}
+
+/// How new something is shown as "ago" unless told otherwise.
+pub const DEFAULT_AGO_WITHIN: Duration = Duration::from_secs(3600);
+
+/// A length of time as an option spells it: `90s`, `30m`, `1h`, `2d`, or a
+/// number of seconds.
+pub fn parse_duration(text: &str) -> Option<Duration> {
+    let (number, unit) = match text.char_indices().last()? {
+        (at, 's') => (&text[..at], 1),
+        (at, 'm') => (&text[..at], 60),
+        (at, 'h') => (&text[..at], 3_600),
+        (at, 'd') => (&text[..at], 86_400),
+        _ => (text, 1),
+    };
+    let seconds = number.parse::<u64>().ok()?.checked_mul(unit)?;
+    Some(Duration::from_secs(seconds))
+}
+
+/// How times are shown now: the style, and how new is still "ago".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Times {
+    pub style: TimeStyle,
+    pub ago_within: Duration,
 }
 
 /// How the lists say when something happened.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TimeStyle {
-    /// The local date and time: `10:00:08`, `11-02 10:00`.
+    /// The local date and time, `10:00:08` or `11-02 10:00`, except for
+    /// what is new enough to be said as how long ago.
     #[default]
     Clock,
     /// How long ago: `12s`, `5m`.
@@ -1222,6 +1250,14 @@ impl App {
         self.step_out();
     }
 
+    /// How times are shown now.
+    pub fn times(&self) -> Times {
+        Times {
+            style: self.time,
+            ago_within: self.config.ago_within,
+        }
+    }
+
     /// `T`: the lists' times as a date and time, or as how long ago.
     pub fn toggle_time(&mut self) {
         self.time = match self.time {
@@ -1531,6 +1567,7 @@ pub mod tests {
             live: false,
             socket_dir: None,
             time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
         })
     }
 
@@ -1700,6 +1737,7 @@ pub mod tests {
             live: false,
             socket_dir: None,
             time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Subagents);
         assert_eq!(
@@ -2082,6 +2120,7 @@ pub mod tests {
             live: false,
             socket_dir: None,
             time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Trace);
         app.move_by(1);
@@ -2129,6 +2168,7 @@ pub mod tests {
             live: false,
             socket_dir: None,
             time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Tools);
         app.move_by(3);
@@ -2246,6 +2286,7 @@ pub mod tests {
             live: false,
             socket_dir: None,
             time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
         });
         assert!(app.order.is_empty());
         assert!(app.selected_session().is_none());
@@ -2280,6 +2321,7 @@ pub mod tests {
             live: true,
             socket_dir: Some(socket_dir.clone()),
             time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
         });
         let LiveStatus::Listening(socket) = app.live.clone() else {
             panic!("{:?}", app.live)

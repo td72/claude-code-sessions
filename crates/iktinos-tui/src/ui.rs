@@ -13,7 +13,8 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 use ratatui::Frame;
 
 use crate::app::{
-    self, App, InteractionRow, LiveStatus, Page, StatusKind, TimeStyle, TraceItem, TraceRow, TREE,
+    self, App, InteractionRow, LiveStatus, Page, StatusKind, TimeStyle, Times, TraceItem, TraceRow,
+    TREE,
 };
 use crate::format;
 use crate::highlight;
@@ -156,17 +157,20 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
     title
 }
 
-/// When something happened, the way the lists are set to say it.
-fn when(time: TimeStyle, now: Timestamp, at: Timestamp) -> String {
-    match time {
-        TimeStyle::Clock => format::when(now, at),
-        TimeStyle::Relative => format::ago(now, at),
+/// When something happened, the way the lists are set to say it: how
+/// long ago, or the date and time once it is no longer new.
+fn when(times: Times, now: Timestamp, at: Timestamp) -> String {
+    let age = now.as_millis() - at.as_millis();
+    let new = age >= 0 && (age as u128) < times.ago_within.as_millis();
+    match times.style {
+        TimeStyle::Clock if !new => format::when(now, at),
+        _ => format::ago(now, at),
     }
 }
 
 /// The width of the column [`when`] fills.
-fn when_width(time: TimeStyle) -> u16 {
-    match time {
+fn when_width(times: Times) -> u16 {
+    match times.style {
         TimeStyle::Clock => format::WHEN_WIDTH,
         TimeStyle::Relative => 4,
     }
@@ -284,7 +288,7 @@ fn outcome(call: &ToolCall) -> (&'static str, Style) {
 }
 
 fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
-    let time = app.time;
+    let time = app.times();
     let matches = app.matches(Page::Tools, now);
     // The session column says nothing once the page is narrowed to one.
     let scoped = app.scope.is_some();
@@ -351,7 +355,7 @@ fn subagent_name(subagent: &Subagent) -> &str {
 }
 
 fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
-    let time = app.time;
+    let time = app.times();
     let matches = app.matches(Page::Subagents, now);
     let scoped = app.scope.is_some();
     let subagents = app.subagents();
@@ -494,11 +498,22 @@ fn interaction_state(
 }
 
 fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
-    let time = app.time;
+    let time = app.times();
     let matches = app.matches(Page::Trace, now);
     // Flat, the rows name their session unless the page is narrowed to one;
-    // by session, the session is the row they are under.
-    let names = !app.by_session && app.scope.is_none();
+    // by session, the session is the row they are under, in that column.
+    let names = app.by_session || app.scope.is_none();
+    let by_session = app.by_session;
+    // How many LLM requests and tool calls a main thread holds.
+    let counts = |interaction: &Interaction| {
+        let spans = &interaction.thread.spans;
+        let calls = spans
+            .iter()
+            .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
+            .count();
+        (spans.len() - calls, calls)
+    };
+    let number = |n: usize| Cell::from(Line::from(n.to_string()).right_aligned());
     let listed = app.trace_list();
     let count = listed.len();
     let rows: Vec<Row<'static>> = listed
@@ -536,6 +551,8 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                             dim(),
                         ),
                     ])),
+                    number(session.trace.iter().map(|i| counts(i).0).sum()),
+                    number(session.trace.iter().map(|i| counts(i).1).sum()),
                     Cell::from(""),
                     Cell::from(status.text).style(style_of(status.kind)),
                 ])
@@ -554,23 +571,15 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 .started_at
                 .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
-            if names {
+            if by_session {
+                cells.push(Cell::from("  └").style(dim()));
+            } else if names {
                 cells.push(session_cell(session));
             }
-            let calls = interaction
-                .thread
-                .spans
-                .iter()
-                .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
-                .count();
+            let (requests, calls) = counts(interaction);
             cells.extend([
-                // Short: the list shares its row with the pane beside it.
-                Cell::from(format!(
-                    "{}{} llm, {}",
-                    if app.by_session { "    " } else { "" },
-                    interaction.thread.spans.len() - calls,
-                    format::count(calls as u64, "tool")
-                )),
+                number(requests),
+                number(calls),
                 Cell::from(
                     Line::from(took.map(format::duration).unwrap_or_default()).right_aligned(),
                 )
@@ -586,15 +595,9 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
         // The session gets what the short columns leave.
         widths.push(Constraint::Fill(1));
         header.push("session");
-        widths.push(Constraint::Length(16));
-    } else {
-        widths.push(Constraint::Fill(1));
     }
-    header.push(if app.by_session {
-        "session / interaction"
-    } else {
-        "interaction"
-    });
+    widths.extend([Constraint::Length(4), Constraint::Length(5)]);
+    header.extend(["llm", "tools"]);
     widths.extend([Constraint::Length(7), Constraint::Length(8)]);
     header.extend(["took", ""]);
     let title = list_title(
@@ -2081,7 +2084,18 @@ mod tests {
             .unwrap()
             .contains("┐┌ Interaction "));
         let interactions = pane_text(&shown, "┌ Trace (1 interaction · latest first) of 22222222");
-        assert!(interactions.contains("3 llm, 3 tools"), "{shown}");
+        // The counts have a column each, named in the header.
+        let lines = pane(&shown, "┌ Trace (");
+        let words = |line: &str| -> Vec<String> {
+            let line = line.replace('│', " ");
+            line.split_whitespace().map(str::to_owned).collect()
+        };
+        assert_eq!(words(lines[1]), ["when", "llm", "tools", "took"], "{shown}");
+        assert_eq!(
+            words(lines[2]),
+            ["20s", "3", "3", "8.0s", "done"],
+            "{shown}"
+        );
         assert!(interactions.contains("8.0s") && interactions.contains("done"));
         // The list is never unfolded in place.
         assert!(!interactions.contains("cargo test"), "{interactions}");
@@ -2187,8 +2201,19 @@ mod tests {
         let session = find("▾ 22222222");
         assert!(session.contains("other.repo · 1") && session.contains("active"));
         assert!(find("▾ Synthetic session title").contains("example · 1"));
-        assert!(find("    3 llm, 3 tools").contains("8.0s"));
-        assert!(list[1].contains("session / interaction"), "{tree}");
+        // An interaction is under its session, with its counts; the
+        // session's row has the totals.
+        let under = find("8.0s").replace('│', " ");
+        let under: Vec<&str> = under.split_whitespace().collect();
+        assert_eq!(under, ["20s", "└", "3", "3", "8.0s", "done"]);
+        assert!(
+            session.split_whitespace().any(|word| word == "3"),
+            "{session}"
+        );
+        assert!(
+            list[1].contains("session") && list[1].contains("tools"),
+            "{tree}"
+        );
         // The panes still show the interaction the cursor was on.
         assert!(tree.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
 
@@ -2199,7 +2224,7 @@ mod tests {
         let folded = screen(&mut app, 150, 44, SOON);
         let list = pane_text(&folded, "┌ Trace (3 interactions · by session)");
         assert!(list.contains("▸ 22222222"), "{folded}");
-        assert!(!list.contains("3 llm, 3 tools"));
+        assert!(!list.contains("8.0s"));
         assert!(folded.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
         assert!(pane_text(&folded, "┌ Interaction ─").contains("took      8.0s"));
     }
@@ -2243,6 +2268,7 @@ mod tests {
             live: false,
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Trace);
         app.move_by(1);
@@ -2293,6 +2319,7 @@ mod tests {
             live: false,
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Trace);
         // Under the interaction of a session that is a day later.
@@ -2304,7 +2331,7 @@ mod tests {
 
         // Its session was active a moment ago: everything reaches to now.
         let running = screen(&mut app, 150, 44, "2026-11-02T11:01:30.000Z");
-        let interaction = row(&running, "1 llm, 1 tool");
+        let interaction = row(&running, "1m30s");
         assert!(
             interaction.contains("running") && interaction.contains("1m30s"),
             "{running}"
@@ -2321,7 +2348,7 @@ mod tests {
 
         // Long after: all that is known is that it has no end.
         let later = screen(&mut app, 150, 44, LATER);
-        let interaction = row(&later, "1 llm, 1 tool");
+        let interaction = row(&later, "1m00s");
         assert!(
             interaction.contains("no end") && interaction.contains("1m00s"),
             "{later}"
@@ -2384,27 +2411,47 @@ mod tests {
 
     #[test]
     fn times_are_a_date_and_time_or_how_long_ago() {
+        let with = |ago_within: std::time::Duration| {
+            let mut app = App::new(Config {
+                projects_dir: crate::app::tests::fixtures()
+                    .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                    .join("projects"),
+                live: false,
+                socket_dir: None,
+                time: TimeStyle::Clock,
+                ago_within,
+            });
+            app.go_to(Page::Tools);
+            app
+        };
+        let bash = |app: &mut App, now: &str| {
+            let screen = screen(app, 150, 30, now);
+            row(&screen, "cargo test --workspace").to_owned()
+        };
+        // What is new is said as how long ago: within the hour, unless
+        // told otherwise.
         let mut app = fixture_app();
         app.go_to(Page::Tools);
-        // The same day: the time. (Under test the clock is UTC.)
-        let today = screen(&mut app, 150, 30, SOON);
-        assert!(
-            row(&today, "cargo test --workspace").contains("10:00:02"),
-            "{today}"
-        );
-        // Another day: the date too, and the detail says both.
-        let later = screen(&mut app, 150, 30, LATER);
-        assert!(
-            row(&later, "cargo test --workspace").contains("11-02 10:00"),
-            "{later}"
-        );
-        assert!(later.contains("started   11-02 10:00 (1d ago)"));
+        assert!(bash(&mut app, SOON).contains(" 18s "));
+        assert!(bash(&mut app, "2026-11-02T10:59:00.000Z").contains(" 58m "));
+        // After that, the time; another day, the date too. (Under test the
+        // clock is UTC.)
+        assert!(bash(&mut app, "2026-11-02T11:00:02.000Z").contains("10:00:02"));
+        assert!(bash(&mut app, LATER).contains("11-02 10:00"));
+        // A detail says both, always.
+        assert!(screen(&mut app, 150, 30, LATER).contains("started   11-02 10:00 (1d ago)"));
 
+        // Never "ago", or for longer.
+        let mut never = with(std::time::Duration::ZERO);
+        assert!(bash(&mut never, SOON).contains("10:00:02"));
+        let mut days = with(std::time::Duration::from_secs(3 * 86_400));
+        assert!(bash(&mut days, LATER).contains(" 1d "));
+
+        // `T`: how long ago for everything, and back.
         app.toggle_time();
-        let relative = screen(&mut app, 150, 30, SOON);
-        let bash = row(&relative, "cargo test --workspace");
+        let relative = bash(&mut app, LATER);
         assert!(
-            bash.contains("18s") && !bash.contains("10:00:02"),
+            relative.contains(" 1d ") && !relative.contains("11-02"),
             "{relative}"
         );
         // The other lists follow. (A detail pane says both, always.)
@@ -2413,10 +2460,10 @@ mod tests {
             (Page::Trace, "┌ Trace ("),
         ] {
             app.go_to(page);
-            let list = |app: &mut App| pane_text(&screen(app, 150, 30, SOON), title);
-            assert!(!list(&mut app).contains("10:00:0"));
+            let list = |app: &mut App| pane_text(&screen(app, 150, 30, LATER), title);
+            assert!(!list(&mut app).contains("11-02 10:00"));
             app.toggle_time();
-            assert!(list(&mut app).contains("10:00:0"));
+            assert!(list(&mut app).contains("11-02 10:00"));
             app.toggle_time();
         }
     }
@@ -2464,6 +2511,7 @@ mod tests {
             live: false,
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         app.go_to(Page::Subagents);
 
@@ -2762,6 +2810,7 @@ mod tests {
             live: false,
             socket_dir: None,
             time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
         });
         let sessions = screen(&mut app, 120, 20, LATER);
         assert!(sessions.contains("0 sessions"), "{sessions}");
