@@ -58,7 +58,7 @@ for session in store.sessions() {
 
 | crate | role |
 | --- | --- |
-| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `pricing` (embedded price table) |
+| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the `iktinos` binary: a small terminal viewer |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
@@ -79,7 +79,8 @@ Each list page is a list over a detail pane, in fixed proportions:
   its tokens and cost by model and by source, and its rate limits.
 - **2:Tool calls** — recent tool calls, the latest first: what ran, how long
   it took, how it ended. The detail pane shows the whole command, every line
-  of it, a shell command in colour.
+  of it, a shell command in colour, and under it the start of what the call
+  returned (`o` reads all of it).
 - **3:Subagents** — subagents with their type, task, model, tokens and cost;
   the detail is two panes, the subagent with its own tool calls and, beside
   it, the call chosen there with its whole command.
@@ -114,6 +115,7 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `l`, `h` in the trace | the pane on the right, and back (`h` in the tree or under a session goes to the row above first) |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
+| `o` on a tool call | read its whole output from the transcript and show it; again, the excerpt |
 | `T` | show times as a local date and time, or as how long ago (`--time clock` or `--time relative` sets which to start with; with `clock`, what is newer than `--ago`, an hour unless told otherwise, is still shown as how long ago) |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
 | `r`, `?`, `q` | refresh, help, quit |
@@ -136,9 +138,18 @@ timestamp; accumulated fields are folded once from the transcript offsets. No
 field is written by both inputs, so arrival order never changes the result.
 
 Text is modelled where a view needs it (a title, the last prompt, the first
-line of each recent prompt, a subagent's description). The crates never log record contents themselves, and a session
-keeps bounded recent activity, not its whole history: its latest tool calls,
-and its latest interactions as a trace.
+line of each recent prompt, a subagent's description, what a tool call was
+about and, in a store that asks for it, the start of what the call returned).
+The crates never log record contents themselves, and a session keeps bounded
+recent activity, not its whole history: its latest tool calls, and its latest
+interactions as a trace.
+
+What a tool returned is kept in two tiers. A store that asks for it
+(`SessionStore::with_tool_output`) keeps the first characters of each call's
+output; a store that does not keeps none. The whole output is never kept:
+`output::read_tool_output` reads it again from the session's files when
+someone wants to see it, including one Claude Code moved to a file of its own,
+and hands it to the caller.
 
 ## The trace
 

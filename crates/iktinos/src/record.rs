@@ -267,9 +267,16 @@ impl User {
     fn from_object(obj: &Map<String, Value>) -> Self {
         let tool_results = content_blocks(obj)
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .collect::<Vec<_>>();
+        // `toolUseResult` is the record's, so it is one result's only when
+        // the record holds one.
+        let extra = obj.get("toolUseResult").filter(|_| tool_results.len() == 1);
+        let tool_results = tool_results
+            .into_iter()
             .map(|b| ToolResult {
                 tool_use_id: string(b, "tool_use_id"),
                 is_error: b.get("is_error").and_then(Value::as_bool),
+                output: ToolOutput::excerpt(&output_parts(b, extra), OUTPUT_CHARS),
             })
             .collect::<Vec<_>>();
         let is_meta = flag(obj, "isMeta");
@@ -306,6 +313,171 @@ pub struct ToolResult {
     pub tool_use_id: Option<String>,
     /// `is_error` as written; often absent on success.
     pub is_error: Option<bool>,
+    /// What the tool returned, cut to [`OUTPUT_CHARS`]. `None` for a result
+    /// that says nothing.
+    pub output: Option<ToolOutput>,
+}
+
+/// The most of a tool's output a view keeps, in characters (of its text,
+/// and of its stderr).
+pub const OUTPUT_CHARS: usize = 4000;
+
+/// What a tool returned, as much of it as a view shows. The whole of it is
+/// read again from the transcript when it is asked for
+/// ([`read_tool_output`](crate::output::read_tool_output)).
+#[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ToolOutput {
+    /// The start of the text: the `content` of the `tool_result` block (a
+    /// string, or its text blocks joined), else `toolUseResult`'s `stdout`.
+    pub text: String,
+    /// The start of `toolUseResult`'s `stderr`, where it holds anything.
+    pub stderr: Option<String>,
+    /// The text or the stderr is longer than what is kept here.
+    pub truncated: bool,
+    /// The characters and the lines of the whole text.
+    pub chars: usize,
+    pub lines: usize,
+    /// The tool was interrupted.
+    pub interrupted: bool,
+    /// Blocks that are not text (an image, …): how many there were.
+    pub other_blocks: usize,
+}
+
+/// `Debug` says how much there is, not what: a tool's output is the user's
+/// data and must not reach a log through a stray `{:?}`.
+impl fmt::Debug for ToolOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolOutput")
+            .field("chars", &self.chars)
+            .field("lines", &self.lines)
+            .field("stderr", &self.stderr.is_some())
+            .field("truncated", &self.truncated)
+            .field("interrupted", &self.interrupted)
+            .field("other_blocks", &self.other_blocks)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolOutput {
+    /// The first `max` characters of what a result holds. `None` when it
+    /// holds nothing at all.
+    pub(crate) fn excerpt(parts: &OutputParts, max: usize) -> Option<Self> {
+        let stderr = parts.stderr.filter(|text| !text.trim().is_empty());
+        if parts.text.is_empty()
+            && stderr.is_none()
+            && !parts.interrupted
+            && parts.other_blocks == 0
+        {
+            return None;
+        }
+        let (text, text_cut) = first_chars(&parts.text, max);
+        let stderr = stderr.map(|stderr| first_chars(stderr, max));
+        Some(Self {
+            truncated: text_cut || stderr.as_ref().is_some_and(|(_, cut)| *cut),
+            text,
+            stderr: stderr.map(|(stderr, _)| stderr),
+            chars: parts.text.chars().count(),
+            lines: parts.text.lines().count(),
+            interrupted: parts.interrupted,
+            other_blocks: parts.other_blocks,
+        })
+    }
+
+    /// This output with at most `max` characters of its text and of its
+    /// stderr.
+    pub fn cut_to(&self, max: usize) -> Self {
+        let (text, text_cut) = first_chars(&self.text, max);
+        let stderr = self
+            .stderr
+            .as_deref()
+            .map(|stderr| first_chars(stderr, max));
+        Self {
+            truncated: self.truncated || text_cut || stderr.as_ref().is_some_and(|(_, cut)| *cut),
+            text,
+            stderr: stderr.map(|(stderr, _)| stderr),
+            ..self.clone()
+        }
+    }
+}
+
+/// The first `max` characters of `text`, and whether there were more.
+fn first_chars(text: &str, max: usize) -> (String, bool) {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => (text[..end].to_owned(), true),
+        None => (text.to_owned(), false),
+    }
+}
+
+/// Everything one tool result holds, uncut.
+pub(crate) struct OutputParts<'a> {
+    pub text: std::borrow::Cow<'a, str>,
+    pub stderr: Option<&'a str>,
+    pub interrupted: bool,
+    pub other_blocks: usize,
+}
+
+/// The text blocks of `blocks` joined, and how many blocks are not text.
+fn text_blocks(blocks: &[Value]) -> (String, usize) {
+    let mut text = String::new();
+    let mut others = 0;
+    for block in blocks {
+        match block.get("text").and_then(Value::as_str) {
+            Some(part) if block.get("type").and_then(Value::as_str) == Some("text") => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(part);
+            }
+            _ => others += 1,
+        }
+    }
+    (text, others)
+}
+
+/// What a `tool_result` block and, where it is this result's, the record's
+/// `toolUseResult` hold. The block's `content` is what the model was given;
+/// `toolUseResult` is Claude Code's own record of the call, whose shape
+/// depends on the tool: an object with `stdout` / `stderr` / `interrupted`
+/// for a command, a string for an error, an array of blocks for an MCP tool.
+pub(crate) fn output_parts<'a>(
+    block: &'a Map<String, Value>,
+    tool_use_result: Option<&'a Value>,
+) -> OutputParts<'a> {
+    use std::borrow::Cow;
+    let (mut text, mut other_blocks) = match block.get("content") {
+        Some(Value::String(text)) => (Cow::Borrowed(text.as_str()), 0),
+        Some(Value::Array(blocks)) => {
+            let (text, others) = text_blocks(blocks);
+            (Cow::Owned(text), others)
+        }
+        _ => (Cow::Borrowed(""), 0),
+    };
+    let (mut stderr, mut interrupted) = (None, false);
+    match tool_use_result {
+        Some(Value::Object(result)) => {
+            stderr = result.get("stderr").and_then(Value::as_str);
+            interrupted = result.get("interrupted").and_then(Value::as_bool) == Some(true);
+            if text.is_empty() {
+                if let Some(stdout) = result.get("stdout").and_then(Value::as_str) {
+                    text = Cow::Borrowed(stdout);
+                }
+            }
+        }
+        Some(Value::String(result)) if text.is_empty() => text = Cow::Borrowed(result),
+        Some(Value::Array(blocks)) if text.is_empty() && other_blocks == 0 => {
+            let (joined, others) = text_blocks(blocks);
+            text = Cow::Owned(joined);
+            other_blocks = others;
+        }
+        _ => {}
+    }
+    OutputParts {
+        text,
+        stderr,
+        interrupted,
+        other_blocks,
+    }
 }
 
 impl ToolResult {

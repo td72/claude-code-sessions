@@ -16,9 +16,12 @@
 //! is written by both, so arrival order never changes the result.
 //!
 //! Text is modelled where a view needs it (a title, the last prompt, the first
-//! line of each recent prompt, a subagent's description). The crates never log record contents themselves, and a session
-//! keeps bounded recent activity (its latest tool calls and interactions), not its
-//! whole history.
+//! line of each recent prompt, a subagent's description, what a tool call was
+//! about and, in a store that asks for it, the start of what the call
+//! returned). The crates never log record contents themselves, and a session
+//! keeps bounded recent activity (its latest tool calls and interactions), not
+//! its whole history. A tool call's whole output is read again from the
+//! transcript when it is asked for, and kept nowhere.
 //!
 //! # Example
 //!
@@ -65,6 +68,7 @@
 //! | [`tail`] | offset-based line reading: load what is needed from the end, then follow appends |
 //! | [`session`] | the fold of records into `Session` / `SessionStore` |
 //! | [`trace`] | a session's latest interactions as trees of spans: LLM requests, tool calls, subagents |
+//! | [`output`] | the whole output of one tool call, read again from the transcript on demand |
 //! | [`pricing`] | the embedded price table and context windows |
 
 pub mod record;
@@ -76,5 +80,7 @@ pub mod tail;
 pub mod session;
 
 pub mod trace;
+
+pub mod output;
 
 pub mod pricing;

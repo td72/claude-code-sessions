@@ -44,9 +44,10 @@
 //! interactions it was active in have gone.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::pricing::Tokens;
-use crate::record::Timestamp;
+use crate::record::{Timestamp, ToolOutput};
 use crate::session::{Session, Subagent, ToolCall};
 
 /// How many of its latest interactions a session keeps unless told
@@ -195,7 +196,13 @@ impl Thread {
     }
 
     /// The result of a tool call arrived.
-    pub(crate) fn result(&mut self, tool_use_id: &str, at: Option<Timestamp>, success: bool) {
+    pub(crate) fn result(
+        &mut self,
+        tool_use_id: &str,
+        at: Option<Timestamp>,
+        success: bool,
+        output: Option<Arc<ToolOutput>>,
+    ) {
         let found = self
             .spans
             .iter_mut()
@@ -210,6 +217,7 @@ impl Thread {
             *ended_at = at;
             call.success = Some(success);
             call.duration_ms = between(started_at, at);
+            call.output = output;
         }
     }
 

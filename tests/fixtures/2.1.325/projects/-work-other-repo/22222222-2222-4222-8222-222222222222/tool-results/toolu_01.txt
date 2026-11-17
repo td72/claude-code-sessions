@@ -1,1 +1,2 @@
-SYNTHETIC-TEXT tool output kept on disk
+Synthetic whole output of toolu_01
+kept on disk, line two
