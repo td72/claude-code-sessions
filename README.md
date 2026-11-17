@@ -94,7 +94,9 @@ Each list page is a list over a detail pane, in fixed proportions:
   The interactions are listed under their sessions, a session's row
   starting with where it runs; `t` lists them all together instead, the
   latest first. A row says what was asked (the first line of the prompt),
-  or, where the prompt is not known, the tools that were used.
+  or, where the prompt is not known, the tools that were used. On a
+  session's row the pane beside the list describes the session, and there
+  is no tree.
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 

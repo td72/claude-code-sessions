@@ -755,20 +755,26 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
     draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
 }
 
-/// The pane beside the interactions: the interaction under the cursor, or, with the focus
-/// in its tree, the span chosen there.
+/// The pane beside the interactions: the interaction or the session under the cursor, or,
+/// with the focus in an interaction's tree, the span chosen there.
 fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
     let chosen = app.selected_span().filter(|_| app.in_tree());
-    let (title, lines) = match (chosen, app.selected_interaction()) {
+    let under = app.selected_list_row();
+    let (title, lines) = match (chosen, under.map(|row| (row.session, row.interaction))) {
         (Some(row), _) => ("Span", trace_lines(app, &row, now, width)),
+        // A session's row: the session, as the Sessions page describes it.
+        (None, Some((session, None))) => ("Session", session_lines(app, session, now, width)),
         (
             None,
-            Some(InteractionRow {
-                session,
-                interaction,
-                end,
-            }),
+            Some((
+                _,
+                Some(InteractionRow {
+                    session,
+                    interaction,
+                    end,
+                }),
+            )),
         ) => {
             // The interaction's end with its subagents, where it has spans.
             let end = app
@@ -932,6 +938,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     if count == 0 {
         let text = if app.selected_interaction().is_some() {
             "nothing was read of this interaction but its prompt"
+        } else if app.selected_list_row().is_some() {
+            "a session: the tree is of one of its interactions"
         } else {
             "no interactions"
         };
@@ -2540,16 +2548,26 @@ mod tests {
         // The panes still show the interaction the cursor was on.
         assert!(tree.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
 
-        // Folded, a session is one row; the panes show its latest
-        // interaction.
+        // On a session's row the panes are about the session, not about
+        // one of its interactions: the session beside the list, no tree.
         app.leave_detail();
+        let on_session = screen(&mut app, 150, 44, SOON);
+        assert!(
+            !on_session.contains("┌ Interaction: 3 LLM requests"),
+            "{on_session}"
+        );
+        assert!(on_session.contains("a session: the tree is of one of its interactions"));
+        assert!(!on_session.contains("took      8.0s"), "{on_session}");
+        assert!(pane_text(&on_session, "┌ Session ").contains("22222222"));
+
+        // Folded, a session is one row, and the panes say the same.
         app.enter();
         let folded = screen(&mut app, 150, 44, SOON);
         let list = pane_text(&folded, "┌ Trace (3 interactions · by session)");
         assert!(list.contains("▸ other.repo  22222222"), "{folded}");
         assert!(!list.contains("8.0s"));
-        assert!(folded.contains("┌ Interaction: 3 LLM requests, 3 tool calls"));
-        assert!(pane_text(&folded, "┌ Interaction ─").contains("took      8.0s"));
+        assert!(folded.contains("a session: the tree is of one of its interactions"));
+        assert!(pane_text(&folded, "┌ Session ").contains("22222222"));
     }
 
     #[test]

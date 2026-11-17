@@ -802,13 +802,9 @@ impl App {
     }
 
     /// The interaction the Trace page's other panes show: the one under the
-    /// cursor, or, on a session's row, the session's latest.
+    /// cursor. None on a session's row, which is about the session.
     pub fn selected_interaction(&self) -> Option<InteractionRow<'_>> {
-        let row = self.selected_list_row()?;
-        row.interaction.or_else(|| {
-            let latest = row.session.trace.back()?;
-            Some(interaction_row(row.session, latest))
-        })
+        self.selected_list_row()?.interaction
     }
 
     /// `t`: the Trace page's list by session, or flat again. The cursor
@@ -817,9 +813,13 @@ impl App {
         if self.page != Page::Trace {
             return;
         }
-        let on = self
-            .selected_interaction()
-            .map(|row| (row.session.id.clone(), row.interaction.id.clone()));
+        let on = self.selected_list_row().and_then(|row| {
+            let interaction = match row.interaction {
+                Some(under) => under.interaction,
+                None => row.session.trace.back()?,
+            };
+            Some((row.session.id.clone(), interaction.id.clone()))
+        });
         self.by_session = !self.by_session;
         // The session of that interaction is unfolded, so it has a row.
         if let Some((session, _)) = &on {
@@ -942,13 +942,13 @@ impl App {
     }
 
     /// `l`: on the Trace page, to the pane on the right, which shows the
-    /// interaction (from the list) or the span chosen (from the tree).
-    /// Elsewhere: one pane further in.
+    /// interaction or the session (from the list) or the span chosen (from
+    /// the tree). Elsewhere: one pane further in.
     pub fn right(&mut self) {
         if self.page != Page::Trace {
             self.focus_detail();
         } else if !self.in_detail {
-            if self.selected_interaction().is_some() {
+            if self.selected_list_row().is_some() {
                 self.in_detail = true;
                 self.call_focus = true;
                 self.from_list = true;
@@ -2155,14 +2155,12 @@ pub mod tests {
         assert_eq!(app.trace_selected, 3);
         assert_eq!(tree(&app).len(), 8);
 
-        // On a session's row the other panes show its latest interaction.
+        // On a session's row the other panes are about the session: no
+        // interaction, no tree.
         app.leave_detail(); // `h`: to the session the interaction is under
         assert_eq!(app.trace_selected, 2);
-        assert_eq!(
-            app.selected_interaction().unwrap().interaction.id,
-            "prompt-u1"
-        );
-        assert_eq!(tree(&app).len(), 8);
+        assert!(app.selected_interaction().is_none());
+        assert!(tree(&app).is_empty());
         // `h` and `l` fold nothing.
         app.leave_detail();
         assert_eq!(listed(&app).len(), 6);
@@ -2185,7 +2183,7 @@ pub mod tests {
             ]
         );
         assert!(!app.in_detail);
-        assert_eq!(tree(&app).len(), 8, "its latest interaction still");
+        assert!(tree(&app).is_empty(), "a session has no tree");
         app.enter();
         assert_eq!(listed(&app).len(), 6);
         app.move_by(1);
