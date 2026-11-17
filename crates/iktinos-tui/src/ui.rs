@@ -8,9 +8,9 @@ use std::time::Duration;
 use ratatui::buffer::Buffer;
 use unicode_width::UnicodeWidthStr;
 
-use iktinos::record::Timestamp;
-use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
-use iktinos::trace::{between, Interaction, Item, LlmRequest, SpanKind};
+use iktinos_core::record::Timestamp;
+use iktinos_core::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
+use iktinos_core::trace::{between, Interaction, Item, LlmRequest, SpanKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -3197,7 +3197,7 @@ mod tests {
     fn on_call(id: &str) -> App {
         let mut app = App::new(Config {
             projects_dir: crate::app::tests::fixtures()
-                .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                .join(iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION)
                 .join("output"),
             live: false,
             socket_dir: None,
@@ -3357,7 +3357,7 @@ mod tests {
         let with = |ago_within: std::time::Duration| {
             let mut app = App::new(Config {
                 projects_dir: crate::app::tests::fixtures()
-                    .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                    .join(iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION)
                     .join("projects"),
                 live: false,
                 socket_dir: None,
@@ -3997,7 +3997,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&socket_dir);
         let mut app = App::new(Config {
             projects_dir: fixtures()
-                .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                .join(iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION)
                 .join("projects"),
             live: true,
             socket_dir: Some(socket_dir.clone()),
@@ -4398,7 +4398,7 @@ mod tests {
     fn responses_app() -> App {
         let mut app = App::new(Config {
             projects_dir: crate::app::tests::fixtures()
-                .join(iktinos::record::KNOWN_CLAUDE_CODE_VERSION)
+                .join(iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION)
                 .join("responses"),
             ..crate::app::tests::fixture_config()
         });

@@ -1,9 +1,12 @@
-//! `iktinos`: a terminal viewer for the Claude Code sessions on this machine.
-//! Sessions, recent tool calls, subagents, the trace of the latest interactions and
-//! usage, a page each, over
-//! `iktinos::session::SessionStore`, with the live layer when the bridge mod
-//! is installed. Its pages and keys follow vig, which renders the same model
-//! as a page of its own.
+//! The terminal viewer of `iktinos`: the Claude Code sessions on this
+//! machine. The trace of the latest interactions, sessions, recent tool
+//! calls, subagents and usage, a page each, over
+//! `iktinos_core::session::SessionStore`, with the live layer when the bridge
+//! mod is installed. Its pages and keys follow vig, which renders the same
+//! model as a page of its own.
+//!
+//! A library with one way in, [`run`]: the `iktinos` command (the `iktinos`
+//! crate) calls it. Up to 0.2 this crate held the command itself.
 //!
 //! Read-only: it reads the transcripts and its configuration file, and
 //! listens on its own socket.
@@ -21,7 +24,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use iktinos::discover::default_projects_dir;
+use iktinos_core::discover::default_projects_dir;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use app::{App, Config};
@@ -51,11 +54,18 @@ Options:
   -V, --version             Print version
 ";
 
-fn main() -> ExitCode {
-    let args = match parse_args(env::args().skip(1)) {
+/// Runs the viewer with the command's arguments (without the program's
+/// name) until it is quit. `version` is what `--version` prints: the
+/// command's, which is not this crate's.
+pub fn run(version: &str, args: impl IntoIterator<Item = String>) -> ExitCode {
+    let args = match parse_args(args) {
         Ok(Parsed::Run(args)) => args,
         Ok(Parsed::Print(text)) => {
             print!("{text}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Parsed::Version) => {
+            println!("iktinos {version}");
             return ExitCode::SUCCESS;
         }
         Err(message) => {
@@ -75,7 +85,7 @@ fn main() -> ExitCode {
 
     let mut app = App::new(config);
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut app);
+    let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -86,7 +96,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
     let mut refreshed = Instant::now();
     // The first `g` of `gg`.
     let mut pending_g = false;
@@ -194,6 +204,8 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
 enum Parsed {
     Run(Args),
     Print(String),
+    /// `--version`: the command's version, which the caller knows.
+    Version,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
@@ -239,12 +251,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
                     })?);
             }
             "-h" | "--help" => return Ok(Parsed::Print(USAGE.to_owned())),
-            "-V" | "--version" => {
-                return Ok(Parsed::Print(format!(
-                    "iktinos {}\n",
-                    env!("CARGO_PKG_VERSION")
-                )))
-            }
+            "-V" | "--version" => return Ok(Parsed::Version),
             other => return Err(format!("unexpected argument '{other}'")),
         }
     }
@@ -516,7 +523,9 @@ mod tests {
     #[test]
     fn help_version_and_mistakes() {
         assert_eq!(parse(&["--help"]), Ok(Parsed::Print(USAGE.to_owned())));
-        assert!(matches!(parse(&["-V"]), Ok(Parsed::Print(v)) if v.starts_with("iktinos ")));
+        // The version is the command's: the caller prints it.
+        assert_eq!(parse(&["-V"]), Ok(Parsed::Version));
+        assert_eq!(parse(&["--version"]), Ok(Parsed::Version));
         assert!(parse(&["--projects-dir"])
             .unwrap_err()
             .contains("needs a directory"));

@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iktinos::place::{git_common_dir, is_within, Place};
+use iktinos_core::place::{git_common_dir, is_within, Place};
 
 /// An empty directory of this test's own, resolved (the temporary directory
 /// may be behind a symbolic link).

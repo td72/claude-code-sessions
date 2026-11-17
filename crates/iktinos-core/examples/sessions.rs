@@ -2,7 +2,7 @@
 //! session: numbers only, no titles or prompts.
 //!
 //! ```text
-//! cargo run --release -p iktinos --example sessions [PROJECTS_DIR]
+//! cargo run --release -p iktinos-core --example sessions [PROJECTS_DIR]
 //! ```
 
 use std::env;
@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use iktinos::discover::{default_projects_dir, discover};
-use iktinos::record::{Record, Timestamp};
-use iktinos::session::{Activity, CostSource, SessionStore};
-use iktinos::tail::Tail;
+use iktinos_core::discover::{default_projects_dir, discover};
+use iktinos_core::record::{Record, Timestamp};
+use iktinos_core::session::{Activity, CostSource, SessionStore};
+use iktinos_core::tail::Tail;
 
 fn main() -> ExitCode {
     let Some(dir) = env::args_os()

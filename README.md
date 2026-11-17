@@ -6,8 +6,9 @@ Claude Code keeps one JSON Lines transcript per session under
 `~/.claude/projects/`. This repository turns those files — and, optionally,
 live events from a Claude Code mod — into a model of every session on the
 machine: where it runs, what it is doing, what it has used, which tools and
-subagents it has called. It is a library first; [vig](https://github.com/td72/vig)
-renders it as a page, and a small standalone viewer ships here.
+subagents it has called. It is a library first (`iktinos-core`);
+[vig](https://github.com/td72/vig) renders it as a page, and the `iktinos`
+command is a terminal viewer over it.
 
 ![demo](assets/demo.gif)
 
@@ -16,17 +17,19 @@ renders it as a page, and a small standalone viewer ships here.
 *Iktinos* (ἴκτινος) is ancient Greek for the kite, a bird that circles high
 and watches the ground; it was also the name of an architect of the Parthenon.
 
-> Status: the crates (`iktinos`, `iktinos-live`, `iktinos-tui`) and the mod are
-> implemented and at 0.2. The project was called `claude-code-sessions` in its
+> Status: the crates (`iktinos-core`, `iktinos-live`, `iktinos-tui`, `iktinos`)
+> and the mod are implemented and at 0.3. Up to 0.2 the library was the crate
+> named `iktinos` and the command came with `iktinos-tui`: from 0.3 the
+> library is `iktinos-core` and `cargo install iktinos` installs the command. The project was called `claude-code-sessions` in its
 > first days.
 
 ## Using the crate
 
 ```rust
-use iktinos::discover::{default_projects_dir, discover};
-use iktinos::record::Record;
-use iktinos::session::SessionStore;
-use iktinos::tail::Tail;
+use iktinos_core::discover::{default_projects_dir, discover};
+use iktinos_core::record::Record;
+use iktinos_core::session::SessionStore;
+use iktinos_core::tail::Tail;
 
 let projects = default_projects_dir().ok_or("no home directory")?;
 let mut store = SessionStore::new();
@@ -55,22 +58,23 @@ for session in store.sessions() {
 }
 ```
 
-`examples/sessions.rs` is the same loop with a table at the end, and
-`examples/drift.rs` reports transcript shapes the crate does not know yet.
+`crates/iktinos-core/examples/sessions.rs` is the same loop with a table at
+the end, and `examples/drift.rs` beside it reports transcript shapes the crate does not know yet.
 
 ## Crates
 
 | crate | role |
 | --- | --- |
-| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
+| [`iktinos-core`](crates/iktinos-core) | the library: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `output` (a tool call's whole output, read on demand), `place` (whether a session runs in a directory or in a worktree of its repository), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
-| [`iktinos-tui`](crates/iktinos-tui) | the `iktinos` binary: a small terminal viewer |
+| [`iktinos-tui`](crates/iktinos-tui) | the terminal viewer, as a library |
+| [`iktinos`](crates/iktinos) | the `iktinos` command: the way in. Without a subcommand it starts the viewer |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
 
 ## The viewer
 
 ```bash
-cargo install iktinos-tui     # installs the `iktinos` binary
+cargo install iktinos         # installs the `iktinos` command
 iktinos                       # the sessions on this machine
 iktinos --projects-dir tests/fixtures/2.1.325/projects --no-live
 iktinos --cwd                 # only the sessions of where it was started
@@ -377,14 +381,14 @@ transcript, one count per API response.
 ## Prices
 
 `pricing` embeds a snapshot of Anthropic's first-party price list
-(`crates/iktinos/assets/pricing.json`: input, output, 5 minute and
+(`crates/iktinos-core/assets/pricing.json`: input, output, 5 minute and
 1 hour cache writes, cache reads and the context window per model, plus fast
 mode and Claude Haiku 5.5's long-prompt prices). A model the table does not
 know has no price; it is shown as `—`, never as `$0`.
 
 To refresh the snapshot, copy the rows of the
 [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) into
-the JSON, set `as_of`, and run `cargo test -p iktinos pricing`:
+the JSON, set `as_of`, and run `cargo test -p iktinos-core pricing`:
 the tests reject a table whose rates break the published multipliers (cache
 writes at 1.25× and 2× the input price, output at 5×). Automatic refresh is
 future work.

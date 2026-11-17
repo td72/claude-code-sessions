@@ -3,10 +3,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iktinos::discover::{discover, SessionFiles};
-use iktinos::record::{Record, Timestamp, KNOWN_CLAUDE_CODE_VERSION};
-use iktinos::session::{Session, SessionStore};
-use iktinos::trace::{Item, Node, SpanKind, MAX_SPANS};
+use iktinos_core::discover::{discover, SessionFiles};
+use iktinos_core::record::{Record, Timestamp, KNOWN_CLAUDE_CODE_VERSION};
+use iktinos_core::session::{Session, SessionStore};
+use iktinos_core::trace::{Item, Node, SpanKind, MAX_SPANS};
 
 const ID: &str = "44444444-4444-4444-8444-444444444444";
 const AGENT: &str = "c3d4e5f607182930";
@@ -463,7 +463,7 @@ fn the_first_request_of_a_thread_is_not_marked() {
 
 #[test]
 fn the_whole_of_a_response_is_read_on_demand() {
-    use iktinos::output::read_response;
+    use iktinos_core::output::read_response;
     let (files, _) = responses();
 
     // Every line of the text, not only the first; the thinking is not
@@ -490,7 +490,7 @@ fn the_whole_of_a_response_is_read_on_demand() {
     let ids: Vec<String> = read(&files.transcript.path)
         .iter()
         .filter_map(|record| match record.view() {
-            iktinos::record::View::Assistant(assistant) => assistant.message_id.clone(),
+            iktinos_core::record::View::Assistant(assistant) => assistant.message_id.clone(),
             _ => None,
         })
         .collect();

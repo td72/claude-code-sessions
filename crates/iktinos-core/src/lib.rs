@@ -26,10 +26,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use iktinos::discover::{default_projects_dir, discover};
-//! use iktinos::record::Record;
-//! use iktinos::session::SessionStore;
-//! use iktinos::tail::Tail;
+//! use iktinos_core::discover::{default_projects_dir, discover};
+//! use iktinos_core::record::Record;
+//! use iktinos_core::session::SessionStore;
+//! use iktinos_core::tail::Tail;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let projects = default_projects_dir().ok_or("no home directory")?;

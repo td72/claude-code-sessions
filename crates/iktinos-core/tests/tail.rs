@@ -5,8 +5,8 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use iktinos::record::{View, KNOWN_CLAUDE_CODE_VERSION};
-use iktinos::tail::Tail;
+use iktinos_core::record::{View, KNOWN_CLAUDE_CODE_VERSION};
+use iktinos_core::tail::Tail;
 
 /// A fresh directory under the target directory, one per call.
 fn scratch(name: &str) -> PathBuf {
@@ -305,7 +305,7 @@ fn debug_of_a_line_leaves_its_content_out() {
 #[cfg(feature = "watch")]
 #[test]
 fn the_watcher_reports_a_transcript_that_was_appended_to() {
-    use iktinos::tail::watch::Watcher;
+    use iktinos_core::tail::watch::Watcher;
     use std::time::{Duration, Instant};
 
     let dir = scratch("watch");

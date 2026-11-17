@@ -13,12 +13,12 @@
 //! An event for a session the transcripts have not shown yet creates the
 //! session; its transcript joins it by id when it appears.
 //!
-//! [`Session::live`]: iktinos::session::Session::live
+//! [`Session::live`]: iktinos_core::session::Session::live
 
 use std::path::PathBuf;
 
-use iktinos::record::Timestamp;
-use iktinos::session::{
+use iktinos_core::record::Timestamp;
+use iktinos_core::session::{
     Context, Live, LiveTurn, PendingApproval, RateLimit, RunningTool, SessionStore,
 };
 

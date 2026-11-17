@@ -1,7 +1,7 @@
 //! Surveys a projects directory for transcript shapes the crate does not know.
 //!
 //! ```text
-//! cargo run -p iktinos --example drift [PROJECTS_DIR]
+//! cargo run -p iktinos-core --example drift [PROJECTS_DIR]
 //! ```
 //!
 //! `PROJECTS_DIR` defaults to `~/.claude/projects`. The report holds record
@@ -13,8 +13,8 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use iktinos::record::drift::Drift;
-use iktinos::record::Record;
+use iktinos_core::record::drift::Drift;
+use iktinos_core::record::Record;
 
 fn main() -> ExitCode {
     let dir = match env::args_os().nth(1) {

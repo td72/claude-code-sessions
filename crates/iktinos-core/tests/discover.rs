@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use iktinos::discover::{discover, CwdSource, DiscoverError, SessionFiles};
-use iktinos::record::KNOWN_CLAUDE_CODE_VERSION;
+use iktinos_core::discover::{discover, CwdSource, DiscoverError, SessionFiles};
+use iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION;
 
 const INDEXED: &str = "11111111-1111-4111-8111-111111111111";
 const WITH_SUBAGENTS: &str = "22222222-2222-4222-8222-222222222222";

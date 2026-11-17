@@ -1,7 +1,7 @@
 [package]
 name = "iktinos"
-version = "0.2.0"
-description = "Claude Code sessions as data: read the local transcripts (~/.claude/projects) into a model of every session on the machine"
+version = "0.3.0"
+description = "Watch the Claude Code sessions on this machine: the `iktinos` command, a terminal viewer over the local transcripts"
 readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,23 +9,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 keywords.workspace = true
-categories.workspace = true
-# The integration tests read the workspace fixtures, which are not packaged.
-exclude = ["tests/"]
-
-[features]
-default = []
-# Follow transcript appends with filesystem notifications instead of polling.
-watch = ["dep:notify"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-notify = { version = "8", optional = true }
+iktinos-tui.workspace = true
 
 [lints]
 workspace = true
-
-[package.metadata.docs.rs]
-all-features = true

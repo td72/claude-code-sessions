@@ -5,15 +5,15 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use iktinos::discover::{discover, SessionFiles};
-use iktinos::output::{read_response, read_tool_output, WholeOutput, WholeResponse};
-use iktinos::place::Place;
-use iktinos::record::{Record, Timestamp};
-use iktinos::session::{
+use iktinos_core::discover::{discover, SessionFiles};
+use iktinos_core::output::{read_response, read_tool_output, WholeOutput, WholeResponse};
+use iktinos_core::place::Place;
+use iktinos_core::record::{Record, Timestamp};
+use iktinos_core::session::{
     Activity, CostSource, LiveState, Session, SessionStore, Subagent, ToolCall,
 };
-use iktinos::tail::Tail;
-use iktinos::trace::{Interaction, Item, Span, SpanKind};
+use iktinos_core::tail::Tail;
+use iktinos_core::trace::{Interaction, Item, Span, SpanKind};
 
 use crate::theme::Theme;
 
@@ -84,7 +84,7 @@ impl Config {
             filter: Filter::All,
             active_within: ACTIVE_WITHIN,
             by_session: true,
-            interactions: iktinos::trace::DEFAULT_TRACE_INTERACTIONS,
+            interactions: iktinos_core::trace::DEFAULT_TRACE_INTERACTIONS,
             slow: [Duration::from_secs(10), Duration::from_secs(60)],
             recent_tools: 200,
             output_chars: 2000,
@@ -1988,8 +1988,8 @@ mod live {
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::Receiver;
 
-    use iktinos::record::Timestamp;
-    use iktinos::session::SessionStore;
+    use iktinos_core::record::Timestamp;
+    use iktinos_core::session::SessionStore;
     use iktinos_live::event::{Body, Event};
     use iktinos_live::merge::apply_event;
     use iktinos_live::server::Server;
@@ -2036,8 +2036,8 @@ mod live {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use iktinos::record::KNOWN_CLAUDE_CODE_VERSION;
-    use iktinos::trace::SpanKind;
+    use iktinos_core::record::KNOWN_CLAUDE_CODE_VERSION;
+    use iktinos_core::trace::SpanKind;
     use std::path::Path;
 
     pub const INDEXED: &str = "11111111-1111-4111-8111-111111111111";

@@ -1,7 +1,7 @@
 //! Numbers and times as short text.
 
-use iktinos::record::Timestamp;
-use iktinos::session::{Cost, CostSource};
+use iktinos_core::record::Timestamp;
+use iktinos_core::session::{Cost, CostSource};
 
 /// `812`, `34.5k`, `1.2M`, `3.4B`.
 pub fn tokens(count: u64) -> String {
