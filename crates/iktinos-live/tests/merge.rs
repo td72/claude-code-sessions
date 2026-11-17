@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iktinos::record::{Record, Timestamp, KNOWN_CLAUDE_CODE_VERSION};
-use iktinos::session::{LiveState, Session, SessionStore};
+use iktinos_core::record::{Record, Timestamp, KNOWN_CLAUDE_CODE_VERSION};
+use iktinos_core::session::{LiveState, Session, SessionStore};
 use iktinos_live::event::Event;
 use iktinos_live::merge::apply_event;
 

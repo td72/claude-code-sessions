@@ -4,9 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iktinos::discover::discover;
-use iktinos::record::{Record, Timestamp, KNOWN_CLAUDE_CODE_VERSION};
-use iktinos::session::{Activity, CostSource, Session, SessionStore};
+use iktinos_core::discover::discover;
+use iktinos_core::record::{Record, Timestamp, KNOWN_CLAUDE_CODE_VERSION};
+use iktinos_core::session::{Activity, CostSource, Session, SessionStore};
 
 const ID: &str = "session-under-test";
 

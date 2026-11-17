@@ -6,12 +6,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use iktinos::discover::{discover, SessionFiles};
-use iktinos::output::{read_tool_output, WholeOutput};
-use iktinos::record::drift::Drift;
-use iktinos::record::{Record, ToolOutput, View, KNOWN_CLAUDE_CODE_VERSION, OUTPUT_CHARS};
-use iktinos::session::{Session, SessionStore, ToolCall};
-use iktinos::trace::SpanKind;
+use iktinos_core::discover::{discover, SessionFiles};
+use iktinos_core::output::{read_tool_output, WholeOutput};
+use iktinos_core::record::drift::Drift;
+use iktinos_core::record::{Record, ToolOutput, View, KNOWN_CLAUDE_CODE_VERSION, OUTPUT_CHARS};
+use iktinos_core::session::{Session, SessionStore, ToolCall};
+use iktinos_core::trace::SpanKind;
 
 const ID: &str = "55555555-5555-4555-8555-555555555555";
 const MARKER: &str = "SYNTHETIC-TEXT";

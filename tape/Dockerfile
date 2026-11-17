@@ -11,7 +11,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p iktinos-tui \
+    cargo build --release --locked -p iktinos \
     && cp target/release/iktinos /iktinos
 
 FROM ghcr.io/charmbracelet/vhs:v0.12.1

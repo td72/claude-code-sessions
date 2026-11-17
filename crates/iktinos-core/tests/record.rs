@@ -3,8 +3,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use iktinos::record::drift::Drift;
-use iktinos::record::{
+use iktinos_core::record::drift::Drift;
+use iktinos_core::record::{
     Assistant, Record, Timestamp, TitleSource, Usage, View, KNOWN_CLAUDE_CODE_VERSION,
 };
 

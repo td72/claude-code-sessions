@@ -6,8 +6,8 @@
 # crate to crates.io (Trusted Publishing, no stored token) and then creates
 # the tag and GitHub release `<crate>-v<version>`.
 #
-# Publish order when several crates change: core, then live, then tui — one
-# release pull request each.
+# Publish order when several crates change: core, then live, then tui, then
+# the command (iktinos) — one release pull request each.
 
 name: Release
 

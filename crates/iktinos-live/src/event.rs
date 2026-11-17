@@ -21,7 +21,7 @@
 //! The JSON files under `tests/fixtures/events/` are the contract the mod is
 //! tested against.
 
-use iktinos::record::Timestamp;
+use iktinos_core::record::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this crate reads and writes.

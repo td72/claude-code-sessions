@@ -1,7 +1,7 @@
 [package]
 name = "iktinos-tui"
 version = "0.2.0"
-description = "A small terminal viewer for the Claude Code sessions on this machine"
+description = "The terminal viewer of iktinos, as a library: the `iktinos` command is in the `iktinos` crate"
 readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,9 @@ repository.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "development-tools"]
 
-[[bin]]
-name = "iktinos"
-path = "src/main.rs"
-# The core library's documentation already lives at `iktinos`.
-doc = false
-
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-iktinos.workspace = true
+iktinos-core.workspace = true
 ratatui = "0.30"
 serde = { workspace = true, features = ["derive"] }
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
