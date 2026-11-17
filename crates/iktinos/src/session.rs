@@ -40,11 +40,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::discover::SessionFiles;
 use crate::pricing::{self, Pricing, Tokens};
-use crate::record::{Record, Timestamp, Usage, View};
+use crate::record::{Record, Timestamp, ToolOutput, Usage, View};
 use crate::trace::{Interaction, Thread, DEFAULT_TRACE_INTERACTIONS};
 
 /// How many recent tool calls a session keeps unless told otherwise.
@@ -70,6 +71,8 @@ pub struct SessionStore {
 struct Limits {
     recent_tools: usize,
     interactions: usize,
+    /// The characters of a tool's output a call keeps; 0 for none.
+    tool_output: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +101,7 @@ impl SessionStore {
             limits: Limits {
                 recent_tools: DEFAULT_RECENT_TOOLS,
                 interactions: DEFAULT_TRACE_INTERACTIONS,
+                tool_output: 0,
             },
         }
     }
@@ -105,6 +109,17 @@ impl SessionStore {
     /// Sets how many recent tool calls each session keeps.
     pub fn with_recent_tools(mut self, limit: usize) -> Self {
         self.limits.recent_tools = limit;
+        self
+    }
+
+    /// Keeps the first `chars` characters of what each tool call returned
+    /// ([`ToolCall::output`]), at most
+    /// [`OUTPUT_CHARS`](crate::record::OUTPUT_CHARS). A store keeps none
+    /// unless it is told to: the memory this takes is `chars` for every
+    /// call a session lists or traces. The whole output is read on demand
+    /// ([`read_tool_output`](crate::output::read_tool_output)).
+    pub fn with_tool_output(mut self, chars: usize) -> Self {
+        self.limits.tool_output = chars;
         self
     }
 
@@ -668,6 +683,10 @@ pub struct ToolCall {
     pub duration_ms: Option<u64>,
     /// `None` until the result is seen.
     pub success: Option<bool>,
+    /// The start of what the tool returned, in a store that keeps it
+    /// ([`SessionStore::with_tool_output`]). The call in the list of recent
+    /// calls and the same call in the trace share one.
+    pub output: Option<Arc<ToolOutput>>,
 }
 
 /// One subagent of a session.
@@ -905,6 +924,7 @@ impl Entry {
                         started_at: at,
                         duration_ms: None,
                         success: None,
+                        output: None,
                     };
                     if let Some(thread) = thread.as_mut() {
                         thread.call(call.clone());
@@ -952,11 +972,17 @@ impl Entry {
                     }
                 }
                 for result in &user.tool_results {
+                    // One excerpt, shared by the call's two places.
+                    let output = result
+                        .output
+                        .as_ref()
+                        .filter(|_| limit.tool_output > 0)
+                        .map(|output| Arc::new(output.cut_to(limit.tool_output)));
                     if let (Some(id), Some(thread)) = (
                         result.tool_use_id.as_deref(),
                         session.thread_mut(agent, at, limit.interactions),
                     ) {
-                        thread.result(id, at, result.success());
+                        thread.result(id, at, result.success(), output.clone());
                     }
                     let call = result
                         .tool_use_id
@@ -964,6 +990,7 @@ impl Entry {
                         .and_then(|id| session.recent_tools.iter_mut().rev().find(|c| c.id == id));
                     if let Some(call) = call {
                         call.success = Some(result.success());
+                        call.output = output;
                         call.duration_ms = match (call.started_at, at) {
                             (Some(start), Some(end)) => {
                                 Some(end.as_millis().saturating_sub(start.as_millis()).max(0) as u64)

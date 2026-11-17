@@ -302,6 +302,25 @@ impl Drift {
             View::User(_) => {
                 self.keys(kind, obj, &[SHARED_KEYS, USER_KEYS]);
                 self.message(kind, obj, USER_MESSAGE_KEYS);
+                // `toolUseResult` is an object, a string or an array of
+                // blocks, depending on the tool. Anything else is a shape
+                // the output view does not read.
+                let shape = match obj.get("toolUseResult") {
+                    None | Some(Value::Object(_) | Value::String(_)) => None,
+                    Some(Value::Array(blocks)) => blocks
+                        .iter()
+                        .any(|block| !block.is_object())
+                        .then_some("array of non-objects"),
+                    Some(Value::Null) => Some("null"),
+                    Some(Value::Bool(_)) => Some("boolean"),
+                    Some(Value::Number(_)) => Some("number"),
+                };
+                if let Some(shape) = shape {
+                    bump(
+                        &mut self.unknown_keys,
+                        &format!("{kind}.toolUseResult: {shape}"),
+                    );
+                }
             }
             View::Assistant(_) => {
                 self.keys(kind, obj, &[SHARED_KEYS, ASSISTANT_KEYS]);
