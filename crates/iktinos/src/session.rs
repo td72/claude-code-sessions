@@ -45,7 +45,7 @@ use std::time::Duration;
 use crate::discover::SessionFiles;
 use crate::pricing::{self, Pricing, Tokens};
 use crate::record::{Record, Timestamp, Usage, View};
-use crate::trace::{Thread, Turn, DEFAULT_TRACE_TURNS};
+use crate::trace::{Interaction, Thread, DEFAULT_TRACE_INTERACTIONS};
 
 /// How many recent tool calls a session keeps unless told otherwise.
 pub const DEFAULT_RECENT_TOOLS: usize = 20;
@@ -69,7 +69,7 @@ pub struct SessionStore {
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     recent_tools: usize,
-    trace_turns: usize,
+    interactions: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +97,7 @@ impl SessionStore {
             pricing,
             limits: Limits {
                 recent_tools: DEFAULT_RECENT_TOOLS,
-                trace_turns: DEFAULT_TRACE_TURNS,
+                interactions: DEFAULT_TRACE_INTERACTIONS,
             },
         }
     }
@@ -108,10 +108,10 @@ impl SessionStore {
         self
     }
 
-    /// Sets how many of its latest turns each session keeps as a
+    /// Sets how many of its latest interactions each session keeps as a
     /// [trace](crate::trace). 0 keeps none.
-    pub fn with_trace_turns(mut self, limit: usize) -> Self {
-        self.limits.trace_turns = limit;
+    pub fn with_trace_interactions(mut self, limit: usize) -> Self {
+        self.limits.interactions = limit;
         self
     }
 
@@ -273,10 +273,10 @@ pub struct Session {
     pub tool_calls: u64,
     /// The latest tool calls, oldest first, at most the store's limit.
     pub recent_tools: VecDeque<ToolCall>,
-    /// The latest turns, oldest first, at most the store's limit, each with
+    /// The latest interactions, oldest first, at most the store's limit, each with
     /// the spans of its main thread. [`walk`](Session::walk) reads one as a
     /// tree. See [`trace`](crate::trace).
-    pub trace: VecDeque<Turn>,
+    pub trace: VecDeque<Interaction>,
     /// The session's subagents by agent id.
     pub subagents: BTreeMap<String, Subagent>,
     /// What live events have said, if any arrived. Never written by the
@@ -338,17 +338,20 @@ impl Session {
             .or(self.context)
     }
 
-    /// Adds a turn to the trace and drops what is past the limit: the oldest
-    /// turns, and the spans of the subagents that were last active before
-    /// the oldest turn that is kept.
-    fn start_turn(&mut self, turn: Turn, limit: usize) {
-        self.trace.push_back(turn);
+    /// Adds an interaction to the trace and drops what is past the limit: the oldest
+    /// interactions, and the spans of the subagents that were last active before
+    /// the oldest interaction that is kept.
+    fn start_interaction(&mut self, interaction: Interaction, limit: usize) {
+        self.trace.push_back(interaction);
         let mut dropped = false;
         while self.trace.len() > limit {
             self.trace.pop_front();
             dropped = true;
         }
-        let oldest = self.trace.front().and_then(|turn| turn.started_at);
+        let oldest = self
+            .trace
+            .front()
+            .and_then(|interaction| interaction.started_at);
         if let (true, Some(oldest)) = (dropped, oldest) {
             for subagent in self.subagents.values_mut() {
                 if subagent.last_activity.is_some_and(|at| at < oldest) {
@@ -372,14 +375,19 @@ impl Session {
         match agent {
             None => {
                 if self.trace.is_empty() {
-                    // The prompt was not read: a turn without one.
-                    self.trace.push_back(Turn::new(String::new(), at));
+                    // The prompt was not read: an interaction without one.
+                    self.trace.push_back(Interaction::new(String::new(), at));
                 }
-                self.trace.back_mut().map(|turn| &mut turn.thread)
+                self.trace
+                    .back_mut()
+                    .map(|interaction| &mut interaction.thread)
             }
             Some(agent) => {
-                // Older than every turn that is kept, with the trace full.
-                let oldest = self.trace.front().and_then(|turn| turn.started_at);
+                // Older than every interaction that is kept, with the trace full.
+                let oldest = self
+                    .trace
+                    .front()
+                    .and_then(|interaction| interaction.started_at);
                 let gone = self.trace.len() >= limit
                     && matches!((at, oldest), (Some(at), Some(oldest)) if at < oldest);
                 (!gone).then(|| &mut self.subagent_mut(agent).thread)
@@ -680,7 +688,7 @@ pub struct Subagent {
     pub last_activity: Option<Timestamp>,
     pub usage: ModelUsage,
     pub tool_calls: u64,
-    /// Its requests and tool calls, while the turns it was active in are
+    /// Its requests and tool calls, while the interactions it was active in are
     /// kept.
     pub thread: Thread,
 }
@@ -864,11 +872,11 @@ impl Entry {
                     charged = Some((tokens, usd));
                 }
 
-                // The response's span, and under it the calls it makes.
-                let mut thread = session.thread_mut(agent, at, limit.trace_turns);
-                let span = thread.as_mut().and_then(|thread| {
-                    let (index, request) =
-                        thread.respond(assistant.message_id.as_deref(), requested_at, at)?;
+                // The response's span, and after it the calls it makes.
+                let mut thread = session.thread_mut(agent, at, limit.interactions);
+                if let Some(request) = thread.as_mut().and_then(|thread| {
+                    thread.respond(assistant.message_id.as_deref(), requested_at, at)
+                }) {
                     if model.is_some() {
                         request.model = model.map(str::to_owned);
                     }
@@ -882,8 +890,7 @@ impl Entry {
                     if assistant.stop_reason.is_some() {
                         request.stop_reason.clone_from(&assistant.stop_reason);
                     }
-                    Some(index)
-                });
+                }
                 let mut calls = Vec::new();
                 for call in &assistant.tool_uses {
                     let (Some(id), Some(name)) = (&call.id, &call.name) else {
@@ -900,7 +907,7 @@ impl Entry {
                         success: None,
                     };
                     if let Some(thread) = thread.as_mut() {
-                        thread.call(span, call.clone());
+                        thread.call(call.clone());
                     }
                     calls.push(call);
                 }
@@ -922,26 +929,30 @@ impl Entry {
                 if !first_time {
                     return;
                 }
-                // A prompt on the main thread starts a turn. The results of
-                // the turn's tool calls carry the same `promptId`.
+                // A prompt on the main thread starts an interaction. The results of
+                // the interaction's tool calls carry the same `promptId`.
                 let prompts = agent.is_none()
                     && user.tool_results.is_empty()
                     && !user.is_meta
                     && !user.is_compact_summary;
-                if prompts && limit.trace_turns > 0 {
+                if prompts && limit.interactions > 0 {
                     let id = user
                         .prompt_id
                         .clone()
                         .or_else(|| common.uuid.clone())
                         .unwrap_or_default();
-                    if session.trace.back().is_none_or(|turn| turn.id != id) {
-                        session.start_turn(Turn::new(id, at), limit.trace_turns);
+                    if session
+                        .trace
+                        .back()
+                        .is_none_or(|interaction| interaction.id != id)
+                    {
+                        session.start_interaction(Interaction::new(id, at), limit.interactions);
                     }
                 }
                 for result in &user.tool_results {
                     if let (Some(id), Some(thread)) = (
                         result.tool_use_id.as_deref(),
-                        session.thread_mut(agent, at, limit.trace_turns),
+                        session.thread_mut(agent, at, limit.interactions),
                     ) {
                         thread.result(id, at, result.success());
                     }
@@ -979,9 +990,11 @@ impl Entry {
                     && system.subtype.as_deref() == Some("turn_duration")
                 {
                     session.turns += 1;
-                    if let Some(turn) = session.trace.back_mut().filter(|t| t.ended_at.is_none()) {
-                        turn.ended_at = at;
-                        turn.duration_ms = system.duration_ms;
+                    if let Some(interaction) =
+                        session.trace.back_mut().filter(|t| t.ended_at.is_none())
+                    {
+                        interaction.ended_at = at;
+                        interaction.duration_ms = system.duration_ms;
                     }
                 }
             }

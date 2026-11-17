@@ -1,30 +1,47 @@
-//! A session's latest turns as trees of spans: where a turn's time went.
+//! A session's latest interactions as trees of spans: where the time went.
 //!
-//! The hierarchy is turn → API request → tool call → subagent, and under a
-//! subagent its own requests and tool calls:
+//! The names and the hierarchy are those of the traces Claude Code exports
+//! itself through OpenTelemetry (`claude_code.interaction`,
+//! `claude_code.llm_request`, `claude_code.tool`), rebuilt here from the
+//! transcript:
 //!
-//! - A [`Turn`] starts at a prompt on the main thread and ends at Claude
-//!   Code's `turn_duration` record. A turn without one is still running, or
-//!   was cut off: the transcript cannot tell which.
-//! - A [`Request`] span is one API response. It starts at its `api-request`
-//!   record, or at the record before its first block where there is none,
-//!   and ends at its last block. **Its duration is an approximation**: the
-//!   transcript records when blocks were written, not when the API answered.
-//! - A tool call's span runs from its `tool_use` block to its result.
+//! ```text
+//! interaction
+//! ├── LLM request
+//! ├── tool call
+//! │   └── subagent: its LLM requests and tool calls
+//! └── LLM request
+//! ```
+//!
+//! - An [`Interaction`] starts at a prompt on the main thread and ends at
+//!   Claude Code's `turn_duration` record. One without that record is still
+//!   running, or was cut off: the transcript cannot tell which. (The
+//!   transcript calls this a turn. The Agent SDK's `max_turns` counts
+//!   something else, one pass of the agent loop, which here is an LLM
+//!   request and the tool calls that follow it.)
+//! - An [`LlmRequest`] span is one API response. It starts at its
+//!   `api-request` record, or at the record before its first block where
+//!   there is none, and ends at its last block. **Its duration is an
+//!   approximation**: the transcript records when blocks were written, not
+//!   when the API answered.
+//! - A tool call's span runs from its `tool_use` block to its result. LLM
+//!   requests and tool calls are siblings, in the order they happened.
 //! - A subagent hangs under the tool call that spawned it (`toolUseId` in
 //!   its metadata file). One without that link is placed by time, directly
-//!   under the turn it started in.
+//!   under the interaction it started in.
 //!
-//! The spans of the main thread live in the turn, a subagent's in the
-//! [`Subagent`]; each in a [`Thread`], in the order they were read, with the
-//! index of their parent. The tree is put together when it is read
-//! ([`Session::walk`]), so the order the session's files are read in does not
-//! change it.
+//! What the exported traces have and the transcript does not: the time a
+//! tool call waited for approval, hooks, and retries.
 //!
-//! Everything is bounded: a session keeps its latest turns
-//! ([`DEFAULT_TRACE_TURNS`] unless the store is told otherwise), a thread at
-//! most [`MAX_SPANS`] spans, and a subagent's spans go when the turns it was
-//! active in have gone.
+//! The spans of the main thread live in the interaction, a subagent's in
+//! the [`Subagent`]; each in a [`Thread`], in the order they were read. The
+//! tree is put together when it is read ([`Session::walk`]), so the order
+//! the session's files are read in does not change it.
+//!
+//! Everything is bounded: a session keeps its latest interactions
+//! ([`DEFAULT_TRACE_INTERACTIONS`] unless the store is told otherwise), a
+//! thread at most [`MAX_SPANS`] spans, and a subagent's spans go when the
+//! interactions it was active in have gone.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,22 +49,25 @@ use crate::pricing::Tokens;
 use crate::record::Timestamp;
 use crate::session::{Session, Subagent, ToolCall};
 
-/// How many of its latest turns a session keeps unless told otherwise.
-pub const DEFAULT_TRACE_TURNS: usize = 20;
+/// How many of its latest interactions a session keeps unless told
+/// otherwise.
+pub const DEFAULT_TRACE_INTERACTIONS: usize = 20;
 
-/// The most spans one thread (a turn's main thread, or a subagent) keeps.
+/// The most spans one thread (an interaction's main thread, or a subagent)
+/// keeps.
 pub const MAX_SPANS: usize = 500;
 
-/// One turn of the main thread: a prompt and everything done to answer it.
+/// One interaction: a prompt and everything done to answer it.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub struct Turn {
-    /// The prompt's `promptId`, else its record's `uuid`. Empty for a turn
-    /// whose prompt was not read (the transcript was read from the middle).
+pub struct Interaction {
+    /// The prompt's `promptId`, else its record's `uuid`. Empty for an
+    /// interaction whose prompt was not read (the transcript was read from
+    /// the middle).
     pub id: String,
     pub started_at: Option<Timestamp>,
-    /// When Claude Code wrote the turn's duration. `None` for a turn that
-    /// is running or was cut off.
+    /// When Claude Code wrote the interaction's duration. `None` for one
+    /// that is running or was cut off.
     pub ended_at: Option<Timestamp>,
     /// The duration Claude Code measured itself.
     pub duration_ms: Option<u64>,
@@ -55,7 +75,7 @@ pub struct Turn {
     pub thread: Thread,
 }
 
-impl Turn {
+impl Interaction {
     pub(crate) fn new(id: String, started_at: Option<Timestamp>) -> Self {
         Self {
             id,
@@ -76,13 +96,10 @@ pub struct Thread {
     pub dropped: u64,
 }
 
-/// One span: an API request or a tool call.
+/// One span: an LLM request or a tool call.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Span {
-    /// The index, in the same thread, of the span this one is part of: the
-    /// request a tool call came from.
-    pub parent: Option<usize>,
     pub started_at: Option<Timestamp>,
     /// `None` while the span runs, and for one whose end was never read.
     pub ended_at: Option<Timestamp>,
@@ -105,14 +122,14 @@ pub fn between(start: Option<Timestamp>, end: Option<Timestamp>) -> Option<u64> 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum SpanKind {
-    Request(Request),
+    LlmRequest(LlmRequest),
     Tool(ToolCall),
 }
 
 /// One API response.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
-pub struct Request {
+pub struct LlmRequest {
     /// `message.id`: several records are one response.
     pub message_id: Option<String>,
     pub model: Option<String>,
@@ -126,31 +143,30 @@ pub struct Request {
 }
 
 impl Thread {
-    /// A block of a response arrived at `at`: its request span, made if this
-    /// is the first block. `None` when the thread is full.
+    /// A block of a response arrived at `at`: its request, made a span if
+    /// this is the first block. `None` when the thread is full.
     pub(crate) fn respond(
         &mut self,
         message_id: Option<&str>,
         started_at: Option<Timestamp>,
         at: Option<Timestamp>,
-    ) -> Option<(usize, &mut Request)> {
+    ) -> Option<&mut LlmRequest> {
         // The blocks of one response are written together: it is among the
         // last spans if it is there at all.
         let known = message_id.and_then(|id| {
             self.spans.iter().rposition(|span| {
-                matches!(&span.kind, SpanKind::Request(r) if r.message_id.as_deref() == Some(id))
+                matches!(&span.kind, SpanKind::LlmRequest(r) if r.message_id.as_deref() == Some(id))
             })
         });
         let index = match known {
             Some(index) => index,
             None => {
                 self.push(Span {
-                    parent: None,
                     started_at,
                     ended_at: None,
-                    kind: SpanKind::Request(Request {
+                    kind: SpanKind::LlmRequest(LlmRequest {
                         message_id: message_id.map(str::to_owned),
-                        ..Request::default()
+                        ..LlmRequest::default()
                     }),
                 })?;
                 self.spans.len() - 1
@@ -159,15 +175,14 @@ impl Thread {
         let span = &mut self.spans[index];
         span.ended_at = span.ended_at.max(at);
         match &mut span.kind {
-            SpanKind::Request(request) => Some((index, request)),
+            SpanKind::LlmRequest(request) => Some(request),
             SpanKind::Tool(_) => None,
         }
     }
 
-    /// A tool call made by the response at `parent`.
-    pub(crate) fn call(&mut self, parent: Option<usize>, call: ToolCall) {
+    /// A tool call.
+    pub(crate) fn call(&mut self, call: ToolCall) {
         self.push(Span {
-            parent,
             started_at: call.started_at,
             ended_at: None,
             kind: SpanKind::Tool(call),
@@ -201,27 +216,12 @@ impl Thread {
         self.spans.push(span);
         Some(())
     }
-
-    /// The indices of each span's children, and of the spans without a
-    /// parent, in order.
-    fn children(&self) -> (Vec<usize>, Vec<Vec<usize>>) {
-        let mut roots = Vec::new();
-        let mut children = vec![Vec::new(); self.spans.len()];
-        for (index, span) in self.spans.iter().enumerate() {
-            // A parent is always an earlier span; anything else is a root.
-            match span.parent.filter(|parent| *parent < index) {
-                Some(parent) => children[parent].push(index),
-                None => roots.push(index),
-            }
-        }
-        (roots, children)
-    }
 }
 
-/// One row of a turn's tree.
+/// One row of an interaction's tree.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Node<'a> {
-    /// 0 for what hangs directly under the turn.
+    /// 0 for what hangs directly under the interaction.
     pub depth: usize,
     pub item: Item<'a>,
 }
@@ -256,11 +256,12 @@ impl Node<'_> {
 }
 
 impl Session {
-    /// A turn of this session as a tree, depth first: each request, the tool
-    /// calls it made, the subagents those spawned and what they did. Then
-    /// the subagents that started during the turn and are not linked to a
-    /// tool call that is kept.
-    pub fn walk<'a>(&'a self, turn: &'a Turn) -> Vec<Node<'a>> {
+    /// An interaction of this session as a tree, depth first: its LLM
+    /// requests and tool calls in the order they happened, under a tool
+    /// call the subagents it spawned and what they did. Then the subagents
+    /// that started during the interaction and are not linked to a tool
+    /// call that is kept.
+    pub fn walk<'a>(&'a self, interaction: &'a Interaction) -> Vec<Node<'a>> {
         let mut spawned: HashMap<&str, Vec<&Subagent>> = HashMap::new();
         for subagent in self.subagents.values() {
             if let Some(id) = subagent.tool_use_id.as_deref() {
@@ -272,16 +273,16 @@ impl Session {
             placed: HashSet::new(),
             nodes: Vec::new(),
         };
-        walk.thread(&turn.thread, 0);
+        walk.thread(&interaction.thread, 0);
 
-        // The window the turn covers: up to the next turn's start.
+        // The window the interaction covers: up to the next one's start.
         let next = self
             .trace
             .iter()
-            .position(|other| std::ptr::eq(other, turn))
+            .position(|other| std::ptr::eq(other, interaction))
             .and_then(|at| self.trace.get(at + 1))
             .and_then(|next| next.started_at);
-        let within = |subagent: &Subagent| match (subagent.started_at, turn.started_at) {
+        let within = |subagent: &Subagent| match (subagent.started_at, interaction.started_at) {
             (Some(at), Some(start)) => at >= start && next.is_none_or(|next| at < next),
             _ => false,
         };
@@ -308,7 +309,7 @@ impl Session {
         let threads = self
             .trace
             .iter()
-            .map(|turn| &turn.thread)
+            .map(|interaction| &interaction.thread)
             .chain(self.subagents.values().map(|subagent| &subagent.thread));
         threads
             .flat_map(|thread| &thread.spans)
@@ -326,31 +327,17 @@ struct Walk<'a> {
 
 impl<'a> Walk<'a> {
     fn thread(&mut self, thread: &'a Thread, depth: usize) {
-        let (roots, children) = thread.children();
-        // Depth first without recursion over spans: a stack of what is left.
-        let mut stack: Vec<(usize, usize)> = roots.into_iter().rev().map(|i| (i, depth)).collect();
-        while let Some((index, depth)) = stack.pop() {
-            let span = &thread.spans[index];
+        for span in &thread.spans {
             self.nodes.push(Node {
                 depth,
                 item: Item::Span(span),
             });
             if let SpanKind::Tool(call) = &span.kind {
-                for subagent in self
-                    .spawned
-                    .get(call.id.as_str())
-                    .cloned()
-                    .unwrap_or_default()
-                {
+                let spawned = self.spawned.get(call.id.as_str()).cloned();
+                for subagent in spawned.unwrap_or_default() {
                     self.subagent(subagent, depth + 1);
                 }
             }
-            stack.extend(
-                children[index]
-                    .iter()
-                    .rev()
-                    .map(|child| (*child, depth + 1)),
-            );
         }
     }
 

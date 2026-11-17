@@ -9,7 +9,7 @@ use iktinos::discover::{discover, SessionFiles};
 use iktinos::record::{Record, Timestamp};
 use iktinos::session::{Activity, LiveState, Session, SessionStore, Subagent, ToolCall};
 use iktinos::tail::Tail;
-use iktinos::trace::{Item, Span, SpanKind, Turn};
+use iktinos::trace::{Interaction, Item, Span, SpanKind};
 
 /// How recent a record makes a session "active" when no live event says more.
 const ACTIVE_WITHIN: Duration = Duration::from_secs(60);
@@ -44,7 +44,7 @@ pub struct Status {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
-    /// Working: a turn in progress, a tool running, or a fresh record.
+    /// Working: an interaction in progress, a tool running, or a fresh record.
     Busy,
     /// Blocked on a person: a permission prompt.
     NeedsApproval,
@@ -196,7 +196,7 @@ pub struct App {
     /// lists the subagent's calls.
     pub trace_selected: usize,
     /// The row under the cursor of the tree the Trace page shows for its
-    /// turn.
+    /// interaction.
     pub span_selected: usize,
     /// The subagents unfolded in that tree, by session and agent id.
     pub open_agents: HashSet<(String, String)>,
@@ -227,28 +227,28 @@ const RECENT_TOOLS: usize = 200;
 /// How many rows the Tool calls page lists at most.
 const TOOL_ROWS: usize = 500;
 
-/// How many turns the Trace page lists at most.
-const TURN_ROWS: usize = 200;
+/// How many interactions the Trace page lists at most.
+const INTERACTION_ROWS: usize = 200;
 
 /// Which of the lists' scroll positions is the Trace page's tree's.
 pub const TREE: usize = 4;
 
-/// One turn in the Trace page's list.
+/// One interaction in the Trace page's list.
 #[derive(Debug, Clone, Copy)]
-pub struct TurnRow<'a> {
+pub struct InteractionRow<'a> {
     pub session: &'a Session,
-    pub turn: &'a Turn,
-    /// The last moment known of the turn: its end, or the latest of what
+    pub interaction: &'a Interaction,
+    /// The last moment known of the interaction: its end, or the latest of what
     /// was read of its main thread.
     pub end: Option<Timestamp>,
 }
 
-impl TurnRow<'_> {
-    /// The text the turn is searched by: its session and what its main
+impl InteractionRow<'_> {
+    /// The text the interaction is searched by: its session and what its main
     /// thread called.
     fn text(&self) -> String {
-        let mut text = format!("turn {}", label(self.session));
-        for span in &self.turn.thread.spans {
+        let mut text = format!("interaction {}", label(self.session));
+        for span in &self.interaction.thread.spans {
             if let SpanKind::Tool(call) = &span.kind {
                 text.push(' ');
                 text.push_str(&call.name);
@@ -261,14 +261,14 @@ impl TurnRow<'_> {
 }
 
 /// One row of the tree under the Trace page's list: a span or a subagent of
-/// the turn under the cursor.
+/// the interaction under the cursor.
 #[derive(Debug, Clone, Copy)]
 pub struct TraceRow<'a> {
     pub session: &'a Session,
-    pub turn: &'a Turn,
-    /// The last moment known of the turn, subagents included.
-    pub turn_end: Option<Timestamp>,
-    /// 0 for what hangs directly under the turn.
+    pub interaction: &'a Interaction,
+    /// The last moment known of the interaction, subagents included.
+    pub interaction_end: Option<Timestamp>,
+    /// 0 for what hangs directly under the interaction.
     pub depth: usize,
     pub item: TraceItem<'a>,
     /// Whether a row that folds (a subagent) is unfolded. `None` for one
@@ -288,7 +288,7 @@ impl TraceRow<'_> {
         match self.item {
             TraceItem::Span(span) => match &span.kind {
                 SpanKind::Tool(call) => format!("t:{}", call.id),
-                SpanKind::Request(request) => format!(
+                SpanKind::LlmRequest(request) => format!(
                     "r:{}:{}",
                     request.message_id.as_deref().unwrap_or_default(),
                     span.started_at.map_or(0, |at| at.as_millis())
@@ -373,10 +373,10 @@ impl App {
             .then(|| self.selected_call())
             .flatten()
             .map(|call| call.id.clone());
-        let turn = (self.trace_selected > 0)
-            .then(|| self.selected_turn())
+        let interaction = (self.trace_selected > 0)
+            .then(|| self.selected_interaction())
             .flatten()
-            .map(|row| (row.session.id.clone(), row.turn.id.clone()));
+            .map(|row| (row.session.id.clone(), row.interaction.id.clone()));
         let span = (self.span_selected > 0)
             .then(|| self.selected_span().map(|row| row.key()))
             .flatten();
@@ -397,11 +397,11 @@ impl App {
                 .position(|(s, a)| s.id == session && a.agent_id == id);
             self.follow(Page::Subagents, found);
         }
-        if let Some((session, id)) = turn {
+        if let Some((session, id)) = interaction {
             let found = self
-                .trace_turns()
+                .interactions()
                 .iter()
-                .position(|row| row.session.id == session && row.turn.id == id);
+                .position(|row| row.session.id == session && row.interaction.id == id);
             self.follow(Page::Trace, found);
         }
         if let Some(key) = span {
@@ -582,45 +582,50 @@ impl App {
         subagents
     }
 
-    /// The turns of the Trace page, the latest first.
-    pub fn trace_turns(&self) -> Vec<TurnRow<'_>> {
-        let mut turns: Vec<TurnRow> = self
+    /// The interactions of the Trace page, the latest first.
+    pub fn interactions(&self) -> Vec<InteractionRow<'_>> {
+        let mut interactions: Vec<InteractionRow> = self
             .in_scope()
             .into_iter()
             .flat_map(|session| {
-                session.trace.iter().map(move |turn| TurnRow {
+                session.trace.iter().map(move |interaction| InteractionRow {
                     session,
-                    turn,
-                    end: turn.ended_at.or_else(|| {
-                        let spans = turn.thread.spans.iter();
+                    interaction,
+                    end: interaction.ended_at.or_else(|| {
+                        let spans = interaction.thread.spans.iter();
                         spans.filter_map(|s| s.ended_at.or(s.started_at)).max()
                     }),
                 })
             })
             .collect();
-        turns.sort_by(|a, b| {
-            b.turn
+        interactions.sort_by(|a, b| {
+            b.interaction
                 .started_at
-                .cmp(&a.turn.started_at)
+                .cmp(&a.interaction.started_at)
                 .then_with(|| a.session.id.cmp(&b.session.id))
         });
-        turns.truncate(TURN_ROWS);
-        turns
+        interactions.truncate(INTERACTION_ROWS);
+        interactions
     }
 
-    pub fn selected_turn(&self) -> Option<TurnRow<'_>> {
-        self.trace_turns().get(self.trace_selected).copied()
+    pub fn selected_interaction(&self) -> Option<InteractionRow<'_>> {
+        self.interactions().get(self.trace_selected).copied()
     }
 
-    /// The turn under the Trace page's cursor as a tree, in the order
-    /// things happened: its requests, their tool calls, the subagents those
+    /// The interaction under the Trace page's cursor as a tree, in the order
+    /// things happened: its LLM requests and tool calls, the subagents those
     /// spawned and, where one is unfolded, what it did.
     pub fn span_rows(&self) -> Vec<TraceRow<'_>> {
-        let Some(TurnRow { session, turn, .. }) = self.selected_turn() else {
+        let Some(InteractionRow {
+            session,
+            interaction,
+            ..
+        }) = self.selected_interaction()
+        else {
             return Vec::new();
         };
-        let nodes = session.walk(turn);
-        let turn_end = turn.ended_at.or_else(|| {
+        let nodes = session.walk(interaction);
+        let interaction_end = interaction.ended_at.or_else(|| {
             nodes
                 .iter()
                 .filter_map(|n| n.ended_at().or(n.started_at()))
@@ -647,8 +652,8 @@ impl App {
             };
             rows.push(TraceRow {
                 session,
-                turn,
-                turn_end,
+                interaction,
+                interaction_end,
                 depth: node.depth,
                 item,
                 open,
@@ -657,7 +662,7 @@ impl App {
         rows
     }
 
-    /// The row under the cursor of the turn's tree.
+    /// The row under the cursor of the interaction's tree.
     pub fn selected_span(&self) -> Option<TraceRow<'_>> {
         self.span_rows().get(self.span_selected).copied()
     }
@@ -745,7 +750,7 @@ impl App {
             Page::Sessions => self.order.len(),
             Page::Tools => self.tools().len(),
             Page::Subagents => self.subagents().len(),
-            Page::Trace => self.trace_turns().len(),
+            Page::Trace => self.interactions().len(),
             Page::Usage => 0,
         }
     }
@@ -1082,7 +1087,11 @@ impl App {
                     )
                 })
                 .collect(),
-            Page::Trace => self.trace_turns().iter().map(TurnRow::text).collect(),
+            Page::Trace => self
+                .interactions()
+                .iter()
+                .map(InteractionRow::text)
+                .collect(),
             Page::Usage => Vec::new(),
         };
         rows.into_iter().map(|row| row.to_lowercase()).collect()
@@ -1550,7 +1559,7 @@ pub mod tests {
     }
 
     /// Appends a prompt, later than everything else, to the session with
-    /// subagents: a new turn.
+    /// subagents: a new interaction.
     pub fn append_prompt(projects: &Path, id: &str, minute: u8) {
         use std::io::Write;
         let line = format!(
@@ -1563,15 +1572,15 @@ pub mod tests {
         writeln!(file, "{line}").unwrap();
     }
 
-    /// The turns of the Trace page, by id.
-    fn turns(app: &App) -> Vec<String> {
-        app.trace_turns()
+    /// The interactions of the Trace page, by id.
+    fn interactions(app: &App) -> Vec<String> {
+        app.interactions()
             .iter()
-            .map(|row| row.turn.id.clone())
+            .map(|row| row.interaction.id.clone())
             .collect()
     }
 
-    /// The tree of the turn under the cursor as text: indented, with how
+    /// The tree of the interaction under the cursor as text: indented, with how
     /// its rows fold.
     fn tree(app: &App) -> Vec<String> {
         app.span_rows()
@@ -1580,7 +1589,7 @@ pub mod tests {
                 let what = match row.item {
                     TraceItem::Span(span) => match &span.kind {
                         SpanKind::Tool(call) => call.name.clone(),
-                        _ => "request".to_owned(),
+                        _ => "llm_request".to_owned(),
                     },
                     TraceItem::Subagent(subagent) => format!("agent {}", subagent.agent_id),
                 };
@@ -1595,42 +1604,45 @@ pub mod tests {
     }
 
     #[test]
-    fn the_trace_page_lists_turns_over_the_tree_of_one() {
+    fn the_trace_page_lists_interactions_over_the_tree_of_one() {
         let mut app = fixture_app();
         app.go_to(Page::Trace);
-        // Every session's turns, the latest first; the list is never
+        // Every session's interactions, the latest first; the list is never
         // unfolded in place.
-        assert_eq!(turns(&app).len(), 3);
-        assert_eq!(app.selected_turn().unwrap().session.id, UNINDEXED);
+        assert_eq!(interactions(&app).len(), 3);
+        assert_eq!(app.selected_interaction().unwrap().session.id, UNINDEXED);
         assert!(tree(&app).is_empty(), "only its prompt was read");
 
-        // The tree under the list is the turn under the cursor: its
-        // requests, their calls, the subagent under the call that spawned it
+        // The tree under the list is the interaction under the cursor: its
+        // LLM requests and tool calls, the subagent under the call that spawned it
         // and the one placed by time.
         app.move_by(1);
-        assert_eq!(app.selected_turn().unwrap().session.id, WITH_SUBAGENTS);
+        assert_eq!(
+            app.selected_interaction().unwrap().session.id,
+            WITH_SUBAGENTS
+        );
         assert_eq!(
             tree(&app),
             [
-                "request",
-                "  Bash",
-                "  Read",
-                "    + agent a1b2c3d4e5f60718",
-                "request",
-                "  mcp__example__lookup",
-                "request",
+                "llm_request",
+                "Bash",
+                "Read",
+                "  + agent a1b2c3d4e5f60718",
+                "llm_request",
+                "mcp__example__lookup",
+                "llm_request",
                 "+ agent b2c3d4e5f6071829",
             ]
         );
         app.move_by(1);
-        assert_eq!(tree(&app), ["request"]);
+        assert_eq!(tree(&app), ["llm_request"]);
 
         // Narrowed to a session like the pages before it.
         app.go_to(Page::Sessions);
         app.move_by(1);
         app.enter();
         app.go_to(Page::Trace);
-        assert_eq!(turns(&app), ["prompt-u1"]);
+        assert_eq!(interactions(&app), ["prompt-u1"]);
 
         // Enter goes into the tree, where the cursor is on a span.
         assert_eq!(
@@ -1647,10 +1659,10 @@ pub mod tests {
         assert_eq!(
             tree(&app)[3..7],
             [
-                "    - agent a1b2c3d4e5f60718",
-                "      request",
-                "        Grep",
-                "      request",
+                "  - agent a1b2c3d4e5f60718",
+                "    llm_request",
+                "    Grep",
+                "    llm_request",
             ]
         );
         app.enter();
@@ -1676,18 +1688,17 @@ pub mod tests {
         // `h` goes to the row this one is under, then folds it, then leaves
         // the tree.
         app.leave_detail();
-        assert_eq!(app.span_selected, 4);
+        assert_eq!(app.span_selected, 3, "the subagent that made the call");
         assert_eq!(app.call_scroll, 0, "another span starts at its top");
         app.leave_detail();
-        assert_eq!(app.span_selected, 3);
-        app.leave_detail();
-        assert_eq!(tree(&app)[3], "    + agent a1b2c3d4e5f60718");
+        assert_eq!(tree(&app)[3], "  + agent a1b2c3d4e5f60718");
         app.leave_detail();
         assert_eq!(app.span_selected, 2, "the call that spawned it");
         app.leave_detail();
-        assert_eq!(app.span_selected, 0, "the request that made the call");
-        app.leave_detail();
-        assert!(!app.in_detail);
+        assert!(
+            !app.in_detail,
+            "a call is under nothing but the interaction"
+        );
 
         // Tab goes round the three panes.
         app.toggle_focus();
@@ -1697,7 +1708,7 @@ pub mod tests {
         app.toggle_focus();
         assert!(!app.in_detail && !app.call_focus);
 
-        // A search finds a turn by what it called.
+        // A search finds an interaction by what it called.
         app.back();
         assert_eq!(app.scope, None);
         app.start_search();
@@ -1705,7 +1716,7 @@ pub mod tests {
         app.submit_search();
         assert_eq!(app.matches(Page::Trace, now()), [1]);
         assert_eq!(app.trace_selected, 1);
-        // Another turn's tree starts at its top.
+        // Another interaction's tree starts at its top.
         app.focus_detail();
         app.move_by(2);
         app.leave_detail();
@@ -1717,7 +1728,7 @@ pub mod tests {
     }
 
     #[test]
-    fn new_turns_and_spans_do_not_move_the_trace_cursors() {
+    fn new_interactions_and_spans_do_not_move_the_trace_cursors() {
         let projects = scratch_projects("trace-follow");
         let mut app = App::new(Config {
             projects_dir: projects.clone(),
@@ -1730,28 +1741,34 @@ pub mod tests {
         app.move_by(3);
         app.right(); // the subagent, unfolded
         app.move_by(4);
-        assert_eq!(app.selected_turn().unwrap().turn.id, "prompt-u1");
+        assert_eq!(
+            app.selected_interaction().unwrap().interaction.id,
+            "prompt-u1"
+        );
         assert_eq!(app.selected_span().unwrap().key(), "r:msg_2:1793613603800");
         assert_eq!(app.span_selected, 7);
 
-        // A newer turn arrives above it in the list (under the one of a
+        // A newer interaction arrives above it in the list (under the one of a
         // session that is a day later), and the subagent above the cursor
         // makes one more call.
         append_prompt(&projects, "prompt-new", 0);
         append_tool_call(&projects, "toolu_new1", 1);
         append_agent_call(&projects, "toolu_s2", 2, r#"{"command":"ls"}"#);
         app.refresh();
-        assert_eq!(turns(&app)[1..3], ["prompt-new", "prompt-u1"]);
-        assert_eq!(app.selected_turn().unwrap().turn.id, "prompt-u1");
+        assert_eq!(interactions(&app)[1..3], ["prompt-new", "prompt-u1"]);
+        assert_eq!(
+            app.selected_interaction().unwrap().interaction.id,
+            "prompt-u1"
+        );
         assert_eq!(app.trace_selected, 2);
         assert_eq!(app.selected_span().unwrap().key(), "r:msg_2:1793613603800");
         assert_eq!(app.span_selected, 9);
 
-        // The new call is in the new turn, not in the old one.
-        assert!(!tree(&app).contains(&"  Edit".to_owned()));
+        // The new call is in the new interaction, not in the old one.
+        assert!(!tree(&app).contains(&"Edit".to_owned()));
         app.back();
         app.move_by(-1);
-        assert_eq!(tree(&app), ["request", "  Edit"]);
+        assert_eq!(tree(&app), ["llm_request", "Edit"]);
 
         let _ = std::fs::remove_dir_all(projects);
     }

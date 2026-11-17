@@ -1,4 +1,4 @@
-//! The trace: a session's latest turns as trees of spans.
+//! The trace: a session's latest interactions as trees of spans.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,8 +56,8 @@ fn at(time: &str) -> Option<Timestamp> {
 fn line(node: &Node) -> String {
     let what = match node.item {
         Item::Span(span) => match &span.kind {
-            SpanKind::Request(request) => format!(
-                "request {} {}",
+            SpanKind::LlmRequest(request) => format!(
+                "llm_request {} {}",
                 request.query_source.as_deref().unwrap_or("?"),
                 request.stop_reason.as_deref().unwrap_or("?")
             ),
@@ -69,9 +69,9 @@ fn line(node: &Node) -> String {
     format!("{}{what} {:?}", "  ".repeat(node.depth), node.duration_ms())
 }
 
-fn tree(session: &Session, turn: usize) -> Vec<String> {
+fn tree(session: &Session, interaction: usize) -> Vec<String> {
     session
-        .walk(&session.trace[turn])
+        .walk(&session.trace[interaction])
         .iter()
         .map(line)
         .collect()
@@ -80,25 +80,29 @@ fn tree(session: &Session, turn: usize) -> Vec<String> {
 #[test]
 fn turns_are_kept_with_their_own_spans() {
     let session = folded(SessionStore::new(), false);
-    assert_eq!(session.turns, 2, "two turns were completed");
-    let ids: Vec<&str> = session.trace.iter().map(|turn| turn.id.as_str()).collect();
+    assert_eq!(session.turns, 2, "two interactions were completed");
+    let ids: Vec<&str> = session
+        .trace
+        .iter()
+        .map(|interaction| interaction.id.as_str())
+        .collect();
     assert_eq!(ids, ["prompt-t1", "prompt-t2", "prompt-t3"]);
 
     let first = &session.trace[0];
     assert_eq!(first.started_at, at("12:00:00.000"));
     assert_eq!(first.ended_at, at("12:00:05.100"));
     assert_eq!(first.duration_ms, Some(5000));
-    // A request runs from its `api-request` record to its last block, a
-    // tool call from its block to its result.
+    // An LLM request runs from its `api-request` record to its last block,
+    // a tool call from its block to its result; they are siblings.
     assert_eq!(
         tree(&session, 0),
         [
-            "request repl_main_thread tool_use Some(1900)",
-            "  tool Bash Some(true) Some(1000)",
-            "request repl_main_thread end_turn Some(1900)",
+            "llm_request repl_main_thread tool_use Some(1900)",
+            "tool Bash Some(true) Some(1000)",
+            "llm_request repl_main_thread end_turn Some(1900)",
         ]
     );
-    let SpanKind::Request(request) = &first.thread.spans[0].kind else {
+    let SpanKind::LlmRequest(request) = &first.thread.spans[0].kind else {
         panic!()
     };
     assert_eq!(request.model.as_deref(), Some("claude-fable-5-2"));
@@ -108,7 +112,6 @@ fn turns_are_kept_with_their_own_spans() {
         panic!()
     };
     assert_eq!(call.summary.as_deref(), Some("cargo fmt --all"));
-    assert_eq!(first.thread.spans[1].parent, Some(0));
 }
 
 #[test]
@@ -117,16 +120,16 @@ fn a_subagent_hangs_under_the_call_that_spawned_it() {
     assert_eq!(
         tree(&session, 1),
         [
-            "request repl_main_thread tool_use Some(900)",
-            "  tool Agent Some(true) Some(6000)",
-            format!("    subagent {AGENT} Some(4500)").as_str(),
-            "      request agent:builtin:Explore tool_use Some(1400)",
-            "        tool Grep Some(true) Some(500)",
-            "      request agent:builtin:Explore end_turn Some(2400)",
-            "request repl_main_thread end_turn Some(1900)",
+            "llm_request repl_main_thread tool_use Some(900)",
+            "tool Agent Some(true) Some(6000)",
+            format!("  subagent {AGENT} Some(4500)").as_str(),
+            "    llm_request agent:builtin:Explore tool_use Some(1400)",
+            "    tool Grep Some(true) Some(500)",
+            "    llm_request agent:builtin:Explore end_turn Some(2400)",
+            "llm_request repl_main_thread end_turn Some(1900)",
         ]
     );
-    // It is in that turn only.
+    // It is in that interaction only.
     assert!(!tree(&session, 0)
         .iter()
         .any(|line| line.contains("subagent")));
@@ -138,8 +141,8 @@ fn a_subagent_hangs_under_the_call_that_spawned_it() {
     let reversed = folded(SessionStore::new(), true);
     assert_eq!(session.trace, reversed.trace);
     assert_eq!(session.subagents, reversed.subagents);
-    for turn in 0..3 {
-        assert_eq!(tree(&session, turn), tree(&reversed, turn));
+    for interaction in 0..3 {
+        assert_eq!(tree(&session, interaction), tree(&reversed, interaction));
     }
 }
 
@@ -152,8 +155,8 @@ fn a_turn_that_was_cut_off_has_no_end() {
     assert_eq!(
         tree(&session, 2),
         [
-            "request repl_main_thread tool_use Some(1900)",
-            "  tool Bash None None",
+            "llm_request repl_main_thread tool_use Some(1900)",
+            "tool Bash None None",
         ]
     );
 }
@@ -170,13 +173,13 @@ fn a_subagent_without_its_link_is_placed_by_time() {
     assert_eq!(
         tree(session, 1),
         [
-            "request repl_main_thread tool_use Some(900)",
-            "  tool Agent Some(true) Some(6000)",
-            "request repl_main_thread end_turn Some(1900)",
+            "llm_request repl_main_thread tool_use Some(900)",
+            "tool Agent Some(true) Some(6000)",
+            "llm_request repl_main_thread end_turn Some(1900)",
             format!("subagent {AGENT} Some(4500)").as_str(),
-            "  request agent:builtin:Explore tool_use Some(1400)",
-            "    tool Grep Some(true) Some(500)",
-            "  request agent:builtin:Explore end_turn Some(2400)",
+            "  llm_request agent:builtin:Explore tool_use Some(1400)",
+            "  tool Grep Some(true) Some(500)",
+            "  llm_request agent:builtin:Explore end_turn Some(2400)",
         ]
     );
     assert!(tree(session, 0)
@@ -214,10 +217,17 @@ fn reading_the_same_records_again_changes_nothing() {
 #[test]
 fn the_oldest_turns_are_dropped_past_the_limit() {
     for subagent_first in [false, true] {
-        let session = folded(SessionStore::new().with_trace_turns(1), subagent_first);
-        let ids: Vec<&str> = session.trace.iter().map(|turn| turn.id.as_str()).collect();
+        let session = folded(
+            SessionStore::new().with_trace_interactions(1),
+            subagent_first,
+        );
+        let ids: Vec<&str> = session
+            .trace
+            .iter()
+            .map(|interaction| interaction.id.as_str())
+            .collect();
         assert_eq!(ids, ["prompt-t3"]);
-        // The subagent of a dropped turn keeps its totals, not its spans.
+        // The subagent of a dropped interaction keeps its totals, not its spans.
         let subagent = &session.subagents[AGENT];
         assert!(subagent.thread.spans.is_empty(), "{subagent_first}");
         assert_eq!(subagent.usage.responses, 2);
@@ -226,12 +236,12 @@ fn the_oldest_turns_are_dropped_past_the_limit() {
         assert_eq!((session.turns, session.tool_calls), (2, 4));
     }
 
-    let two = folded(SessionStore::new().with_trace_turns(2), false);
+    let two = folded(SessionStore::new().with_trace_interactions(2), false);
     assert_eq!(two.trace.len(), 2);
     assert_eq!(two.subagents[AGENT].thread.spans.len(), 3);
 
     // No trace at all.
-    let none = folded(SessionStore::new().with_trace_turns(0), false);
+    let none = folded(SessionStore::new().with_trace_interactions(0), false);
     assert!(none.trace.is_empty());
     assert!(none.subagents[AGENT].thread.spans.is_empty());
     assert_eq!((none.turns, none.tool_calls), (2, 4));
@@ -259,7 +269,7 @@ fn records_with_missing_keys_do_not_break_the_tree() {
         record(
             r#"{"type":"user","uuid":"x2","timestamp":"2026-11-04T13:00:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_unknown"},{"type":"tool_result"}]}}"#,
         ),
-        // A prompt without `promptId`: its `uuid` names the turn.
+        // A prompt without `promptId`: its `uuid` names the interaction.
         record(
             r#"{"type":"user","uuid":"x3","timestamp":"2026-11-04T13:01:00.000Z","message":{"content":"SYNTHETIC-TEXT"}}"#,
         ),
@@ -267,7 +277,7 @@ fn records_with_missing_keys_do_not_break_the_tree() {
         record(
             r#"{"type":"assistant","uuid":"x4","timestamp":"2026-11-04T13:01:02.000Z","requestRef":"ref-unknown","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
         ),
-        // A turn duration without a duration, twice.
+        // An interaction duration without a duration, twice.
         record(
             r#"{"type":"system","subtype":"turn_duration","uuid":"x5","timestamp":"2026-11-04T13:01:03.000Z"}"#,
         ),
@@ -280,15 +290,19 @@ fn records_with_missing_keys_do_not_break_the_tree() {
     store.apply_records(ID, &records);
     let session = store.get(ID).unwrap();
 
-    let ids: Vec<&str> = session.trace.iter().map(|turn| turn.id.as_str()).collect();
+    let ids: Vec<&str> = session
+        .trace
+        .iter()
+        .map(|interaction| interaction.id.as_str())
+        .collect();
     assert_eq!(ids, ["", "x3"]);
-    // The first response starts where its turn does: nothing was before it.
+    // The first response starts where its interaction does: nothing was before it.
     assert_eq!(
         tree(session, 0),
-        ["request ? ? None", "  tool Read None None"]
+        ["llm_request ? ? None", "tool Read None None"]
     );
     // The second starts at the record before it.
-    assert_eq!(tree(session, 1), ["request ? ? Some(2000)"]);
+    assert_eq!(tree(session, 1), ["llm_request ? ? Some(2000)"]);
     let second = &session.trace[1];
     assert_eq!(second.ended_at, at("13:01:03.000"), "the first end stands");
     assert_eq!(second.duration_ms, None);

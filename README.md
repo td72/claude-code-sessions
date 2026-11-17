@@ -58,7 +58,7 @@ for session in store.sessions() {
 
 | crate | role |
 | --- | --- |
-| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest turns as trees of spans), `pricing` (embedded price table) |
+| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest interactions as trees of spans), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the `iktinos` binary: a small terminal viewer |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
@@ -83,12 +83,13 @@ Each list page is a list over a detail pane, in fixed proportions:
 - **3:Subagents** — subagents with their type, task, model, tokens and cost;
   the detail is two panes, the subagent with its own tool calls and, beside
   it, the call chosen there with its whole command.
-- **4:Trace** — three panes. The latest turns, the latest first; under them
-  the turn under the cursor as a tree: its API requests, the tool calls each
-  made, the subagents those spawned and what they did, each with a bar on a
-  time axis that is as long as the turn; and beside the turns what is
-  chosen: where the turn's time went, or, in the tree, a request's tokens
-  and cost or a call's command.
+- **4:Trace** — three panes. The latest interactions (a prompt and
+  everything done to answer it), the latest first; under them the
+  interaction under the cursor as a tree: its LLM requests and tool calls,
+  the subagents the calls spawned and what they did, each with a bar on a
+  time axis that is as long as the interaction; and beside the list what is
+  chosen: where the interaction's time went, or, in the tree, a request's
+  tokens and cost or a call's command.
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
@@ -103,8 +104,8 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `Enter` on a session | narrow pages 2, 3 and 4 to it and show its tool calls |
 | `Enter` on a subagent | narrow page 2 to it and show its tool calls |
 | `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
-| `j` / `k` in a subagent's detail, or in a turn's tree; then `i` / `Enter` | choose a tool call, or a span; into the pane that shows it |
-| `Enter` / `l`, `h` on a subagent in a turn's tree | unfold it; fold it (`h` elsewhere goes to the row it is under, then out of the tree) |
+| `j` / `k` in a subagent's detail, or in an interaction's tree; then `i` / `Enter` | choose a tool call, or a span; into the pane that shows it |
+| `Enter` / `l`, `h` on a subagent in an interaction's tree | unfold it; fold it (`h` elsewhere goes to the row it is under, then out of the tree) |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
@@ -130,32 +131,37 @@ field is written by both inputs, so arrival order never changes the result.
 Text is modelled where a view needs it (a title, the last prompt, a subagent's
 description). The crates never log record contents themselves, and a session
 keeps bounded recent activity, not its whole history: its latest tool calls,
-and its latest turns as a trace.
+and its latest interactions as a trace.
 
 ## The trace
 
-`Session::trace` holds a session's latest turns (20 unless the store is told
-otherwise), and `Session::walk` reads one as a tree:
+`Session::trace` holds a session's latest interactions (20 unless the store is
+told otherwise), and `Session::walk` reads one as a tree. The names and the
+hierarchy are those of the traces Claude Code exports itself through
+OpenTelemetry (`claude_code.interaction`, `claude_code.llm_request`,
+`claude_code.tool`), rebuilt here from the transcript:
 
 ```
-turn
-├─ API request
-│  ├─ tool call
-│  │  └─ subagent          (the call that spawned it)
-│  │     ├─ API request
-│  │     │  └─ tool call
-│  │     └─ API request
-│  └─ tool call
-└─ API request
+interaction
+├─ LLM request
+├─ tool call
+│  └─ subagent          (the call that spawned it)
+│     ├─ LLM request
+│     ├─ tool call
+│     └─ LLM request
+└─ LLM request
 ```
 
-A turn runs from a prompt to Claude Code's own `turn_duration` record; one
-without it is still running or was cut off, and the transcript cannot tell
-which. A tool call runs from its block to its result. A request runs from its
-`api-request` record to the last block of its response, which is an
-approximation: the transcript records when blocks were written, not when the
-API answered. A subagent hangs under the tool call named in its metadata file,
-or, without one, under the turn it started in.
+An interaction runs from a prompt to Claude Code's own `turn_duration` record;
+one without it is still running or was cut off, and the transcript cannot tell
+which. (The transcript calls this a turn. The Agent SDK's `max_turns` counts
+something else: one pass of the agent loop.) A tool call runs from its block to
+its result. An LLM request runs from its `api-request` record to the last
+block of its response, which is an approximation: the transcript records when
+blocks were written, not when the API answered. A subagent hangs under the
+tool call named in its metadata file, or, without one, under the interaction
+it started in. The time a call waited for approval, hooks and retries are in
+the exported traces and not in the transcript.
 
 Only the transcripts write the trace; what is running right now still comes
 from the live events.

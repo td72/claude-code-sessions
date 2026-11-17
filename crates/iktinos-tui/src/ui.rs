@@ -5,14 +5,16 @@ use std::collections::BTreeMap;
 
 use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
-use iktinos::trace::{between, Item, Request, SpanKind, Turn};
+use iktinos::trace::{between, Interaction, Item, LlmRequest, SpanKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use crate::app::{self, App, LiveStatus, Page, StatusKind, TraceItem, TraceRow, TurnRow, TREE};
+use crate::app::{
+    self, App, InteractionRow, LiveStatus, Page, StatusKind, TraceItem, TraceRow, TREE,
+};
 use crate::format;
 use crate::highlight;
 
@@ -35,12 +37,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
             Page::Tools => draw_tool_list(frame, list, app, now),
             Page::Subagents => draw_subagent_list(frame, list, app, now),
             _ => {
-                // The turns, and beside them what is chosen: the turn, or
+                // The interactions, and beside them what is chosen: the interaction, or
                 // the span chosen in its tree below.
-                let [turns, span] =
+                let [interactions, span] =
                     Layout::horizontal([Constraint::Percentage(50), Constraint::Min(0)])
                         .areas(list);
-                draw_turn_list(frame, turns, app, now);
+                draw_interaction_list(frame, interactions, app, now);
                 draw_span(frame, span, app, now);
             }
         }
@@ -409,15 +411,15 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
     draw_list(frame, area, app, 2, table, selected);
 }
 
-/// Whether a turn is still going: it has no end, it is its session's latest
-/// and the session is at work. The transcript alone cannot tell a turn that
+/// Whether an interaction is still going: it has no end, it is its session's latest
+/// and the session is at work. The transcript alone cannot tell an interaction that
 /// runs from one that was cut off.
-fn turn_runs(session: &Session, turn: &Turn, now: Timestamp) -> bool {
-    turn.ended_at.is_none()
+fn interaction_runs(session: &Session, interaction: &Interaction, now: Timestamp) -> bool {
+    interaction.ended_at.is_none()
         && session
             .trace
             .back()
-            .is_some_and(|last| std::ptr::eq(last, turn))
+            .is_some_and(|last| std::ptr::eq(last, interaction))
         && app::status(session, now).kind == StatusKind::Busy
 }
 
@@ -443,56 +445,66 @@ fn bar(
     format!("{}{}", " ".repeat(first), "█".repeat(last - first))
 }
 
-/// What a turn's main thread did, in a few words.
-fn turn_summary(turn: &Turn) -> String {
-    let spans = &turn.thread.spans;
+/// What an interaction's main thread did, in a few words.
+fn interaction_summary(interaction: &Interaction) -> String {
+    let spans = &interaction.thread.spans;
     let calls = spans
         .iter()
         .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
         .count();
     format!(
         "{}, {}",
-        format::count((spans.len() - calls) as u64, "request"),
+        format::count((spans.len() - calls) as u64, "LLM request"),
         format::count(calls as u64, "tool call")
     )
 }
 
-/// How a turn ended, as far as can be told.
-fn turn_state(session: &Session, turn: &Turn, now: Timestamp) -> (&'static str, Style) {
-    if turn.ended_at.is_some() {
+/// How an interaction ended, as far as can be told.
+fn interaction_state(
+    session: &Session,
+    interaction: &Interaction,
+    now: Timestamp,
+) -> (&'static str, Style) {
+    if interaction.ended_at.is_some() {
         ("done", dim())
-    } else if turn_runs(session, turn, now) {
+    } else if interaction_runs(session, interaction, now) {
         ("running", Style::new().fg(Color::Green))
     } else {
         ("no end", dim())
     }
 }
 
-fn draw_turn_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let matches = app.matches(Page::Trace, now);
     let scoped = app.scope.is_some();
-    let turns = app.trace_turns();
-    let count = turns.len();
-    let rows: Vec<Row<'static>> = turns
+    let interactions = app.interactions();
+    let count = interactions.len();
+    let rows: Vec<Row<'static>> = interactions
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let TurnRow { session, turn, end } = *row;
-            let end = if turn_runs(session, turn, now) {
+            let InteractionRow {
+                session,
+                interaction,
+                end,
+            } = *row;
+            let end = if interaction_runs(session, interaction, now) {
                 Some(now)
             } else {
                 end
             };
-            let took = turn.duration_ms.or_else(|| between(turn.started_at, end));
-            let (state, style) = turn_state(session, turn, now);
-            let when = turn
+            let took = interaction
+                .duration_ms
+                .or_else(|| between(interaction.started_at, end));
+            let (state, style) = interaction_state(session, interaction, now);
+            let when = interaction
                 .started_at
                 .map_or("—".to_owned(), |at| format::ago(now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
             if !scoped {
                 cells.push(session_cell(session));
             }
-            let calls = turn
+            let calls = interaction
                 .thread
                 .spans
                 .iter()
@@ -501,8 +513,8 @@ fn draw_turn_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
             cells.extend([
                 // Short: the list shares its row with the pane beside it.
                 Cell::from(format!(
-                    "{} req, {}",
-                    turn.thread.spans.len() - calls,
+                    "{} llm, {}",
+                    interaction.thread.spans.len() - calls,
                     format::count(calls as u64, "tool")
                 )),
                 Cell::from(
@@ -524,10 +536,10 @@ fn draw_turn_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
         Constraint::Length(7),
         Constraint::Length(7),
     ]);
-    header.extend(["turn", "took", ""]);
+    header.extend(["interaction", "took", ""]);
     let title = list_title(
         app,
-        format!("Trace ({})", format::count(count as u64, "turn")),
+        format!("Trace ({})", format::count(count as u64, "interaction")),
         matches.len(),
     );
     let table = Table::new(rows, widths)
@@ -537,22 +549,38 @@ fn draw_turn_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
     draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
 }
 
-/// The pane beside the turns: the turn under the cursor, or, with the focus
+/// The pane beside the interactions: the interaction under the cursor, or, with the focus
 /// in its tree, the span chosen there.
 fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
     let chosen = app.selected_span().filter(|_| app.in_detail);
-    let (title, lines) = match (chosen, app.selected_turn()) {
+    let (title, lines) = match (chosen, app.selected_interaction()) {
         (Some(row), _) => ("Span", trace_lines(&row, now, width)),
-        (None, Some(TurnRow { session, turn, end })) => {
-            // The turn's end with its subagents, where it has spans.
-            let end = app.span_rows().first().and_then(|row| row.turn_end).or(end);
-            ("Turn", turn_lines(session, turn, end, now))
+        (
+            None,
+            Some(InteractionRow {
+                session,
+                interaction,
+                end,
+            }),
+        ) => {
+            // The interaction's end with its subagents, where it has spans.
+            let end = app
+                .span_rows()
+                .first()
+                .and_then(|row| row.interaction_end)
+                .or(end);
+            (
+                "Interaction",
+                interaction_lines(session, interaction, end, now),
+            )
         }
         (None, None) => (
-            "Turn",
+            "Interaction",
             vec![Line::styled(
-                app.notice.clone().unwrap_or_else(|| "no turns".to_owned()),
+                app.notice
+                    .clone()
+                    .unwrap_or_else(|| "no interactions".to_owned()),
                 dim(),
             )],
         ),
@@ -577,7 +605,7 @@ fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     frame.render_widget(paragraph, area);
 }
 
-/// What a row of the turn's tree is called, and what is said beside it.
+/// What a row of the interaction's tree is called, and what is said beside it.
 fn trace_label(row: &TraceRow) -> (String, Style, String) {
     match row.item {
         TraceItem::Span(span) => match &span.kind {
@@ -586,8 +614,8 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
                 Style::new(),
                 call.summary.clone().unwrap_or_default(),
             ),
-            SpanKind::Request(request) => (
-                "request".to_owned(),
+            SpanKind::LlmRequest(request) => (
+                "llm_request".to_owned(),
                 Style::new().fg(Color::Blue),
                 request
                     .model
@@ -605,8 +633,8 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
     }
 }
 
-/// The pane under the turns: the turn under the cursor as a tree, each row
-/// with a bar on a time axis as long as the turn.
+/// The pane under the interactions: the interaction under the cursor as a tree, each row
+/// with a bar on a time axis as long as the interaction.
 fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     app.viewport.detail_rows = (area.height as usize).saturating_sub(3);
     let inner = area.width.saturating_sub(2) as usize;
@@ -617,17 +645,17 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let rows: Vec<Row<'static>> = listed
         .iter()
         .map(|row| {
-            let runs = turn_runs(row.session, row.turn, now);
-            // The axis: the turn from its start to its end, or to now.
-            let window = row
-                .turn
-                .started_at
-                .zip(if runs { Some(now) } else { row.turn_end });
+            let runs = interaction_runs(row.session, row.interaction, now);
+            // The axis: the interaction from its start to its end, or to now.
+            let window =
+                row.interaction
+                    .started_at
+                    .zip(if runs { Some(now) } else { row.interaction_end });
             let (start, end) = match row.item {
                 TraceItem::Span(span) => (span.started_at, span.ended_at),
                 TraceItem::Subagent(subagent) => (subagent.started_at, subagent.last_activity),
             };
-            // What has not ended reaches to now while the turn runs.
+            // What has not ended reaches to now while the interaction runs.
             let end = end.or(runs.then_some(now));
             let (mark, mark_style, colour) = match row.item {
                 TraceItem::Span(span) => match &span.kind {
@@ -640,7 +668,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                         };
                         (mark.to_owned(), style, colour)
                     }
-                    SpanKind::Request(request) => (
+                    SpanKind::LlmRequest(request) => (
                         request.stop_reason.clone().unwrap_or_default(),
                         dim(),
                         Color::Blue,
@@ -686,16 +714,18 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         })
         .collect();
 
-    let title = match app.selected_turn() {
-        Some(TurnRow { turn, .. }) => format!("Turn: {}", turn_summary(turn)),
-        None => "Turn".to_owned(),
+    let title = match app.selected_interaction() {
+        Some(InteractionRow { interaction, .. }) => {
+            format!("Interaction: {}", interaction_summary(interaction))
+        }
+        None => "Interaction".to_owned(),
     };
     let block = pane_block(title, app.choosing_span());
     if count == 0 {
-        let text = if app.selected_turn().is_some() {
-            "nothing was read of this turn but its prompt"
+        let text = if app.selected_interaction().is_some() {
+            "nothing was read of this interaction but its prompt"
         } else {
-            "no turns"
+            "no interactions"
         };
         frame.render_widget(Paragraph::new(Line::styled(text, dim())).block(block), area);
         return;
@@ -718,13 +748,13 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     draw_list(frame, area, app, TREE, table, selected);
 }
 
-/// The detail of a row of the turn's tree.
+/// The detail of a row of the interaction's tree.
 fn trace_lines(row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     match row.item {
         TraceItem::Span(span) => match &span.kind {
             SpanKind::Tool(call) => tool_lines(row.session, call, now, width),
-            SpanKind::Request(request) => {
-                request_lines(request, span.started_at, span.duration_ms(), now)
+            SpanKind::LlmRequest(request) => {
+                llm_request_lines(request, span.started_at, span.duration_ms(), now)
             }
             _ => Vec::new(),
         },
@@ -734,17 +764,17 @@ fn trace_lines(row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static
     }
 }
 
-/// A turn: how long it took and where the time went.
-fn turn_lines(
+/// An interaction: how long it took and where the time went.
+fn interaction_lines(
     session: &Session,
-    turn: &Turn,
+    interaction: &Interaction,
     end: Option<Timestamp>,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
-    let runs = turn_runs(session, turn, now);
+    let runs = interaction_runs(session, interaction, now);
     let end = if runs { Some(now) } else { end };
     let mut lines = vec![
-        Line::styled("Turn", Style::new().add_modifier(Modifier::BOLD)),
+        Line::styled("Interaction", Style::new().add_modifier(Modifier::BOLD)),
         field(
             "session",
             app::label(session)
@@ -755,7 +785,7 @@ fn turn_lines(
         ),
         field(
             "state",
-            match (turn.ended_at.is_some(), runs) {
+            match (interaction.ended_at.is_some(), runs) {
                 (true, _) => "done",
                 (false, true) => "running",
                 (false, false) => "no end recorded: cut off, or not read to its end",
@@ -763,12 +793,14 @@ fn turn_lines(
             .to_owned(),
         ),
     ];
-    if let Some(at) = turn.started_at {
+    if let Some(at) = interaction.started_at {
         lines.push(field("started", format!("{} ago", format::ago(now, at))));
     }
-    let took = turn.duration_ms.or_else(|| between(turn.started_at, end));
+    let took = interaction
+        .duration_ms
+        .or_else(|| between(interaction.started_at, end));
     if let Some(ms) = took {
-        let note = if turn.duration_ms.is_some() {
+        let note = if interaction.duration_ms.is_some() {
             ""
         } else {
             " so far, by the records read"
@@ -779,7 +811,7 @@ fn turn_lines(
     // Where the time went, on the main thread; a subagent's time is inside
     // the call that spawned it.
     let (mut requests, mut request_ms, mut calls, mut call_ms) = (0u64, 0u64, 0u64, 0u64);
-    for span in &turn.thread.spans {
+    for span in &interaction.thread.spans {
         let ms = span.duration_ms().unwrap_or(0);
         match span.kind {
             SpanKind::Tool(_) => {
@@ -794,9 +826,9 @@ fn turn_lines(
     }
     lines.push(Line::raw(""));
     lines.push(field(
-        "requests",
+        "llm",
         format!(
-            "{requests}, {} in all (approximate)",
+            "{requests} requests, {} in all (approximate)",
             format::duration(request_ms)
         ),
     ));
@@ -811,11 +843,11 @@ fn turn_lines(
 
     // Tokens and cost, subagents included.
     let (mut subagents, mut tokens, mut usd, mut unpriced) = (0u64, 0u64, 0.0, false);
-    for node in session.walk(turn) {
+    for node in session.walk(interaction) {
         match node.item {
             Item::Subagent(_) => subagents += 1,
             Item::Span(span) => {
-                if let SpanKind::Request(request) = &span.kind {
+                if let SpanKind::LlmRequest(request) = &span.kind {
                     if let Some(used) = request.tokens {
                         tokens += used.input
                             + used.output
@@ -846,27 +878,27 @@ fn turn_lines(
             }
         ),
     ));
-    if turn.thread.dropped > 0 {
+    if interaction.thread.dropped > 0 {
         lines.push(field(
             "",
-            format!("{} more spans were not kept", turn.thread.dropped),
+            format!("{} more spans were not kept", interaction.thread.dropped),
         ));
     }
-    if !turn.id.is_empty() {
-        lines.push(field("id", turn.id.clone()));
+    if !interaction.id.is_empty() {
+        lines.push(field("id", interaction.id.clone()));
     }
     lines
 }
 
 /// One API response.
-fn request_lines(
-    request: &Request,
+fn llm_request_lines(
+    request: &LlmRequest,
     started_at: Option<Timestamp>,
     took: Option<u64>,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
-        "API request",
+        "LLM request",
         Style::new().add_modifier(Modifier::BOLD),
     )];
     if let Some(model) = &request.model {
@@ -1234,7 +1266,7 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
         "activity",
         format!(
             "{}, {}, {}",
-            format::count(session.turns, "turn"),
+            format::count(session.turns, "interaction"),
             format::count(session.tool_calls, "tool call"),
             format::count(session.subagents.len() as u64, "subagent"),
         ),
@@ -1606,7 +1638,7 @@ const HELP: &[(&str, &str)] = &[
     ("h / Esc", "back a pane, to the list"),
     (
         "Enter, l / h",
-        "in a turn's tree: unfold or fold a subagent",
+        "in an interaction's tree: unfold or fold a subagent",
     ),
     (
         "Esc (list)",
@@ -1751,7 +1783,7 @@ mod tests {
         assert!(screen.contains("┌ Session "));
         assert!(screen.contains("/work/other.repo"));
         assert!(screen.contains("claude-fable-5-2"));
-        assert!(screen.contains("1 turn, 5 tool calls, 2 subagents"));
+        assert!(screen.contains("1 interaction, 5 tool calls, 2 subagents"));
         assert!(screen.contains("context   6.7k of 1.0M (1%)"));
         assert!(screen.contains("estimated from the price table"));
         assert!(screen.contains("by model"));
@@ -1918,34 +1950,38 @@ mod tests {
     }
 
     #[test]
-    fn the_trace_page_shows_a_turn_as_a_waterfall() {
+    fn the_trace_page_shows_an_interaction_as_a_waterfall() {
         let mut app = fixture_app();
         select(&mut app, WITH_SUBAGENTS);
         app.enter();
         app.go_to(Page::Trace);
 
-        // Three panes: the turns, beside them the turn under the cursor,
+        // Three panes: the interactions, beside them the interaction under the cursor,
         // under them its tree.
         let shown = screen(&mut app, 150, 44, SOON);
         let tops = pane_tops(&shown);
         assert_eq!(tops.len(), 2, "{shown}");
-        assert!(shown.lines().nth(tops[0]).unwrap().contains("┐┌ Turn "));
-        let turns = pane_text(&shown, "┌ Trace (1 turn) of 22222222");
-        assert!(turns.contains("3 req, 3 tools"), "{shown}");
-        assert!(turns.contains("8.0s") && turns.contains("done"));
+        assert!(shown
+            .lines()
+            .nth(tops[0])
+            .unwrap()
+            .contains("┐┌ Interaction "));
+        let interactions = pane_text(&shown, "┌ Trace (1 interaction) of 22222222");
+        assert!(interactions.contains("3 llm, 3 tools"), "{shown}");
+        assert!(interactions.contains("8.0s") && interactions.contains("done"));
         // The list is never unfolded in place.
-        assert!(!turns.contains("cargo test"), "{turns}");
-        assert!(!turns.contains('█'));
+        assert!(!interactions.contains("cargo test"), "{interactions}");
+        assert!(!interactions.contains('█'));
 
-        let turn = pane_text(&shown, "┌ Turn ─");
-        assert!(turn.contains("took      8.0s"), "{shown}");
-        assert!(turn.contains("requests  3, 5.5s in all (approximate)"));
-        assert!(turn.contains("tools     3, 3.7s in all"));
-        assert!(turn.contains("subagents 2"));
-        assert!(turn.contains("id        prompt-u1"));
+        let interaction = pane_text(&shown, "┌ Interaction ─");
+        assert!(interaction.contains("took      8.0s"), "{shown}");
+        assert!(interaction.contains("llm       3 requests, 5.5s in all (approximate)"));
+        assert!(interaction.contains("tools     3, 3.7s in all"));
+        assert!(interaction.contains("subagents 2"));
+        assert!(interaction.contains("id        prompt-u1"));
 
-        // The tree: each span with a bar where it was in the turn.
-        let tree = pane(&shown, "┌ Turn: 3 requests, 3 tool calls");
+        // The tree: each span with a bar where it was in the interaction.
+        let tree = pane(&shown, "┌ Interaction: 3 LLM requests, 3 tool calls");
         let find = |needle: &str| -> &str {
             tree.iter()
                 .find(|line| line.contains(needle))
@@ -1956,7 +1992,10 @@ mod tests {
         assert!(find("/work/example/README.md").contains("failed"));
         assert!(find("▸ ↳ Explore").contains("Synthetic agent task"));
         assert!(find("▸ ↳ agent").contains("b2c3d4e5f6071829"));
-        let requests: Vec<&&str> = tree.iter().filter(|l| l.contains("request  ")).collect();
+        let requests: Vec<&&str> = tree
+            .iter()
+            .filter(|l| l.contains("llm_request  "))
+            .collect();
         assert_eq!(requests.len(), 3, "{shown}");
         assert!(requests[0].contains("fable-5-2") && requests[0].contains("tool_use"));
         assert!(requests[2].contains("end_turn"));
@@ -1964,15 +2003,15 @@ mod tests {
         assert!(bar_at(requests[0]) < bar_at(bash));
         assert!(bar_at(bash) < bar_at(find("synthetic lookup")));
         assert!(bar_at(requests[1]) < bar_at(requests[2]));
-        // The last request ends where the turn does.
+        // The last request ends where the interaction does.
         assert!(requests[2].trim_end_matches('│').ends_with('█'));
 
-        // In the tree, the pane beside the turns shows the span chosen: a
+        // In the tree, the pane beside the interactions shows the span chosen: a
         // request, a call, a subagent.
         app.enter();
         let request = screen(&mut app, 150, 44, SOON);
         let span = pane_text(&request, "┌ Span ");
-        assert!(span.contains("API request"), "{request}");
+        assert!(span.contains("LLM request"), "{request}");
         assert!(span.contains("model     claude-fable-5-2"));
         assert!(span.contains("source    repl_main_thread"));
         assert!(span.contains("stop      tool_use"));
@@ -1986,7 +2025,7 @@ mod tests {
         app.move_by(2);
         app.right();
         let subagent = screen(&mut app, 150, 44, SOON);
-        let tree = pane_text(&subagent, "┌ Turn: ");
+        let tree = pane_text(&subagent, "┌ Interaction: ");
         assert!(tree.contains("▾ ↳ Explore"), "{subagent}");
         assert!(tree.contains("synthetic pattern"));
         assert!(pane_text(&subagent, "┌ Span ").contains("type      Explore"));
@@ -1996,11 +2035,11 @@ mod tests {
         app.back();
         app.back();
         let all = screen(&mut app, 150, 44, SOON);
-        assert!(all.contains("Trace (3 turns)"), "{all}");
-        let turns = pane_text(&all, "┌ Trace (3 turns)");
-        assert!(turns.contains("session") && turns.contains("Synthetic sessio"));
-        // A turn of which only the prompt was read.
-        assert!(all.contains("nothing was read of this turn but its prompt"));
+        assert!(all.contains("Trace (3 interactions)"), "{all}");
+        let interactions = pane_text(&all, "┌ Trace (3 interactions)");
+        assert!(interactions.contains("session") && interactions.contains("Synthetic sessio"));
+        // An interaction of which only the prompt was read.
+        assert!(all.contains("nothing was read of this interaction but its prompt"));
         app.move_by(1);
         let narrow = screen(&mut app, 60, 30, SOON);
         assert!(!narrow.contains('█'), "{narrow}");
@@ -2028,14 +2067,14 @@ mod tests {
         // The subagent's calls are far more than the pane shows.
         let top = screen(&mut app, 150, 40, LATER);
         assert!(
-            pane_text(&top, "┌ Turn: ").contains("synthetic pattern"),
+            pane_text(&top, "┌ Interaction: ").contains("synthetic pattern"),
             "{top}"
         );
-        assert!(!pane_text(&top, "┌ Turn: ").contains("call-39"));
+        assert!(!pane_text(&top, "┌ Interaction: ").contains("call-39"));
         app.move_last();
         let bottom = screen(&mut app, 150, 40, LATER);
         assert!(
-            !pane_text(&bottom, "┌ Turn: ").contains("cargo test"),
+            !pane_text(&bottom, "┌ Interaction: ").contains("cargo test"),
             "{bottom}"
         );
         assert!(bottom.contains("b2c3d4e5f6071829"));
@@ -2043,7 +2082,7 @@ mod tests {
         // Half a page at a time, by what the tree shows.
         assert!(app.viewport.detail_rows > 4);
         assert_eq!(app.half_page() as usize, app.viewport.detail_rows / 2);
-        // Another turn starts at its top.
+        // Another interaction starts at its top.
         app.back();
         app.move_by(1);
         screen(&mut app, 150, 40, LATER);
@@ -2053,7 +2092,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_without_an_end_runs_or_was_cut_off() {
+    fn an_interaction_without_an_end_runs_or_was_cut_off() {
         use crate::app::tests::{append_call, append_prompt, scratch_projects};
         let projects = scratch_projects("trace-running");
         append_prompt(&projects, "prompt-new", 0);
@@ -2070,15 +2109,18 @@ mod tests {
             socket_dir: None,
         });
         app.go_to(Page::Trace);
-        // Under the turn of a session that is a day later.
+        // Under the interaction of a session that is a day later.
         app.move_by(1);
-        assert_eq!(app.selected_turn().unwrap().turn.id, "prompt-new");
+        assert_eq!(
+            app.selected_interaction().unwrap().interaction.id,
+            "prompt-new"
+        );
 
         // Its session was active a moment ago: everything reaches to now.
         let running = screen(&mut app, 150, 44, "2026-11-02T11:01:30.000Z");
-        let turn = row(&running, "1 req, 1 tool");
+        let interaction = row(&running, "1 llm, 1 tool");
         assert!(
-            turn.contains("running") && turn.contains("1m30s"),
+            interaction.contains("running") && interaction.contains("1m30s"),
             "{running}"
         );
         let call = row(&running, "sleep 600");
@@ -2087,14 +2129,17 @@ mod tests {
             "{running}"
         );
         assert!(call.trim_end_matches('│').ends_with('█'));
-        let detail = pane_text(&running, "┌ Turn ─");
+        let detail = pane_text(&running, "┌ Interaction ─");
         assert!(detail.contains("state     running"), "{running}");
         assert!(detail.contains("so far, by the records"));
 
         // Long after: all that is known is that it has no end.
         let later = screen(&mut app, 150, 44, LATER);
-        let turn = row(&later, "1 req, 1 tool");
-        assert!(turn.contains("no end") && turn.contains("1m00s"), "{later}");
+        let interaction = row(&later, "1 llm, 1 tool");
+        assert!(
+            interaction.contains("no end") && interaction.contains("1m00s"),
+            "{later}"
+        );
         assert!(!row(&later, "sleep 600")
             .trim_end_matches('│')
             .ends_with("██"));
@@ -2484,11 +2529,11 @@ mod tests {
         for page in Page::ALL {
             app.go_to(page);
             if page == Page::Trace {
-                // Every turn's tree, with every subagent unfolded.
-                for turn in 0..4 {
+                // Every interaction's tree, with every subagent unfolded.
+                for interaction in 0..4 {
                     app.in_detail = false;
                     app.move_first();
-                    app.move_by(turn);
+                    app.move_by(interaction);
                     app.focus_detail();
                     for at in (0..40).rev() {
                         app.move_first();

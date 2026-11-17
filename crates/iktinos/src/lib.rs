@@ -17,7 +17,7 @@
 //!
 //! Text is modelled where a view needs it (a title, the last prompt, a subagent's
 //! description). The crates never log record contents themselves, and a session
-//! keeps bounded recent activity (its latest tool calls and turns), not its
+//! keeps bounded recent activity (its latest tool calls and interactions), not its
 //! whole history.
 //!
 //! # Example
@@ -64,7 +64,7 @@
 //! | [`discover`] | sessions and subagents under a projects directory, `sessions-index.json`, cwd resolution |
 //! | [`tail`] | offset-based line reading: load what is needed from the end, then follow appends |
 //! | [`session`] | the fold of records into `Session` / `SessionStore` |
-//! | [`trace`] | a session's latest turns as trees of spans: requests, tool calls, subagents |
+//! | [`trace`] | a session's latest interactions as trees of spans: LLM requests, tool calls, subagents |
 //! | [`pricing`] | the embedded price table and context windows |
 
 pub mod record;

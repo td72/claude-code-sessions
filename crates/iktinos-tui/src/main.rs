@@ -1,5 +1,5 @@
 //! `iktinos`: a terminal viewer for the Claude Code sessions on this machine.
-//! Sessions, recent tool calls, subagents, the trace of the latest turns and
+//! Sessions, recent tool calls, subagents, the trace of the latest interactions and
 //! usage, a page each, over
 //! `iktinos::session::SessionStore`, with the live layer when the bridge mod
 //! is installed. Its pages and keys follow vig, which renders the same model
