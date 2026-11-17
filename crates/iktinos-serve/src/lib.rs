@@ -68,8 +68,23 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 /// excerpt.
 const OUTPUT_CHARS: usize = 2000;
 
-/// The page until the frontend is built into the binary.
-const INDEX: &str = include_str!("../assets/index.html");
+// `ASSETS`: the page, embedded by the build script. What `web/` built if
+// it was built, else the placeholder under `assets/`.
+include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+
+/// The file of the page served at `address`, with its type. The addresses
+/// are a fixed list made when the binary was built: none is looked up on
+/// disk.
+fn asset(address: &str) -> Option<(&'static str, &'static [u8])> {
+    let address = match address {
+        "/" => "/index.html",
+        other => other,
+    };
+    ASSETS
+        .iter()
+        .find(|(served, _, _)| *served == address)
+        .map(|(_, content_type, bytes)| (*content_type, *bytes))
+}
 
 const USAGE: &str = "\
 Show the Claude Code sessions on this machine in a browser on this machine.
@@ -443,7 +458,6 @@ fn route(request: &Request, shared: &Shared) -> Routed {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     };
     match segments[..] {
-        [""] | ["index.html"] => respond(Response::new(200, "text/html; charset=utf-8", INDEX)),
         ["api", "events"] => Routed::Events,
         ["api", "sessions"] => respond(sessions(shared)),
         ["api", "sessions", id] if plain(id) => respond(session(shared, id, View::Detail)),
@@ -454,7 +468,10 @@ fn route(request: &Request, shared: &Shared) -> Routed {
         ["api", "sessions", id, "responses", message] if plain(id) && plain(message) => {
             respond(whole(shared, id, Whole::Response(message)))
         }
-        _ => respond(Response::text(404, "nothing is served here")),
+        _ => respond(match asset(&request.path) {
+            Some((content_type, bytes)) => Response::new(200, content_type, bytes),
+            None => Response::text(404, "nothing is served here"),
+        }),
     }
 }
 

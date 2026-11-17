@@ -10,8 +10,10 @@ authors.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "development-tools"]
-# The integration tests read the workspace fixtures, which are not packaged.
-exclude = ["tests/"]
+# The page built in `web/` is packaged though git does not track it; its
+# sources and the integration tests (which read the workspace fixtures) are
+# not.
+include = ["Cargo.toml", "build.rs", "src/**", "assets/**", "web/dist/**"]
 
 [dependencies]
 getrandom = "0.3"
