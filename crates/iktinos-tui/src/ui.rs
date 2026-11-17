@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 use ratatui::Frame;
 
 use crate::app::{
-    self, App, InteractionRow, LiveStatus, Page, StatusKind, TraceItem, TraceRow, TREE,
+    self, App, InteractionRow, LiveStatus, Page, StatusKind, TimeStyle, TraceItem, TraceRow, TREE,
 };
 use crate::format;
 use crate::highlight;
@@ -156,6 +156,22 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
     title
 }
 
+/// When something happened, the way the lists are set to say it.
+fn when(time: TimeStyle, now: Timestamp, at: Timestamp) -> String {
+    match time {
+        TimeStyle::Clock => format::when(now, at),
+        TimeStyle::Relative => format::ago(now, at),
+    }
+}
+
+/// The width of the column [`when`] fills.
+fn when_width(time: TimeStyle) -> u16 {
+    match time {
+        TimeStyle::Clock => format::WHEN_WIDTH,
+        TimeStyle::Relative => 4,
+    }
+}
+
 /// The style of a row the search matches.
 fn row_style(matches: &[usize], index: usize) -> Style {
     if matches.contains(&index) {
@@ -263,11 +279,12 @@ fn outcome(call: &ToolCall) -> (&'static str, Style) {
     match call.success {
         Some(true) => ("ok", Style::new().fg(Color::Green)),
         Some(false) => ("failed", Style::new().fg(Color::Red)),
-        None => ("running", dim()),
+        None => ("running", running()),
     }
 }
 
 fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let time = app.time;
     let matches = app.matches(Page::Tools, now);
     // The session column says nothing once the page is narrowed to one.
     let scoped = app.scope.is_some();
@@ -285,25 +302,26 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
             );
             let when = call
                 .started_at
-                .map_or("—".to_owned(), |at| format::ago(now, at));
+                .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
             if !scoped {
                 cells.push(session_cell(session));
             }
             cells.extend([
-                Cell::from(name),
+                Cell::from(name).style(tool_style()),
                 Cell::from(call.summary.clone().unwrap_or_default()),
                 Cell::from(
                     Line::from(call.duration_ms.map(format::duration).unwrap_or_default())
                         .right_aligned(),
-                ),
+                )
+                .style(took_style(call.duration_ms)),
                 Cell::from(mark).style(style),
             ]);
             Row::new(cells).style(row_style(&matches, index))
         })
         .collect();
     // What the call was about gets every column the others can spare.
-    let mut widths = vec![Constraint::Length(4)];
+    let mut widths = vec![Constraint::Length(when_width(time))];
     let mut header = vec!["when"];
     if !scoped {
         widths.push(Constraint::Max(22));
@@ -333,6 +351,7 @@ fn subagent_name(subagent: &Subagent) -> &str {
 }
 
 fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let time = app.time;
     let matches = app.matches(Page::Subagents, now);
     let scoped = app.scope.is_some();
     let subagents = app.subagents();
@@ -342,12 +361,12 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         .enumerate()
         .map(|(index, (session, subagent))| {
             let done = match subagent.finished {
-                Some(true) => Span::styled("done", dim()),
-                _ => Span::styled("running", Style::new().fg(Color::Green)),
+                Some(true) => Span::styled("done", done()),
+                _ => Span::styled("running", running()),
             };
             let when = subagent
                 .last_activity
-                .map_or("—".to_owned(), |at| format::ago(now, at));
+                .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
             if !scoped {
                 cells.push(session_cell(session));
@@ -359,15 +378,15 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
                     "{}{}",
                     if entered { "● " } else { "" },
                     subagent.agent_type.as_deref().unwrap_or("agent")
-                )),
+                ))
+                .style(agent_style()),
                 Cell::from(subagent_name(subagent).to_owned()),
                 Cell::from(
                     subagent
                         .model
                         .as_deref()
                         .map_or("—".to_owned(), format::model_name),
-                )
-                .style(dim()),
+                ),
                 Cell::from(
                     Line::from(format::tokens(subagent.usage.total_tokens())).right_aligned(),
                 ),
@@ -388,7 +407,7 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         })
         .collect();
     // The task gets every column the others can spare.
-    let mut widths = vec![Constraint::Length(4)];
+    let mut widths = vec![Constraint::Length(when_width(time))];
     let mut header = vec!["when"];
     if !scoped {
         widths.push(Constraint::Max(22));
@@ -466,15 +485,16 @@ fn interaction_state(
     now: Timestamp,
 ) -> (&'static str, Style) {
     if interaction.ended_at.is_some() {
-        ("done", dim())
+        ("done", done())
     } else if interaction_runs(session, interaction, now) {
-        ("running", Style::new().fg(Color::Green))
+        ("running", running())
     } else {
         ("no end", dim())
     }
 }
 
 fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let time = app.time;
     let matches = app.matches(Page::Trace, now);
     // Flat, the rows name their session unless the page is narrowed to one;
     // by session, the session is the row they are under.
@@ -497,13 +517,16 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     .iter()
                     .filter_map(|i| i.started_at)
                     .max()
-                    .map_or("—".to_owned(), |at| format::ago(now, at));
+                    .map_or("—".to_owned(), |at| when(time, now, at));
                 let name = app::label(session).lines().next().unwrap_or_default();
                 return Row::new([
                     Cell::from(Line::from(when).right_aligned()),
                     Cell::from(Line::from(vec![
                         Span::raw(if row.open { "▾ " } else { "▸ " }),
-                        Span::styled(name.to_owned(), Style::new().add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            name.to_owned(),
+                            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(
                             format!(
                                 "  {} · {}",
@@ -529,7 +552,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
             let (state, style) = interaction_state(session, interaction, now);
             let when = interaction
                 .started_at
-                .map_or("—".to_owned(), |at| format::ago(now, at));
+                .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
             if names {
                 cells.push(session_cell(session));
@@ -550,13 +573,14 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 )),
                 Cell::from(
                     Line::from(took.map(format::duration).unwrap_or_default()).right_aligned(),
-                ),
+                )
+                .style(took_style(took)),
                 Cell::from(state).style(style),
             ]);
             Row::new(cells).style(row_style(&matches, index))
         })
         .collect();
-    let mut widths = vec![Constraint::Length(4)];
+    let mut widths = vec![Constraint::Length(when_width(time))];
     let mut header = vec!["when"];
     if names {
         // The session gets what the short columns leave.
@@ -655,12 +679,12 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
         TraceItem::Span(span) => match &span.kind {
             SpanKind::Tool(call) => (
                 format::tool_name(&call.name),
-                Style::new(),
+                tool_style(),
                 call.summary.clone().unwrap_or_default(),
             ),
             SpanKind::LlmRequest(request) => (
                 "llm_request".to_owned(),
-                Style::new().fg(Color::Blue),
+                Style::new().fg(Color::LightBlue),
                 request
                     .model
                     .as_deref()
@@ -671,7 +695,7 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
         },
         TraceItem::Subagent(subagent) => (
             format!("↳ {}", subagent.agent_type.as_deref().unwrap_or("agent")),
-            Style::new().fg(Color::Magenta),
+            agent_style(),
             subagent_name(subagent).to_owned(),
         ),
     }
@@ -712,20 +736,21 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                         };
                         (mark.to_owned(), style, colour)
                     }
-                    SpanKind::LlmRequest(request) => (
-                        request.stop_reason.clone().unwrap_or_default(),
-                        dim(),
-                        Color::Blue,
-                    ),
-                    _ => (String::new(), dim(), Color::Blue),
+                    SpanKind::LlmRequest(request) => {
+                        let stop = request.stop_reason.clone().unwrap_or_default();
+                        // The end of the answer, more to do, or cut short.
+                        let style = match stop.as_str() {
+                            "end_turn" => done(),
+                            "tool_use" | "" => dim(),
+                            _ => Style::new().fg(Color::Red),
+                        };
+                        (stop, style, Color::LightBlue)
+                    }
+                    _ => (String::new(), dim(), Color::LightBlue),
                 },
                 TraceItem::Subagent(subagent) => match subagent.finished {
-                    Some(true) => ("done".to_owned(), dim(), Color::Magenta),
-                    _ => (
-                        "running".to_owned(),
-                        Style::new().fg(Color::Green),
-                        Color::Magenta,
-                    ),
+                    Some(true) => ("done".to_owned(), done(), Color::Magenta),
+                    _ => ("running".to_owned(), running(), Color::Magenta),
                 },
             };
             let (name, style, beside) = trace_label(row);
@@ -738,7 +763,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                 Cell::from(Line::from(vec![
                     Span::raw(format!("{}{fold}", "  ".repeat(row.depth))),
                     Span::styled(name, style),
-                    Span::styled(format!("  {beside}"), dim()),
+                    Span::raw(format!("  {beside}")),
                 ])),
                 Cell::from(
                     Line::from(
@@ -747,7 +772,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
                             .unwrap_or_default(),
                     )
                     .right_aligned(),
-                ),
+                )
+                .style(took_style(between(start, end))),
                 Cell::from(mark).style(mark_style),
             ];
             if axis > 0 {
@@ -818,7 +844,7 @@ fn interaction_lines(
     let runs = interaction_runs(session, interaction, now);
     let end = if runs { Some(now) } else { end };
     let mut lines = vec![
-        Line::styled("Interaction", Style::new().add_modifier(Modifier::BOLD)),
+        Line::styled("Interaction", headline()),
         field(
             "session",
             app::label(session)
@@ -838,7 +864,7 @@ fn interaction_lines(
         ),
     ];
     if let Some(at) = interaction.started_at {
-        lines.push(field("started", format!("{} ago", format::ago(now, at))));
+        lines.push(field("started", format::started(now, at)));
     }
     let took = interaction
         .duration_ms
@@ -941,10 +967,7 @@ fn llm_request_lines(
     took: Option<u64>,
     now: Timestamp,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::styled(
-        "LLM request",
-        Style::new().add_modifier(Modifier::BOLD),
-    )];
+    let mut lines = vec![Line::styled("LLM request", headline())];
     if let Some(model) = &request.model {
         lines.push(field("model", model.clone()));
     }
@@ -955,7 +978,7 @@ fn llm_request_lines(
         lines.push(field("stop", stop.clone()));
     }
     if let Some(at) = started_at {
-        lines.push(field("started", format!("{} ago", format::ago(now, at))));
+        lines.push(field("started", format::started(now, at)));
     }
     if let Some(ms) = took {
         lines.push(field(
@@ -1172,20 +1195,20 @@ fn command_lines(call: &ToolCall, width: usize) -> Vec<Line<'static>> {
 fn call_lines(call: &ToolCall, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     let (mark, style) = outcome(call);
     let mut head = vec![
-        Span::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(call.name.clone(), headline()),
         Span::raw("  "),
         Span::styled(mark, style),
     ];
     if let Some(ms) = call.duration_ms {
         head.push(Span::styled(
             format!("  took {}", format::duration(ms)),
-            dim(),
+            Style::new(),
         ));
     }
     if let Some(at) = call.started_at {
         head.push(Span::styled(
             format!("  {} ago", format::ago(now, at)),
-            dim(),
+            Style::new(),
         ));
     }
     let mut lines = vec![Line::from(head)];
@@ -1201,7 +1224,7 @@ fn call_lines(call: &ToolCall, now: Timestamp, width: usize) -> Vec<Line<'static
 
 fn field(name: &str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{name:<10}"), dim()),
+        Span::styled(format!("{name:<10}"), label()),
         Span::raw(value),
     ])
 }
@@ -1221,17 +1244,17 @@ fn context_line(session: &Session, width: usize) -> Line<'static> {
         f if f >= 0.7 => Color::Yellow,
         _ => Color::Green,
     };
-    let label = format!(
+    let text = format!(
         "{} of {} ({})  ",
         format::tokens(context.tokens),
         format::tokens(context.window.unwrap_or_default()),
         format::percent(fill)
     );
-    let room = width.saturating_sub(10 + label.chars().count()).min(40);
+    let room = width.saturating_sub(10 + text.chars().count()).min(40);
     let filled = ((fill.clamp(0.0, 1.0) * room as f64).round() as usize).min(room);
     Line::from(vec![
-        Span::styled(format!("{:<10}", "context"), dim()),
-        Span::raw(label),
+        Span::styled(format!("{:<10}", "context"), label()),
+        Span::raw(text),
         Span::styled("█".repeat(filled), Style::new().fg(color)),
         Span::styled("░".repeat(room - filled), dim()),
     ])
@@ -1243,7 +1266,7 @@ fn usage_header(title: &str) -> Line<'static> {
             "{title:<24}{:>9}{:>9}{:>9}{:>10}{:>7}",
             "in", "out", "cache", "cost", "calls"
         ),
-        dim(),
+        label(),
     )
 }
 
@@ -1280,10 +1303,10 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     lines.extend(
         wrap(app::label(session), width)
             .into_iter()
-            .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD))),
+            .map(|line| line.style(headline())),
     );
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<10}", "state"), dim()),
+        Span::styled(format!("{:<10}", "state"), label()),
         Span::styled(status.text, style_of(status.kind)),
     ]));
     if let Some(live) = &session.live {
@@ -1316,10 +1339,7 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
         ),
     ));
     if let Some(started) = session.started_at {
-        lines.push(field(
-            "started",
-            format!("{} ago", format::ago(now, started)),
-        ));
+        lines.push(field("started", format::started(now, started)));
     }
     if let Some(prompt) = &session.last_prompt {
         lines.push(field(
@@ -1353,7 +1373,7 @@ fn session_lines(session: &Session, now: Timestamp, width: usize) -> Vec<Line<'s
     if let Some(live) = &session.live {
         if !live.rate_limits.is_empty() {
             lines.push(Line::raw(""));
-            lines.push(Line::styled("rate limits", dim()));
+            lines.push(Line::styled("rate limits", label()));
             for limit in &live.rate_limits {
                 lines.push(Line::raw(format!(
                     "  {:<22}{:>4.0}%",
@@ -1373,9 +1393,9 @@ fn tool_lines(
 ) -> Vec<Line<'static>> {
     let (mark, style) = outcome(call);
     let mut lines = vec![
-        Line::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Line::styled(call.name.clone(), headline()),
         Line::from(vec![
-            Span::styled(format!("{:<10}", "outcome"), dim()),
+            Span::styled(format!("{:<10}", "outcome"), label()),
             Span::styled(mark, style),
         ]),
         field(
@@ -1391,7 +1411,7 @@ fn tool_lines(
         lines.push(field("took", format::duration(ms)));
     }
     if let Some(at) = call.started_at {
-        lines.push(field("started", format!("{} ago", format::ago(now, at))));
+        lines.push(field("started", format::started(now, at)));
     }
     let by = match &call.agent_id {
         None => "the main thread".to_owned(),
@@ -1424,7 +1444,7 @@ fn subagent_lines(
 ) -> (Vec<Line<'static>>, Option<(usize, bool)>) {
     let mut lines: Vec<Line> = wrap(subagent_name(subagent), width)
         .into_iter()
-        .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD)))
+        .map(|line| line.style(headline()))
         .collect();
     if let Some(kind) = &subagent.agent_type {
         lines.push(field("type", kind.clone()));
@@ -1448,7 +1468,7 @@ fn subagent_lines(
         lines.push(field("model", model.clone()));
     }
     if let Some(at) = subagent.started_at {
-        lines.push(field("started", format!("{} ago", format::ago(now, at))));
+        lines.push(field("started", format::started(now, at)));
     }
     if let (Some(from), Some(to)) = (subagent.started_at, subagent.last_activity) {
         let ms = (to.as_millis() - from.as_millis()).max(0) as u64;
@@ -1473,7 +1493,7 @@ fn subagent_lines(
             subagent.tool_calls,
             calls.len()
         ),
-        dim(),
+        label(),
     ));
     let room = width.saturating_sub(2 + 15 + 1 + 7 + 2 + 7);
     for (index, call) in calls.into_iter().enumerate() {
@@ -1486,16 +1506,19 @@ fn subagent_lines(
         };
         lines.push(
             Line::from(vec![
-                Span::raw(format!(
-                    "{mark_at}{:<15}",
-                    format::truncate(&format::tool_name(&call.name), 14)
-                )),
+                Span::styled(
+                    format!(
+                        "{mark_at}{:<15}",
+                        format::truncate(&format::tool_name(&call.name), 14)
+                    ),
+                    tool_style(),
+                ),
                 Span::styled(
                     format!(
                         "{:<room$}",
                         format::truncate(call.summary.as_deref().unwrap_or_default(), room)
                     ),
-                    dim(),
+                    Style::new(),
                 ),
                 Span::raw(format!(
                     " {:>7}  ",
@@ -1576,7 +1599,7 @@ fn draw_usage_page(frame: &mut Frame, area: Rect, app: &App) {
             "{:<24}{:>9}{:>10}{:>10}",
             "repository", "sessions", "tokens", "cost"
         ),
-        dim(),
+        label(),
     )];
     for (name, (sessions, cost, tokens)) in &repos {
         lines.push(Line::raw(format!(
@@ -1696,6 +1719,7 @@ const HELP: &[(&str, &str)] = &[
         "in the trace: interactions by session, or latest first",
     ),
     ("Enter", "unfold or fold a session in the trace by session"),
+    ("T", "times as a date and time, or as how long ago"),
     ("s", "sort sessions: updated, cost, tokens"),
     ("f", "filter sessions: all, live, open"),
     ("r", "refresh now"),
@@ -1738,6 +1762,46 @@ fn style_of(kind: StatusKind) -> Style {
     }
 }
 
+/// The names of fields and the headings inside a pane.
+fn label() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+/// The first line of a detail: what it is about.
+fn headline() -> Style {
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+}
+
+/// A tool's name.
+fn tool_style() -> Style {
+    Style::new().fg(Color::Cyan)
+}
+
+/// A subagent.
+fn agent_style() -> Style {
+    Style::new().fg(Color::Magenta)
+}
+
+/// Finished, and well.
+fn done() -> Style {
+    Style::new().fg(Color::Green)
+}
+
+/// Not finished yet.
+fn running() -> Style {
+    Style::new().fg(Color::Yellow)
+}
+
+/// How long something took: the slow stand out.
+fn took_style(ms: Option<u64>) -> Style {
+    match ms {
+        Some(60_000..) => Style::new().fg(Color::Red),
+        Some(10_000..) => Style::new().fg(Color::Yellow),
+        _ => Style::new(),
+    }
+}
+
+/// What matters least: captions, what is absent or unknown.
 fn dim() -> Style {
     Style::new().fg(Color::DarkGray)
 }
@@ -2178,6 +2242,7 @@ mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: crate::app::TimeStyle::default(),
         });
         app.go_to(Page::Trace);
         app.move_by(1);
@@ -2227,6 +2292,7 @@ mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: crate::app::TimeStyle::default(),
         });
         app.go_to(Page::Trace);
         // Under the interaction of a session that is a day later.
@@ -2266,6 +2332,93 @@ mod tests {
         assert!(later.contains("no end recorded"));
 
         let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn kinds_states_and_labels_are_told_apart_by_colour() {
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        app.enter();
+        app.go_to(Page::Trace);
+        let now = Timestamp::parse(SOON).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The colour of the first cell of `word` on the screen, or of the
+        // one `skip` cells into it.
+        let colour_at = |word: &str, skip: u16| -> Color {
+            for y in 0..44u16 {
+                let line: Vec<&str> = (0..150u16).map(|x| buffer[(x, y)].symbol()).collect();
+                let text = line.concat();
+                if let Some(at) = text.find(word) {
+                    let x = text[..at].chars().count() as u16;
+                    return buffer[(x + skip, y)].fg;
+                }
+            }
+            panic!("no {word} on the screen");
+        };
+        let colour = |word: &str| colour_at(word, 0);
+        // What a row is.
+        assert_eq!(colour("llm_request"), Color::LightBlue);
+        assert_eq!(colour("Bash"), Color::Cyan);
+        assert_eq!(colour("↳ Explore"), Color::Magenta);
+        // What a call is about is not greyed out.
+        assert_eq!(colour("cargo test --workspace"), Color::Reset);
+        // How it ended.
+        assert_eq!(colour_at("s  ok ", 3), Color::Green);
+        assert_eq!(colour("failed"), Color::Red);
+        assert_eq!(colour("end_turn"), Color::Green);
+        assert_eq!(colour("tool_use"), Color::DarkGray);
+        assert_eq!(colour("running"), Color::Yellow);
+        // The detail: its headline, its field names, its values.
+        assert_eq!(colour("Interaction  "), Color::Yellow);
+        assert_eq!(colour("started   "), Color::Cyan);
+        assert_eq!(colour("prompt-u1"), Color::Reset);
+
+        // The slow stand out.
+        assert_eq!(took_style(Some(9_999)).fg, None);
+        assert_eq!(took_style(Some(10_000)).fg, Some(Color::Yellow));
+        assert_eq!(took_style(Some(60_000)).fg, Some(Color::Red));
+        assert_eq!(took_style(None).fg, None);
+    }
+
+    #[test]
+    fn times_are_a_date_and_time_or_how_long_ago() {
+        let mut app = fixture_app();
+        app.go_to(Page::Tools);
+        // The same day: the time. (Under test the clock is UTC.)
+        let today = screen(&mut app, 150, 30, SOON);
+        assert!(
+            row(&today, "cargo test --workspace").contains("10:00:02"),
+            "{today}"
+        );
+        // Another day: the date too, and the detail says both.
+        let later = screen(&mut app, 150, 30, LATER);
+        assert!(
+            row(&later, "cargo test --workspace").contains("11-02 10:00"),
+            "{later}"
+        );
+        assert!(later.contains("started   11-02 10:00 (1d ago)"));
+
+        app.toggle_time();
+        let relative = screen(&mut app, 150, 30, SOON);
+        let bash = row(&relative, "cargo test --workspace");
+        assert!(
+            bash.contains("18s") && !bash.contains("10:00:02"),
+            "{relative}"
+        );
+        // The other lists follow. (A detail pane says both, always.)
+        for (page, title) in [
+            (Page::Subagents, "┌ Subagents ("),
+            (Page::Trace, "┌ Trace ("),
+        ] {
+            app.go_to(page);
+            let list = |app: &mut App| pane_text(&screen(app, 150, 30, SOON), title);
+            assert!(!list(&mut app).contains("10:00:0"));
+            app.toggle_time();
+            assert!(list(&mut app).contains("10:00:0"));
+            app.toggle_time();
+        }
     }
 
     #[test]
@@ -2310,6 +2463,7 @@ mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: crate::app::TimeStyle::default(),
         });
         app.go_to(Page::Subagents);
 
@@ -2607,6 +2761,7 @@ mod tests {
             projects_dir: crate::app::tests::fixtures().join("no-such-directory"),
             live: false,
             socket_dir: None,
+            time: crate::app::TimeStyle::default(),
         });
         let sessions = screen(&mut app, 120, 20, LATER);
         assert!(sessions.contains("0 sessions"), "{sessions}");

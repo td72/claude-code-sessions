@@ -53,6 +53,48 @@ pub fn ago(now: Timestamp, then: Timestamp) -> String {
     }
 }
 
+/// `at` on the clock of this machine. Under test it is UTC, so that what a
+/// screen shows does not depend on where the tests run.
+fn local(at: Timestamp) -> Option<chrono::NaiveDateTime> {
+    #[cfg(not(test))]
+    {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_millis_opt(at.as_millis())
+            .single()
+            .map(|at| at.naive_local())
+    }
+    #[cfg(test)]
+    {
+        chrono::DateTime::from_timestamp_millis(at.as_millis()).map(|at| at.naive_utc())
+    }
+}
+
+/// When `then` was, in local time, as short as `now` allows: `10:00:08`
+/// today, `11-02 10:00` this year, `2025-11-02` before that.
+pub fn when(now: Timestamp, then: Timestamp) -> String {
+    use chrono::Datelike;
+    let (Some(now), Some(then)) = (local(now), local(then)) else {
+        return "—".to_owned();
+    };
+    let format = if now.date() == then.date() {
+        "%H:%M:%S"
+    } else if now.year() == then.year() {
+        "%m-%d %H:%M"
+    } else {
+        "%Y-%m-%d"
+    };
+    then.format(format).to_string()
+}
+
+/// The widest [`when`] is.
+pub const WHEN_WIDTH: u16 = 11;
+
+/// When something started, and how long ago that is: `10:00:08 (12s ago)`.
+pub fn started(now: Timestamp, then: Timestamp) -> String {
+    format!("{} ({} ago)", when(now, then), ago(now, then))
+}
+
 /// `850ms`, `1.5s`, `2m05s`.
 pub fn duration(ms: u64) -> String {
     match ms {
@@ -132,6 +174,29 @@ mod tests {
         assert_eq!(cost(&Cost::default()), "—");
         assert_eq!(usd_amount(0.008896), "$0.0089");
         assert_eq!(usd_amount(0.0), "$0.00");
+    }
+
+    #[test]
+    fn when_is_as_short_as_the_day_allows() {
+        let at = |text: &str| Timestamp::parse(text).unwrap();
+        let now = at("2026-11-03T12:00:00.000Z");
+        assert_eq!(when(now, at("2026-11-03T09:05:07.900Z")), "09:05:07");
+        assert_eq!(when(now, at("2026-11-02T23:59:59.000Z")), "11-02 23:59");
+        assert_eq!(when(now, at("2026-01-01T00:00:00.000Z")), "01-01 00:00");
+        assert_eq!(when(now, at("2025-12-31T23:59:59.000Z")), "2025-12-31");
+        // Later than now is shown the same way.
+        assert_eq!(when(now, at("2026-11-04T01:02:03.000Z")), "11-04 01:02");
+        for then in [
+            "2026-11-03T09:05:07.900Z",
+            "2026-11-02T23:59:59.000Z",
+            "2025-12-31T23:59:59.000Z",
+        ] {
+            assert!(when(now, at(then)).len() <= WHEN_WIDTH as usize);
+        }
+        assert_eq!(
+            started(now, at("2026-11-03T11:59:48.000Z")),
+            "11:59:48 (12s ago)"
+        );
     }
 
     #[test]

@@ -35,6 +35,8 @@ Options:
       --projects-dir <DIR>  Read transcripts from DIR instead of ~/.claude/projects
       --socket-dir <DIR>    Listen for live events in DIR instead of the shared default
       --no-live             Do not listen for live events from the bridge mod
+      --time <STYLE>        Show times as `clock` (the local date and time, the
+                            default) or `relative` (how long ago); T switches
   -h, --help                Print help
   -V, --version             Print version
 ";
@@ -157,6 +159,7 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('N') => app.next_match(-1),
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Char('t') => app.toggle_by_session(),
+        KeyCode::Char('T') => app.toggle_time(),
         KeyCode::Char('f') => app.cycle_filter(),
         _ => {}
     }
@@ -173,6 +176,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
     let mut projects_dir = None;
     let mut socket_dir = None;
     let mut live = true;
+    let mut time = app::TimeStyle::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -193,6 +197,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
             "--projects-dir" => projects_dir = Some(value("--projects-dir")?),
             "--socket-dir" => socket_dir = Some(value("--socket-dir")?),
             "--no-live" => live = false,
+            "--time" => {
+                let style = inline.clone().or_else(|| args.next()).unwrap_or_default();
+                time = app::TimeStyle::parse(&style)
+                    .ok_or_else(|| format!("--time is `clock` or `relative`, not '{style}'"))?;
+            }
             "-h" | "--help" => return Ok(Parsed::Print(USAGE.to_owned())),
             "-V" | "--version" => {
                 return Ok(Parsed::Print(format!(
@@ -210,6 +219,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
         projects_dir,
         live,
         socket_dir,
+        time,
     }))
 }
 
@@ -227,6 +237,7 @@ mod tests {
             projects_dir: PathBuf::from("/synthetic/projects"),
             live: false,
             socket_dir: Some(PathBuf::from("/synthetic/sockets")),
+            time: app::TimeStyle::default(),
         });
         assert_eq!(
             parse(&[
@@ -242,6 +253,26 @@ mod tests {
         };
         assert!(config.live);
         assert_eq!(config.socket_dir, None);
+        assert_eq!(config.time, app::TimeStyle::Clock);
+        for (args, style) in [
+            (
+                &["--projects-dir=/p", "--time", "relative"][..],
+                app::TimeStyle::Relative,
+            ),
+            (
+                &["--projects-dir=/p", "--time=clock"][..],
+                app::TimeStyle::Clock,
+            ),
+        ] {
+            let Ok(Parsed::Run(config)) = parse(args) else {
+                panic!()
+            };
+            assert_eq!(config.time, style);
+        }
+        assert!(parse(&["--time", "yesterday"])
+            .unwrap_err()
+            .contains("yesterday"));
+        assert!(parse(&["--time"]).is_err());
     }
 
     fn press(app: &mut App, keys: &str) {
@@ -345,6 +376,12 @@ mod tests {
         assert!(app.in_call() && !app.from_list);
         press(&mut app, "hh");
         assert!(!app.in_detail);
+
+        // `T` switches how times are shown.
+        press(&mut app, "T");
+        assert_eq!(app.time, app::TimeStyle::Relative);
+        press(&mut app, "T");
+        assert_eq!(app.time, app::TimeStyle::Clock);
 
         // Help.
         press(&mut app, "1?");

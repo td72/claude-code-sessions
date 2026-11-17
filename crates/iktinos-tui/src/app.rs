@@ -22,6 +22,29 @@ pub struct Config {
     pub live: bool,
     /// Where to listen; the shared default when `None`.
     pub socket_dir: Option<PathBuf>,
+    /// How the lists say when something happened, to begin with.
+    pub time: TimeStyle,
+}
+
+/// How the lists say when something happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TimeStyle {
+    /// The local date and time: `10:00:08`, `11-02 10:00`.
+    #[default]
+    Clock,
+    /// How long ago: `12s`, `5m`.
+    Relative,
+}
+
+impl TimeStyle {
+    /// `clock` or `relative`, as the `--time` option spells them.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "clock" => Some(Self::Clock),
+            "relative" => Some(Self::Relative),
+            _ => None,
+        }
+    }
 }
 
 /// Whether live events can arrive.
@@ -182,6 +205,7 @@ pub struct App {
     pub in_detail: bool,
     pub sort: Sort,
     pub filter: Filter,
+    pub time: TimeStyle,
     /// The ids of the sessions the Sessions page lists, in display order.
     pub order: Vec<String>,
     /// The session the Tool calls and Subagents pages are narrowed to.
@@ -343,6 +367,7 @@ impl App {
             in_detail: false,
             sort: Sort::Updated,
             filter: Filter::All,
+            time: config.time,
             order: Vec::new(),
             scope: None,
             agent_scope: None,
@@ -1197,6 +1222,14 @@ impl App {
         self.step_out();
     }
 
+    /// `T`: the lists' times as a date and time, or as how long ago.
+    pub fn toggle_time(&mut self) {
+        self.time = match self.time {
+            TimeStyle::Clock => TimeStyle::Relative,
+            TimeStyle::Relative => TimeStyle::Clock,
+        };
+    }
+
     pub fn cycle_sort(&mut self) {
         if self.page != Page::Sessions {
             return;
@@ -1497,6 +1530,7 @@ pub mod tests {
             projects_dir: fixtures().join(KNOWN_CLAUDE_CODE_VERSION).join("projects"),
             live: false,
             socket_dir: None,
+            time: TimeStyle::default(),
         })
     }
 
@@ -1665,6 +1699,7 @@ pub mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: TimeStyle::default(),
         });
         app.go_to(Page::Subagents);
         assert_eq!(
@@ -2046,6 +2081,7 @@ pub mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: TimeStyle::default(),
         });
         app.go_to(Page::Trace);
         app.move_by(1);
@@ -2092,6 +2128,7 @@ pub mod tests {
             projects_dir: projects.clone(),
             live: false,
             socket_dir: None,
+            time: TimeStyle::default(),
         });
         app.go_to(Page::Tools);
         app.move_by(3);
@@ -2208,6 +2245,7 @@ pub mod tests {
             projects_dir: fixtures().join("no-such-directory"),
             live: false,
             socket_dir: None,
+            time: TimeStyle::default(),
         });
         assert!(app.order.is_empty());
         assert!(app.selected_session().is_none());
@@ -2241,6 +2279,7 @@ pub mod tests {
             projects_dir: fixtures().join(KNOWN_CLAUDE_CODE_VERSION).join("projects"),
             live: true,
             socket_dir: Some(socket_dir.clone()),
+            time: TimeStyle::default(),
         });
         let LiveStatus::Listening(socket) = app.live.clone() else {
             panic!("{:?}", app.live)
