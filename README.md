@@ -78,9 +78,11 @@ Each list page is a list over a detail pane, in fixed proportions:
   update, tokens, cost. The detail pane shows the selected session's context,
   its tokens and cost by model and by source, and its rate limits.
 - **2:Tool calls** — recent tool calls, the latest first: what ran, how long
-  it took, how it ended.
+  it took, how it ended. The detail pane shows the whole command, every line
+  of it, a shell command in colour.
 - **3:Subagents** — subagents with their type, task, model, tokens and cost;
-  the detail pane lists a subagent's own tool calls.
+  the detail is two panes, the subagent with its own tool calls and, beside
+  it, the call chosen there with its whole command.
 - **4:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
@@ -94,7 +96,8 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the list (or scroll the detail pane) |
 | `Enter` on a session | narrow pages 2 and 3 to it and show its tool calls |
 | `Enter` on a subagent | narrow page 2 to it and show its tool calls |
-| `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back |
+| `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
+| `j` / `k` in a subagent's detail; then `i` / `Enter` | choose one of its tool calls; into the pane that shows it |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |

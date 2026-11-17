@@ -8,6 +8,7 @@
 
 mod app;
 mod format;
+mod highlight;
 mod ui;
 
 use std::env;

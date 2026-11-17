@@ -13,6 +13,7 @@ use ratatui::Frame;
 
 use crate::app::{self, App, LiveStatus, Page, StatusKind};
 use crate::format;
+use crate::highlight;
 
 pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
     let [header, body, footer] = Layout::vertical([
@@ -33,7 +34,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
             Page::Tools => draw_tool_list(frame, list, app, now),
             _ => draw_subagent_list(frame, list, app, now),
         }
-        draw_detail(frame, detail, app, now);
+        if app.page == Page::Subagents {
+            // The subagent, and beside it the tool call chosen in it. The
+            // subagent's side is as wide as its tables, where there is room.
+            let left = 72.min(detail.width * 11 / 20);
+            let [subagent, call] =
+                Layout::horizontal([Constraint::Length(left), Constraint::Min(0)]).areas(detail);
+            draw_detail(frame, subagent, app, now);
+            draw_call(frame, call, app, now);
+        } else {
+            draw_detail(frame, detail, app, now);
+        }
     } else {
         draw_usage_page(frame, body, app);
     }
@@ -430,6 +441,9 @@ fn wrap(text: &str, width: usize) -> Vec<Line<'static>> {
 fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let width = area.width.saturating_sub(2) as usize;
     let empty = |text: &str| vec![Line::styled(text.to_owned(), dim())];
+    // The line of the tool call chosen in a subagent's detail, and whether
+    // it is the first: the pane scrolls to keep it in view.
+    let mut cursor = None;
     let (title, lines) = match app.page {
         Page::Tools => (
             "Tool call",
@@ -441,7 +455,20 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         Page::Subagents => (
             "Subagent",
             match app.selected_subagent() {
-                Some((session, subagent)) => subagent_lines(session, subagent, now, width),
+                Some((session, subagent)) => {
+                    let (lines, at) = subagent_lines(
+                        session,
+                        subagent,
+                        now,
+                        width,
+                        app.call_selected,
+                        app.choosing_call(),
+                    );
+                    // With the focus on the list above, the pane stays at
+                    // its top.
+                    cursor = at.filter(|_| app.in_detail);
+                    lines
+                }
                 None => empty("no subagents"),
             },
         ),
@@ -461,6 +488,14 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     let rows = area.height.saturating_sub(2) as usize;
     app.viewport.detail_rows = rows;
     app.viewport.detail_lines = lines.len();
+    if let Some((line, first)) = cursor {
+        if first || line >= app.detail_scroll + rows {
+            // The first call shows as much of what is above it as fits.
+            app.detail_scroll = (line + 1).saturating_sub(rows);
+        } else if line < app.detail_scroll {
+            app.detail_scroll = line;
+        }
+    }
     app.detail_scroll = app.detail_scroll.min(lines.len().saturating_sub(rows));
     let title = if lines.len() > rows {
         format!(
@@ -474,8 +509,98 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
     };
     let paragraph = Paragraph::new(lines)
         .scroll((u16::try_from(app.detail_scroll).unwrap_or(u16::MAX), 0))
-        .block(pane_block(title, app.in_detail));
+        .block(pane_block(title, app.in_detail && !app.in_call()));
     frame.render_widget(paragraph, area);
+}
+
+/// The pane beside a subagent's detail: the tool call chosen there, with
+/// the whole of its command.
+fn draw_call(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let width = area.width.saturating_sub(2) as usize;
+    let lines = match app.selected_call() {
+        Some(call) => call_lines(call, now, width),
+        None => vec![Line::styled("no tool calls", dim())],
+    };
+    let rows = area.height.saturating_sub(2) as usize;
+    app.viewport.call_rows = rows;
+    app.viewport.call_lines = lines.len();
+    app.call_scroll = app.call_scroll.min(lines.len().saturating_sub(rows));
+    let title = if lines.len() > rows {
+        format!(
+            "Tool call [{}-{}/{}]",
+            app.call_scroll + 1,
+            (app.call_scroll + rows).min(lines.len()),
+            lines.len()
+        )
+    } else {
+        "Tool call".to_owned()
+    };
+    let paragraph = Paragraph::new(lines)
+        .scroll((u16::try_from(app.call_scroll).unwrap_or(u16::MAX), 0))
+        .block(pane_block(title, app.in_call()));
+    frame.render_widget(paragraph, area);
+}
+
+/// What a tool call was about, in full: every line of a command, wrapped,
+/// and a shell command in colour.
+fn command_lines(call: &ToolCall, width: usize) -> Vec<Line<'static>> {
+    let Some(text) = call.input.as_ref().or(call.summary.as_ref()) else {
+        return Vec::new();
+    };
+    if call.name != "Bash" {
+        return wrap(text, width);
+    }
+    let mut lines = Vec::new();
+    for (paragraph, styles) in text.lines().zip(highlight::bash(text)) {
+        // The wrapped lines are the paragraph's characters in order, so the
+        // styles follow by position.
+        let mut styles = styles.into_iter();
+        for line in wrap(paragraph, width) {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut last = None;
+            for c in line.spans.iter().flat_map(|span| span.content.chars()) {
+                let style = styles.next().unwrap_or_default();
+                match spans.last_mut() {
+                    Some(span) if last == Some(style) => span.content.to_mut().push(c),
+                    _ => spans.push(Span::styled(c.to_string(), style)),
+                }
+                last = Some(style);
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+/// A tool call in the pane beside its subagent: the command first.
+fn call_lines(call: &ToolCall, now: Timestamp, width: usize) -> Vec<Line<'static>> {
+    let (mark, style) = outcome(call);
+    let mut head = vec![
+        Span::styled(call.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(mark, style),
+    ];
+    if let Some(ms) = call.duration_ms {
+        head.push(Span::styled(
+            format!("  took {}", format::duration(ms)),
+            dim(),
+        ));
+    }
+    if let Some(at) = call.started_at {
+        head.push(Span::styled(
+            format!("  {} ago", format::ago(now, at)),
+            dim(),
+        ));
+    }
+    let mut lines = vec![Line::from(head)];
+    let command = command_lines(call, width);
+    if !command.is_empty() {
+        lines.push(Line::raw(""));
+        lines.extend(command);
+    }
+    lines.push(Line::raw(""));
+    lines.push(field("id", call.id.clone()));
+    lines
 }
 
 fn field(name: &str, value: String) -> Line<'static> {
@@ -685,9 +810,10 @@ fn tool_lines(
     };
     lines.push(field("by", by));
     lines.push(field("id", call.id.clone()));
-    if let Some(summary) = &call.summary {
+    let command = command_lines(call, width);
+    if !command.is_empty() {
         lines.push(Line::raw(""));
-        lines.extend(wrap(summary, width));
+        lines.extend(command);
     }
     lines
 }
@@ -697,7 +823,9 @@ fn subagent_lines(
     subagent: &Subagent,
     now: Timestamp,
     width: usize,
-) -> Vec<Line<'static>> {
+    chosen: usize,
+    focused: bool,
+) -> (Vec<Line<'static>>, Option<(usize, bool)>) {
     let mut lines: Vec<Line> = wrap(subagent_name(subagent), width)
         .into_iter()
         .map(|line| line.style(Style::new().add_modifier(Modifier::BOLD)))
@@ -738,12 +866,10 @@ fn subagent_lines(
         &subagent.usage,
     ));
 
-    let mut calls: Vec<&ToolCall> = session
-        .recent_tools
-        .iter()
-        .filter(|call| call.agent_id.as_deref() == Some(subagent.agent_id.as_str()))
-        .collect();
-    calls.sort_by_key(|call| std::cmp::Reverse(call.started_at));
+    let calls = app::calls_of(session, &subagent.agent_id);
+    // The call the pane beside this one shows.
+    let chosen = (!calls.is_empty()).then(|| chosen.min(calls.len() - 1));
+    let cursor = chosen.map(|at| (lines.len() + 2 + at, at == 0));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         format!(
@@ -753,29 +879,38 @@ fn subagent_lines(
         ),
         dim(),
     ));
-    let room = width.saturating_sub(2 + 15 + 1 + 7 + 2 + 6);
-    for call in calls {
+    let room = width.saturating_sub(2 + 15 + 1 + 7 + 2 + 7);
+    for (index, call) in calls.into_iter().enumerate() {
         let (mark, style) = outcome(call);
-        lines.push(Line::from(vec![
-            Span::raw(format!(
-                "  {:<15}",
-                format::truncate(&format::tool_name(&call.name), 14)
-            )),
-            Span::styled(
-                format!(
-                    "{:<room$}",
-                    format::truncate(call.summary.as_deref().unwrap_or_default(), room)
+        // Marked, and under the cursor while this pane has the focus.
+        let (mark_at, row) = match (chosen == Some(index), focused) {
+            (true, true) => ("› ", Style::new().add_modifier(Modifier::REVERSED)),
+            (true, false) => ("› ", Style::new()),
+            _ => ("  ", Style::new()),
+        };
+        lines.push(
+            Line::from(vec![
+                Span::raw(format!(
+                    "{mark_at}{:<15}",
+                    format::truncate(&format::tool_name(&call.name), 14)
+                )),
+                Span::styled(
+                    format!(
+                        "{:<room$}",
+                        format::truncate(call.summary.as_deref().unwrap_or_default(), room)
+                    ),
+                    dim(),
                 ),
-                dim(),
-            ),
-            Span::raw(format!(
-                " {:>7}  ",
-                call.duration_ms.map(format::duration).unwrap_or_default()
-            )),
-            Span::styled(mark, style),
-        ]));
+                Span::raw(format!(
+                    " {:>7}  ",
+                    call.duration_ms.map(format::duration).unwrap_or_default()
+                )),
+                Span::styled(mark, style),
+            ])
+            .style(row),
+        );
     }
-    lines
+    (lines, cursor)
 }
 
 fn draw_usage_page(frame: &mut Frame, area: Rect, app: &App) {
@@ -935,12 +1070,17 @@ const HELP: &[(&str, &str)] = &[
         "Enter (session)",
         "narrow pages 2 and 3 to it, show its tool calls",
     ),
+    (
+        "Enter (subagent)",
+        "narrow page 2 to it, show its tool calls",
+    ),
     ("i / Enter", "focus the detail pane"),
     (
-        "Tab / Shift+Tab",
-        "switch between the list and the detail pane",
+        "j / k, i / Enter",
+        "in a subagent's detail: choose a call, into its pane",
     ),
-    ("h / Esc", "back to the list"),
+    ("Tab / Shift+Tab", "the page's panes in turn"),
+    ("h / Esc", "back a pane, to the list"),
     (
         "Esc (list)",
         "clear the search, then the narrowing, step by step",
@@ -967,7 +1107,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .iter()
         .map(|(keys, what)| {
             Line::from(vec![
-                Span::styled(format!(" {keys:<17}"), Style::new().fg(Color::Cyan)),
+                Span::styled(format!(" {keys:<18}"), Style::new().fg(Color::Cyan)),
                 Span::raw(*what),
             ])
         })
@@ -1154,6 +1294,32 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_command_is_shown_in_colour() {
+        let mut app = fixture_app();
+        app.go_to(Page::Tools);
+        app.move_last(); // Bash: cargo test --workspace
+        let now = Timestamp::parse(LATER).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The command is the last line of the detail pane.
+        let colours: Vec<(String, Color)> = (0..44)
+            .rev()
+            .find(|y| buffer[(1, *y)].symbol() == "c")
+            .map(|y| {
+                (1..23)
+                    .map(|x| (buffer[(x, y)].symbol().to_owned(), buffer[(x, y)].fg))
+                    .collect()
+            })
+            .unwrap();
+        let text: String = colours.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(text, "cargo test --workspace");
+        assert_eq!(colours[0].1, Color::Blue);
+        assert_eq!(colours[6].1, Color::Reset);
+        assert_eq!(colours[11].1, Color::Yellow);
+    }
+
+    #[test]
     fn the_subagents_page_lists_them_with_their_cost() {
         let mut app = fixture_app();
         app.go_to(Page::Subagents);
@@ -1174,6 +1340,75 @@ mod tests {
         assert!(detail.contains("tool calls (1 in all, the latest 1)"));
         assert!(detail.contains("Grep"));
         assert!(detail.contains("synthetic pattern"));
+    }
+
+    #[test]
+    fn a_call_chosen_in_a_subagents_detail_shows_its_whole_command() {
+        use crate::app::tests::{append_agent_call, scratch_projects};
+        let projects = scratch_projects("whole-command");
+        let long = format!("cargo build {}--the-end", "--synthetic-flag ".repeat(20));
+        append_agent_call(
+            &projects,
+            "toolu_s2",
+            0,
+            &format!(r#"{{"command":"{long}\\necho second-line"}}"#),
+        );
+        for (index, minute) in (3..40).zip(1..) {
+            let input = format!(r#"{{"command":"echo call-{index}"}}"#);
+            append_agent_call(&projects, &format!("toolu_s{index:02}"), minute, &input);
+        }
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+        });
+        app.go_to(Page::Subagents);
+
+        // The list has the focus: the pane starts at the top, and the one
+        // beside it shows the latest call.
+        let listed = screen(&mut app, 120, 40, LATER);
+        assert!(listed.contains("┌ Subagent [1-"), "{listed}");
+        assert!(listed.contains("echo call-39"), "{listed}");
+        assert!(listed.contains("tool calls (39 in all, the latest 39)"));
+
+        // In the detail pane the cursor is on a call, and the pane follows
+        // it down to the oldest and back.
+        app.focus_detail();
+        app.move_last();
+        let bottom = screen(&mut app, 120, 40, LATER);
+        assert!(bottom.contains("synthetic pattern"), "{bottom}");
+        assert!(!bottom.contains("call-39"));
+        assert!(row(&bottom, "› Grep").contains("synthetic pattern"));
+        app.move_by(-1);
+        let cut = screen(&mut app, 120, 40, LATER);
+        assert!(cut.contains("cargo build --synthetic-flag"), "{cut}");
+        // The pane beside it shows that call, with every line of the
+        // command.
+        let call = &cut[cut.find("┌ Tool call ").unwrap()..];
+        assert!(call.contains("Bash  running"), "{cut}");
+        assert!(call.contains("--the-end"), "{cut}");
+        assert!(call.contains("echo second-line"));
+        assert!(call.contains("toolu_s2"));
+        assert!(row(&cut, "› Bash").contains("cargo build"));
+
+        // Enter: into that pane, which scrolls when the command is long.
+        app.enter();
+        assert!(app.in_call());
+        screen(&mut app, 120, 14, LATER);
+        assert!(app.viewport.call_lines > app.viewport.call_rows);
+        app.move_last();
+        let scrolled = screen(&mut app, 120, 14, LATER);
+        assert!(scrolled.contains("┌ Tool call ["), "{scrolled}");
+        assert!(scrolled.contains("toolu_s2"));
+        app.back();
+
+        // Back at the top of the subagent's calls, the pane shows its head.
+        app.move_first();
+        let top = screen(&mut app, 120, 40, LATER);
+        assert!(top.contains("┌ Subagent [1-"), "{top}");
+        assert!(top.contains("call-39"));
+
+        let _ = std::fs::remove_dir_all(projects);
     }
 
     #[test]
@@ -1437,6 +1672,9 @@ mod tests {
         println!("{}", screen(&mut app, 150, 24, SOON));
         app.go_to(Page::Subagents);
         println!("{}", screen(&mut app, 150, 30, SOON));
+        app.focus_detail();
+        println!("{}", screen(&mut app, 150, 30, SOON));
+        println!("{}", screen(&mut app, 100, 30, SOON));
         app.go_to(Page::Sessions);
         app.enter();
         println!("{}", screen(&mut app, 100, 24, SOON));
