@@ -133,7 +133,8 @@ pub struct SessionDetail {
     pub rate_limits: Vec<RateLimit>,
     /// The latest first.
     pub recent_tools: Vec<Call>,
-    pub subagents: Vec<SubagentSummary>,
+    /// The subagents themselves; the summary's `subagents` is how many.
+    pub subagent_list: Vec<SubagentSummary>,
 }
 
 /// One row of an interaction's tree.
@@ -349,7 +350,7 @@ pub fn detail(session: &Session, now: Timestamp, active_within: Duration) -> Ses
             })
             .collect(),
         recent_tools,
-        subagents: session.subagents.values().map(subagent).collect(),
+        subagent_list: session.subagents.values().map(subagent).collect(),
     }
 }
 

@@ -210,12 +210,12 @@ header h1 {
   overflow-wrap: anywhere;
 }
 
-.trace {
+.pane {
   overflow: auto;
   padding: 0.6rem 0.9rem 2rem;
 }
 
-.trace.empty {
+.pane.empty {
   color: var(--dim);
 }
 
@@ -363,4 +363,80 @@ header h1 {
 
 .output {
   margin-top: 0.5rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.7rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs button {
+  padding: 0.3rem 0.8rem;
+  color: var(--dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tabs button:hover {
+  color: var(--text);
+}
+
+.tabs button.open {
+  color: var(--text);
+  font-weight: 700;
+  border-bottom-color: var(--label);
+}
+
+.session .field {
+  padding: 0.05rem 0;
+}
+
+.meter {
+  flex: 0 0 12rem;
+  height: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  align-self: center;
+}
+
+.meter .fill {
+  display: block;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--ok);
+}
+
+.meter .fill.warn {
+  background: var(--warn);
+}
+
+.meter .fill.error {
+  background: var(--error);
+}
+
+.usage {
+  margin-top: 0.9rem;
+  border-collapse: collapse;
+}
+
+.usage th {
+  color: var(--label);
+  font-weight: 400;
+  text-align: left;
+  padding: 0.1rem 1.25rem 0.1rem 0;
+}
+
+.usage th.number {
+  text-align: right;
+}
+
+.usage td {
+  padding: 0.1rem 1.25rem 0.1rem 0;
+}
+
+.usage tr.total td {
+  border-top: 1px solid var(--line);
 }

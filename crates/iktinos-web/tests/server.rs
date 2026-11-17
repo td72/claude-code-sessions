@@ -282,7 +282,8 @@ fn the_sessions_are_listed_the_latest_first() {
 #[test]
 fn a_session_is_served_with_its_detail_and_its_trace() {
     let server = server();
-    let detail = get(&server, &format!("/api/sessions/{WITH_SUBAGENTS}")).json();
+    let body = get(&server, &format!("/api/sessions/{WITH_SUBAGENTS}")).body;
+    let detail: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(detail["id"], WITH_SUBAGENTS);
     assert_eq!(detail["location_name"], "other.repo");
     assert!(detail["context"]["tokens"].as_u64().unwrap() > 0);
@@ -294,7 +295,10 @@ fn a_session_is_served_with_its_detail_and_its_trace() {
         .collect();
     assert_eq!(models, ["claude-fable-5-2", "claude-haiku-5-5"]);
     assert!(!detail["by_source"].as_array().unwrap().is_empty());
-    assert_eq!(detail["subagents"].as_array().unwrap().len(), 2);
+    // How many subagents, and the subagents: two keys, not one said twice.
+    assert_eq!(detail["subagents"], 2);
+    assert_eq!(detail["subagent_list"].as_array().unwrap().len(), 2);
+    assert_eq!(body.matches("\"subagents\":").count(), 1, "{body}");
     // The latest call first, with the start of what it returned.
     let tools = detail["recent_tools"].as_array().unwrap();
     assert_eq!(tools.len(), 5);
