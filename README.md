@@ -17,7 +17,7 @@ renders it as a page, and a small standalone viewer ships here.
 and watches the ground; it was also the name of an architect of the Parthenon.
 
 > Status: the crates (`iktinos`, `iktinos-live`, `iktinos-tui`) and the mod are
-> implemented and at 0.1. The project was called `claude-code-sessions` in its
+> implemented and at 0.2. The project was called `claude-code-sessions` in its
 > first days.
 
 ## Using the crate
