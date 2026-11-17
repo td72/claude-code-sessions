@@ -83,11 +83,12 @@ Each list page is a list over a detail pane, in fixed proportions:
 - **3:Subagents** — subagents with their type, task, model, tokens and cost;
   the detail is two panes, the subagent with its own tool calls and, beside
   it, the call chosen there with its whole command.
-- **4:Trace** — the latest turns, the latest first. A turn unfolds into what
-  it was made of: its API requests, the tool calls each made, the subagents
-  those spawned and what they did, each with a bar on a time axis that is as
-  long as the turn. The detail pane shows where a turn's time went, a
-  request's tokens and cost, a call's command.
+- **4:Trace** — three panes. The latest turns, the latest first; under them
+  the turn under the cursor as a tree: its API requests, the tool calls each
+  made, the subagents those spawned and what they did, each with a bar on a
+  time axis that is as long as the turn; and beside the turns what is
+  chosen: where the turn's time went, or, in the tree, a request's tokens
+  and cost or a call's command.
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
@@ -102,8 +103,8 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `Enter` on a session | narrow pages 2, 3 and 4 to it and show its tool calls |
 | `Enter` on a subagent | narrow page 2 to it and show its tool calls |
 | `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
-| `j` / `k` in a subagent's detail; then `i` / `Enter` | choose one of its tool calls; into the pane that shows it |
-| `Enter` / `l`, `h` on a turn or a subagent in the trace | unfold it; fold it (`h` elsewhere goes to the row it is under) |
+| `j` / `k` in a subagent's detail, or in a turn's tree; then `i` / `Enter` | choose a tool call, or a span; into the pane that shows it |
+| `Enter` / `l`, `h` on a subagent in a turn's tree | unfold it; fold it (`h` elsewhere goes to the row it is under, then out of the tree) |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |

@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use crate::app::{self, App, LiveStatus, Page, StatusKind, TraceItem, TraceRow};
+use crate::app::{self, App, LiveStatus, Page, StatusKind, TraceItem, TraceRow, TurnRow, TREE};
 use crate::format;
 use crate::highlight;
 
@@ -33,19 +33,31 @@ pub fn draw(frame: &mut Frame, app: &mut App, now: Timestamp) {
         match app.page {
             Page::Sessions => draw_session_list(frame, list, app, now),
             Page::Tools => draw_tool_list(frame, list, app, now),
-            Page::Trace => draw_trace_list(frame, list, app, now),
-            _ => draw_subagent_list(frame, list, app, now),
+            Page::Subagents => draw_subagent_list(frame, list, app, now),
+            _ => {
+                // The turns, and beside them what is chosen: the turn, or
+                // the span chosen in its tree below.
+                let [turns, span] =
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Min(0)])
+                        .areas(list);
+                draw_turn_list(frame, turns, app, now);
+                draw_span(frame, span, app, now);
+            }
         }
-        if app.page == Page::Subagents {
-            // The subagent, and beside it the tool call chosen in it. The
-            // subagent's side is as wide as its tables, where there is room.
-            let left = 72.min(detail.width * 11 / 20);
-            let [subagent, call] =
-                Layout::horizontal([Constraint::Length(left), Constraint::Min(0)]).areas(detail);
-            draw_detail(frame, subagent, app, now);
-            draw_call(frame, call, app, now);
-        } else {
-            draw_detail(frame, detail, app, now);
+        match app.page {
+            Page::Subagents => {
+                // The subagent, and beside it the tool call chosen in it.
+                // The subagent's side is as wide as its tables, where there
+                // is room.
+                let left = 72.min(detail.width * 11 / 20);
+                let [subagent, call] =
+                    Layout::horizontal([Constraint::Length(left), Constraint::Min(0)])
+                        .areas(detail);
+                draw_detail(frame, subagent, app, now);
+                draw_call(frame, call, app, now);
+            }
+            Page::Trace => draw_tree(frame, detail, app, now),
+            _ => draw_detail(frame, detail, app, now),
         }
     } else {
         draw_usage_page(frame, body, app);
@@ -431,26 +443,143 @@ fn bar(
     format!("{}{}", " ".repeat(first), "█".repeat(last - first))
 }
 
-/// What a row of the Trace page is called, and what is said beside it.
-fn trace_label(row: &TraceRow) -> (String, Style, String) {
-    let bold = Style::new().add_modifier(Modifier::BOLD);
-    match row.item {
-        TraceItem::Turn => {
-            let spans = &row.turn.thread.spans;
-            let calls = spans
+/// What a turn's main thread did, in a few words.
+fn turn_summary(turn: &Turn) -> String {
+    let spans = &turn.thread.spans;
+    let calls = spans
+        .iter()
+        .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
+        .count();
+    format!(
+        "{}, {}",
+        format::count((spans.len() - calls) as u64, "request"),
+        format::count(calls as u64, "tool call")
+    )
+}
+
+/// How a turn ended, as far as can be told.
+fn turn_state(session: &Session, turn: &Turn, now: Timestamp) -> (&'static str, Style) {
+    if turn.ended_at.is_some() {
+        ("done", dim())
+    } else if turn_runs(session, turn, now) {
+        ("running", Style::new().fg(Color::Green))
+    } else {
+        ("no end", dim())
+    }
+}
+
+fn draw_turn_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let matches = app.matches(Page::Trace, now);
+    let scoped = app.scope.is_some();
+    let turns = app.trace_turns();
+    let count = turns.len();
+    let rows: Vec<Row<'static>> = turns
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let TurnRow { session, turn, end } = *row;
+            let end = if turn_runs(session, turn, now) {
+                Some(now)
+            } else {
+                end
+            };
+            let took = turn.duration_ms.or_else(|| between(turn.started_at, end));
+            let (state, style) = turn_state(session, turn, now);
+            let when = turn
+                .started_at
+                .map_or("—".to_owned(), |at| format::ago(now, at));
+            let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
+            if !scoped {
+                cells.push(session_cell(session));
+            }
+            let calls = turn
+                .thread
+                .spans
                 .iter()
                 .filter(|span| matches!(span.kind, SpanKind::Tool(_)))
                 .count();
-            (
-                "turn".to_owned(),
-                bold,
-                format!(
-                    "{}, {}",
-                    format::count((spans.len() - calls) as u64, "request"),
-                    format::count(calls as u64, "tool call")
+            cells.extend([
+                // Short: the list shares its row with the pane beside it.
+                Cell::from(format!(
+                    "{} req, {}",
+                    turn.thread.spans.len() - calls,
+                    format::count(calls as u64, "tool")
+                )),
+                Cell::from(
+                    Line::from(took.map(format::duration).unwrap_or_default()).right_aligned(),
                 ),
-            )
+                Cell::from(state).style(style),
+            ]);
+            Row::new(cells).style(row_style(&matches, index))
+        })
+        .collect();
+    let mut widths = vec![Constraint::Length(4)];
+    let mut header = vec!["when"];
+    if !scoped {
+        widths.push(Constraint::Max(16));
+        header.push("session");
+    }
+    widths.extend([
+        Constraint::Fill(1),
+        Constraint::Length(7),
+        Constraint::Length(7),
+    ]);
+    header.extend(["turn", "took", ""]);
+    let title = list_title(
+        app,
+        format!("Trace ({})", format::count(count as u64, "turn")),
+        matches.len(),
+    );
+    let table = Table::new(rows, widths)
+        .header(Row::new(header).style(dim()))
+        .block(pane_block(title, !app.in_detail));
+    let selected = (count > 0).then_some(app.trace_selected);
+    draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
+}
+
+/// The pane beside the turns: the turn under the cursor, or, with the focus
+/// in its tree, the span chosen there.
+fn draw_span(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    let width = area.width.saturating_sub(2) as usize;
+    let chosen = app.selected_span().filter(|_| app.in_detail);
+    let (title, lines) = match (chosen, app.selected_turn()) {
+        (Some(row), _) => ("Span", trace_lines(&row, now, width)),
+        (None, Some(TurnRow { session, turn, end })) => {
+            // The turn's end with its subagents, where it has spans.
+            let end = app.span_rows().first().and_then(|row| row.turn_end).or(end);
+            ("Turn", turn_lines(session, turn, end, now))
         }
+        (None, None) => (
+            "Turn",
+            vec![Line::styled(
+                app.notice.clone().unwrap_or_else(|| "no turns".to_owned()),
+                dim(),
+            )],
+        ),
+    };
+    let rows = area.height.saturating_sub(2) as usize;
+    app.viewport.call_rows = rows;
+    app.viewport.call_lines = lines.len();
+    app.call_scroll = app.call_scroll.min(lines.len().saturating_sub(rows));
+    let title = if lines.len() > rows {
+        format!(
+            "{title} [{}-{}/{}]",
+            app.call_scroll + 1,
+            (app.call_scroll + rows).min(lines.len()),
+            lines.len()
+        )
+    } else {
+        title.to_owned()
+    };
+    let paragraph = Paragraph::new(lines)
+        .scroll((u16::try_from(app.call_scroll).unwrap_or(u16::MAX), 0))
+        .block(pane_block(title, app.in_call()));
+    frame.render_widget(paragraph, area);
+}
+
+/// What a row of the turn's tree is called, and what is said beside it.
+fn trace_label(row: &TraceRow) -> (String, Style, String) {
+    match row.item {
         TraceItem::Span(span) => match &span.kind {
             SpanKind::Tool(call) => (
                 format::tool_name(&call.name),
@@ -476,23 +605,18 @@ fn trace_label(row: &TraceRow) -> (String, Style, String) {
     }
 }
 
-fn draw_trace_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
-    let matches = app.matches(Page::Trace, now);
-    let scoped = app.scope.is_some();
+/// The pane under the turns: the turn under the cursor as a tree, each row
+/// with a bar on a time axis as long as the turn.
+fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
+    app.viewport.detail_rows = (area.height as usize).saturating_sub(3);
     let inner = area.width.saturating_sub(2) as usize;
-    // The time axis takes a third of the pane, where there is room for one.
-    let axis = if inner >= 70 { (inner / 3).min(60) } else { 0 };
-    let listed = app.trace_rows();
+    // The time axis takes two fifths of the pane, where there is room.
+    let axis = if inner >= 70 { inner * 2 / 5 } else { 0 };
+    let listed = app.span_rows();
     let count = listed.len();
-    let turns = listed
-        .iter()
-        .filter(|row| matches!(row.item, TraceItem::Turn))
-        .count();
     let rows: Vec<Row<'static>> = listed
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let is_turn = matches!(row.item, TraceItem::Turn);
+        .map(|row| {
             let runs = turn_runs(row.session, row.turn, now);
             // The axis: the turn from its start to its end, or to now.
             let window = row
@@ -500,22 +624,12 @@ fn draw_trace_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp)
                 .started_at
                 .zip(if runs { Some(now) } else { row.turn_end });
             let (start, end) = match row.item {
-                TraceItem::Turn => (row.turn.started_at, window.map(|(_, to)| to)),
                 TraceItem::Span(span) => (span.started_at, span.ended_at),
                 TraceItem::Subagent(subagent) => (subagent.started_at, subagent.last_activity),
             };
             // What has not ended reaches to now while the turn runs.
             let end = end.or(runs.then_some(now));
-            let took = match row.item {
-                TraceItem::Turn => row.turn.duration_ms.or_else(|| between(start, end)),
-                _ => between(start, end),
-            };
             let (mark, mark_style, colour) = match row.item {
-                TraceItem::Turn if row.turn.ended_at.is_some() => ("done", dim(), Color::DarkGray),
-                TraceItem::Turn if runs => {
-                    ("running", Style::new().fg(Color::Green), Color::DarkGray)
-                }
-                TraceItem::Turn => ("no end", dim(), Color::DarkGray),
                 TraceItem::Span(span) => match &span.kind {
                     SpanKind::Tool(call) => {
                         let (mark, style) = outcome(call);
@@ -524,103 +638,89 @@ fn draw_trace_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp)
                         } else {
                             Color::Green
                         };
-                        (mark, style, colour)
+                        (mark.to_owned(), style, colour)
                     }
-                    _ => ("", dim(), Color::Blue),
+                    SpanKind::Request(request) => (
+                        request.stop_reason.clone().unwrap_or_default(),
+                        dim(),
+                        Color::Blue,
+                    ),
+                    _ => (String::new(), dim(), Color::Blue),
                 },
                 TraceItem::Subagent(subagent) => match subagent.finished {
-                    Some(true) => ("done", dim(), Color::Magenta),
-                    _ => ("running", Style::new().fg(Color::Green), Color::Magenta),
+                    Some(true) => ("done".to_owned(), dim(), Color::Magenta),
+                    _ => (
+                        "running".to_owned(),
+                        Style::new().fg(Color::Green),
+                        Color::Magenta,
+                    ),
                 },
             };
-            let stop = match row.item {
-                TraceItem::Span(span) => match &span.kind {
-                    SpanKind::Request(request) => request.stop_reason.clone(),
-                    _ => None,
-                },
-                _ => None,
-            };
-
             let (name, style, beside) = trace_label(row);
             let fold = match row.open {
                 Some(true) => "▾ ",
                 Some(false) => "▸ ",
                 None => "  ",
             };
-            let label = Line::from(vec![
-                Span::raw(format!("{}{fold}", "  ".repeat(row.depth))),
-                Span::styled(name, style),
-                Span::styled(format!("  {beside}"), dim()),
-            ]);
-            let when = row
-                .turn
-                .started_at
-                .filter(|_| is_turn)
-                .map_or(String::new(), |at| format::ago(now, at));
-            let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
-            if !scoped {
-                cells.push(if is_turn {
-                    session_cell(row.session)
-                } else {
-                    Cell::from("")
-                });
-            }
-            cells.extend([
-                Cell::from(label),
+            let mut cells = vec![
+                Cell::from(Line::from(vec![
+                    Span::raw(format!("{}{fold}", "  ".repeat(row.depth))),
+                    Span::styled(name, style),
+                    Span::styled(format!("  {beside}"), dim()),
+                ])),
                 Cell::from(
-                    Line::from(took.map(format::duration).unwrap_or_default()).right_aligned(),
+                    Line::from(
+                        between(start, end)
+                            .map(format::duration)
+                            .unwrap_or_default(),
+                    )
+                    .right_aligned(),
                 ),
-                match stop {
-                    Some(stop) => Cell::from(stop).style(dim()),
-                    None => Cell::from(mark).style(mark_style),
-                },
-            ]);
+                Cell::from(mark).style(mark_style),
+            ];
             if axis > 0 {
-                let drawn = match (window, is_turn) {
-                    // A turn is the whole axis: a rule for what is under it.
-                    (Some(_), true) if row.open == Some(true) => "─".repeat(axis),
-                    (Some(_), true) => String::new(),
-                    (Some(window), false) => bar(start, end, window, axis),
-                    (None, _) => String::new(),
-                };
+                let drawn = window.map_or(String::new(), |window| bar(start, end, window, axis));
                 cells.push(Cell::from(drawn).style(Style::new().fg(colour)));
             }
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
 
-    let mut widths = vec![Constraint::Length(4)];
-    let mut header = vec!["when"];
-    if !scoped {
-        widths.push(Constraint::Max(22));
-        header.push("session");
+    let title = match app.selected_turn() {
+        Some(TurnRow { turn, .. }) => format!("Turn: {}", turn_summary(turn)),
+        None => "Turn".to_owned(),
+    };
+    let block = pane_block(title, app.choosing_span());
+    if count == 0 {
+        let text = if app.selected_turn().is_some() {
+            "nothing was read of this turn but its prompt"
+        } else {
+            "no turns"
+        };
+        frame.render_widget(Paragraph::new(Line::styled(text, dim())).block(block), area);
+        return;
     }
-    widths.extend([
+    let mut widths = vec![
         Constraint::Fill(1),
         Constraint::Length(7),
         Constraint::Length(8),
-    ]);
-    header.extend(["span", "took", ""]);
+    ];
+    let mut header = vec!["span", "took", ""];
     if axis > 0 {
         widths.push(Constraint::Length(axis as u16));
         header.push("time");
     }
-    let title = list_title(
-        app,
-        format!("Trace ({})", format::count(turns as u64, "turn")),
-        matches.len(),
-    );
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(dim()))
-        .block(pane_block(title, !app.in_detail));
-    let selected = (count > 0).then_some(app.trace_selected);
-    draw_list(frame, area, app, Page::Trace.list_index(), table, selected);
+        .block(block);
+    // The cursor shows once the tree has been entered.
+    let selected = app.in_detail.then_some(app.span_selected.min(count - 1));
+    draw_list(frame, area, app, TREE, table, selected);
 }
 
-/// The detail of a row of the Trace page.
+/// The detail of a row of the turn's tree.
 fn trace_lines(row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static>> {
     match row.item {
-        TraceItem::Turn => turn_lines(row, now),
         TraceItem::Span(span) => match &span.kind {
             SpanKind::Tool(call) => tool_lines(row.session, call, now, width),
             SpanKind::Request(request) => {
@@ -635,10 +735,14 @@ fn trace_lines(row: &TraceRow, now: Timestamp, width: usize) -> Vec<Line<'static
 }
 
 /// A turn: how long it took and where the time went.
-fn turn_lines(row: &TraceRow, now: Timestamp) -> Vec<Line<'static>> {
-    let (session, turn) = (row.session, row.turn);
+fn turn_lines(
+    session: &Session,
+    turn: &Turn,
+    end: Option<Timestamp>,
+    now: Timestamp,
+) -> Vec<Line<'static>> {
     let runs = turn_runs(session, turn, now);
-    let end = if runs { Some(now) } else { row.turn_end };
+    let end = if runs { Some(now) } else { end };
     let mut lines = vec![
         Line::styled("Turn", Style::new().add_modifier(Modifier::BOLD)),
         field(
@@ -866,13 +970,6 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
             match app.selected_tool() {
                 Some((session, call)) => tool_lines(session, call, now, width),
                 None => empty("no tool calls"),
-            },
-        ),
-        Page::Trace => (
-            "Span",
-            match app.selected_row() {
-                Some(row) => trace_lines(&row, now, width),
-                None => empty("no turns"),
             },
         ),
         Page::Subagents => (
@@ -1509,7 +1606,7 @@ const HELP: &[(&str, &str)] = &[
     ("h / Esc", "back a pane, to the list"),
     (
         "Enter, l / h",
-        "in the trace: unfold or fold a turn or a subagent",
+        "in a turn's tree: unfold or fold a subagent",
     ),
     (
         "Esc (list)",
@@ -1783,6 +1880,43 @@ mod tests {
             .unwrap_or_else(|| panic!("no bar in {row}"))
     }
 
+    /// The part of the screen from one pane's title to the next pane's.
+    fn pane<'a>(screen: &'a str, title: &str) -> Vec<&'a str> {
+        let top = screen
+            .lines()
+            .position(|line| line.contains(title))
+            .unwrap_or_else(|| panic!("no pane {title}\n{screen}"));
+        let lines: Vec<&str> = screen.lines().collect();
+        let left = lines[top].find(title).unwrap();
+        let chars = |line: &str, to: usize| line[..to.min(line.len())].chars().count();
+        let from = chars(lines[top], left);
+        // Up to the pane's right edge: the next corner on its title row.
+        let width = lines[top][left..]
+            .chars()
+            .position(|c| c == '┐')
+            .map_or(usize::MAX, |at| at + 1);
+        lines[top..]
+            .iter()
+            .take_while(|line| !line.starts_with(' ') || line.trim().is_empty())
+            .map(|line| {
+                let start = line
+                    .char_indices()
+                    .nth(from)
+                    .map_or(line.len(), |(at, _)| at);
+                let end = line
+                    .char_indices()
+                    .nth(from.saturating_add(width))
+                    .map_or(line.len(), |(at, _)| at);
+                &line[start..end]
+            })
+            .take_while(|line| !line.starts_with('└'))
+            .collect()
+    }
+
+    fn pane_text(screen: &str, title: &str) -> String {
+        pane(screen, title).join("\n")
+    }
+
     #[test]
     fn the_trace_page_shows_a_turn_as_a_waterfall() {
         let mut app = fixture_app();
@@ -1790,76 +1924,132 @@ mod tests {
         app.enter();
         app.go_to(Page::Trace);
 
-        // Folded: one row a turn, and the turn's detail.
-        let folded = screen(&mut app, 150, 44, SOON);
-        assert!(folded.contains("Trace (1 turn) of 22222222"), "{folded}");
-        let turn = row(&folded, "▸ turn");
-        assert!(turn.contains("3 requests, 3 tool calls"), "{turn}");
-        assert!(turn.contains("8.0s"));
-        assert!(turn.contains("done"));
-        assert!(!folded.contains("cargo test --workspace"));
-        let detail = &folded[folded.find("┌ Span ").unwrap()..];
-        assert!(detail.contains("took      8.0s"), "{folded}");
-        assert!(detail.contains("requests  3, 5.5s in all (approximate)"));
-        assert!(detail.contains("tools     3, 3.7s in all"));
-        assert!(detail.contains("subagents 2"));
-        assert!(detail.contains("id        prompt-u1"));
+        // Three panes: the turns, beside them the turn under the cursor,
+        // under them its tree.
+        let shown = screen(&mut app, 150, 44, SOON);
+        let tops = pane_tops(&shown);
+        assert_eq!(tops.len(), 2, "{shown}");
+        assert!(shown.lines().nth(tops[0]).unwrap().contains("┐┌ Turn "));
+        let turns = pane_text(&shown, "┌ Trace (1 turn) of 22222222");
+        assert!(turns.contains("3 req, 3 tools"), "{shown}");
+        assert!(turns.contains("8.0s") && turns.contains("done"));
+        // The list is never unfolded in place.
+        assert!(!turns.contains("cargo test"), "{turns}");
+        assert!(!turns.contains('█'));
 
-        // Unfolded: its spans, each with a bar where it was in the turn.
-        app.enter();
-        let open = screen(&mut app, 150, 44, SOON);
-        assert!(row(&open, "▾ turn").contains("────"), "{open}");
-        let bash = row(&open, "cargo test --workspace");
+        let turn = pane_text(&shown, "┌ Turn ─");
+        assert!(turn.contains("took      8.0s"), "{shown}");
+        assert!(turn.contains("requests  3, 5.5s in all (approximate)"));
+        assert!(turn.contains("tools     3, 3.7s in all"));
+        assert!(turn.contains("subagents 2"));
+        assert!(turn.contains("id        prompt-u1"));
+
+        // The tree: each span with a bar where it was in the turn.
+        let tree = pane(&shown, "┌ Turn: 3 requests, 3 tool calls");
+        let find = |needle: &str| -> &str {
+            tree.iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{shown}"))
+        };
+        let bash = find("cargo test --workspace");
         assert!(bash.contains("Bash") && bash.contains("1.5s") && bash.contains("ok"));
-        assert!(row(&open, "/work/example/README.md").contains("failed"));
-        assert!(row(&open, "▸ ↳ Explore").contains("Synthetic agent task"));
-        assert!(row(&open, "▸ ↳ agent").contains("b2c3d4e5f6071829"));
-        let requests: Vec<&str> = open.lines().filter(|l| l.contains("request  ")).collect();
-        assert_eq!(requests.len(), 3, "{open}");
+        assert!(find("/work/example/README.md").contains("failed"));
+        assert!(find("▸ ↳ Explore").contains("Synthetic agent task"));
+        assert!(find("▸ ↳ agent").contains("b2c3d4e5f6071829"));
+        let requests: Vec<&&str> = tree.iter().filter(|l| l.contains("request  ")).collect();
+        assert_eq!(requests.len(), 3, "{shown}");
         assert!(requests[0].contains("fable-5-2") && requests[0].contains("tool_use"));
         assert!(requests[2].contains("end_turn"));
         // In the order they happened, left to right.
         assert!(bar_at(requests[0]) < bar_at(bash));
-        assert!(bar_at(bash) < bar_at(row(&open, "synthetic lookup")));
+        assert!(bar_at(bash) < bar_at(find("synthetic lookup")));
         assert!(bar_at(requests[1]) < bar_at(requests[2]));
         // The last request ends where the turn does.
         assert!(requests[2].trim_end_matches('│').ends_with('█'));
 
-        // The detail of a request, of a call and of a subagent.
-        app.move_by(1);
+        // In the tree, the pane beside the turns shows the span chosen: a
+        // request, a call, a subagent.
+        app.enter();
         let request = screen(&mut app, 150, 44, SOON);
-        let detail = &request[request.find("┌ Span ").unwrap()..];
-        assert!(detail.contains("API request"), "{request}");
-        assert!(detail.contains("model     claude-fable-5-2"));
-        assert!(detail.contains("source    repl_main_thread"));
-        assert!(detail.contains("stop      tool_use"));
-        assert!(detail.contains("took      2.4s  approximate"));
-        assert!(detail.contains("id        msg_1"));
+        let span = pane_text(&request, "┌ Span ");
+        assert!(span.contains("API request"), "{request}");
+        assert!(span.contains("model     claude-fable-5-2"));
+        assert!(span.contains("source    repl_main_thread"));
+        assert!(span.contains("stop      tool_use"));
+        assert!(span.contains("took      2.4s  approximate"));
+        assert!(span.contains("id        msg_1"));
         app.move_by(1);
         let call = screen(&mut app, 150, 44, SOON);
-        let detail = &call[call.find("┌ Span ").unwrap()..];
-        assert!(detail.contains("by        the main thread"), "{call}");
-        assert!(detail.contains("cargo test --workspace"));
+        let span = pane_text(&call, "┌ Span ");
+        assert!(span.contains("by        the main thread"), "{call}");
+        assert!(span.contains("cargo test --workspace"));
         app.move_by(2);
         app.right();
         let subagent = screen(&mut app, 150, 44, SOON);
-        assert!(row(&subagent, "▾ ↳ Explore").contains("done"), "{subagent}");
-        assert!(row(&subagent, "synthetic pattern").contains("Grep"));
-        let detail = &subagent[subagent.find("┌ Span ").unwrap()..];
-        assert!(detail.contains("type      Explore"));
+        let tree = pane_text(&subagent, "┌ Turn: ");
+        assert!(tree.contains("▾ ↳ Explore"), "{subagent}");
+        assert!(tree.contains("synthetic pattern"));
+        assert!(pane_text(&subagent, "┌ Span ").contains("type      Explore"));
 
         // Without a session entered, rows name their session, and a narrow
         // terminal drops the time axis.
         app.back();
+        app.back();
         let all = screen(&mut app, 150, 44, SOON);
         assert!(all.contains("Trace (3 turns)"), "{all}");
-        assert!(all
-            .lines()
-            .any(|l| l.contains("session") && l.contains("time")));
-        assert!(row(&all, "Synthetic session tit").contains("▸ turn"));
+        let turns = pane_text(&all, "┌ Trace (3 turns)");
+        assert!(turns.contains("session") && turns.contains("Synthetic sessio"));
+        // A turn of which only the prompt was read.
+        assert!(all.contains("nothing was read of this turn but its prompt"));
+        app.move_by(1);
         let narrow = screen(&mut app, 60, 30, SOON);
         assert!(!narrow.contains('█'), "{narrow}");
-        assert!(narrow.contains("turn"));
+        assert!(narrow.contains("cargo test"));
+    }
+
+    #[test]
+    fn the_tree_follows_its_cursor_and_keeps_its_place() {
+        use crate::app::tests::{append_agent_call, scratch_projects};
+        let projects = scratch_projects("trace-scroll");
+        for index in 2..40 {
+            let input = format!(r#"{{"command":"echo call-{index}"}}"#);
+            append_agent_call(&projects, &format!("toolu_s{index:02}"), index, &input);
+        }
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+        });
+        app.go_to(Page::Trace);
+        app.move_by(1);
+        app.enter();
+        app.move_by(3);
+        app.right();
+        // The subagent's calls are far more than the pane shows.
+        let top = screen(&mut app, 150, 40, LATER);
+        assert!(
+            pane_text(&top, "┌ Turn: ").contains("synthetic pattern"),
+            "{top}"
+        );
+        assert!(!pane_text(&top, "┌ Turn: ").contains("call-39"));
+        app.move_last();
+        let bottom = screen(&mut app, 150, 40, LATER);
+        assert!(
+            !pane_text(&bottom, "┌ Turn: ").contains("cargo test"),
+            "{bottom}"
+        );
+        assert!(bottom.contains("b2c3d4e5f6071829"));
+        assert!(app.offsets[TREE] > 0);
+        // Half a page at a time, by what the tree shows.
+        assert!(app.viewport.detail_rows > 4);
+        assert_eq!(app.half_page() as usize, app.viewport.detail_rows / 2);
+        // Another turn starts at its top.
+        app.back();
+        app.move_by(1);
+        screen(&mut app, 150, 40, LATER);
+        assert_eq!((app.span_selected, app.offsets[TREE]), (0, 0));
+
+        let _ = std::fs::remove_dir_all(projects);
     }
 
     #[test]
@@ -1882,12 +2072,11 @@ mod tests {
         app.go_to(Page::Trace);
         // Under the turn of a session that is a day later.
         app.move_by(1);
-        assert_eq!(app.selected_row().unwrap().turn.id, "prompt-new");
-        app.enter();
+        assert_eq!(app.selected_turn().unwrap().turn.id, "prompt-new");
 
         // Its session was active a moment ago: everything reaches to now.
         let running = screen(&mut app, 150, 44, "2026-11-02T11:01:30.000Z");
-        let turn = row(&running, "▾ turn");
+        let turn = row(&running, "1 req, 1 tool");
         assert!(
             turn.contains("running") && turn.contains("1m30s"),
             "{running}"
@@ -1898,13 +2087,13 @@ mod tests {
             "{running}"
         );
         assert!(call.trim_end_matches('│').ends_with('█'));
-        let detail = &running[running.find("┌ Span ").unwrap()..];
-        assert!(detail.contains("state     running"));
-        assert!(detail.contains("so far, by the records read"));
+        let detail = pane_text(&running, "┌ Turn ─");
+        assert!(detail.contains("state     running"), "{running}");
+        assert!(detail.contains("so far, by the records"));
 
         // Long after: all that is known is that it has no end.
         let later = screen(&mut app, 150, 44, LATER);
-        let turn = row(&later, "▾ turn");
+        let turn = row(&later, "1 req, 1 tool");
         assert!(turn.contains("no end") && turn.contains("1m00s"), "{later}");
         assert!(!row(&later, "sleep 600")
             .trim_end_matches('│')
@@ -2228,7 +2417,7 @@ mod tests {
         assert!(screen.contains("filter sessions"));
         assert!(screen.contains("narrow pages 2 to 4"));
         assert!(screen.contains("Sessions / Tool calls / Subagents / Trace / Usage"));
-        assert!(screen.contains("unfold or fold a turn"));
+        assert!(screen.contains("unfold or fold a subagent"));
     }
 
     #[test]
@@ -2278,14 +2467,15 @@ mod tests {
         app.enter();
         println!("{}", screen(&mut app, 100, 24, SOON));
         app.go_to(Page::Trace);
+        println!("{}", screen(&mut app, 150, 36, SOON));
         app.enter();
-        println!("{}", screen(&mut app, 150, 30, SOON));
         app.move_by(3);
         app.enter();
-        println!("{}", screen(&mut app, 150, 30, SOON));
+        app.move_by(2);
+        println!("{}", screen(&mut app, 150, 36, SOON));
         app.back();
         app.back();
-        println!("{}", screen(&mut app, 110, 24, SOON));
+        println!("{}", screen(&mut app, 110, 30, SOON));
     }
 
     #[test]
@@ -2294,12 +2484,25 @@ mod tests {
         for page in Page::ALL {
             app.go_to(page);
             if page == Page::Trace {
-                // Every turn and every subagent unfolded.
-                for at in (0..40).rev() {
+                // Every turn's tree, with every subagent unfolded.
+                for turn in 0..4 {
+                    app.in_detail = false;
                     app.move_first();
-                    app.move_by(at);
-                    app.right();
-                    app.leave_detail();
+                    app.move_by(turn);
+                    app.focus_detail();
+                    for at in (0..40).rev() {
+                        app.move_first();
+                        app.move_by(at);
+                        app.right();
+                        app.leave_detail();
+                        app.in_detail = true;
+                        app.call_focus = false;
+                    }
+                    for _ in 0..12 {
+                        let screen = screen(&mut app, 160, 50, LATER);
+                        assert!(!screen.contains("SYNTHETIC-TEXT"), "{screen}");
+                        app.move_by(1);
+                    }
                 }
                 app.in_detail = false;
                 app.move_first();
