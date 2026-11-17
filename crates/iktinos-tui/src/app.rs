@@ -2,11 +2,12 @@
 //! and, when the bridge mod is installed, from live events.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iktinos::discover::{discover, SessionFiles};
 use iktinos::output::{read_tool_output, WholeOutput};
+use iktinos::place::Place;
 use iktinos::record::{Record, Timestamp};
 use iktinos::session::{
     Activity, CostSource, LiveState, Session, SessionStore, Subagent, ToolCall,
@@ -30,6 +31,9 @@ pub struct Config {
     /// With [`TimeStyle::Clock`], what is newer than this is still shown as
     /// how long ago it was.
     pub ago_within: Duration,
+    /// Show only the sessions that run in this directory, below it, or in
+    /// a worktree of its git repository (`--cwd`).
+    pub within: Option<PathBuf>,
 }
 
 /// How new something is shown as "ago" unless told otherwise.
@@ -326,6 +330,10 @@ pub struct App {
     pub live: LiveStatus,
     /// What arrived on the socket so far.
     pub received: Received,
+    /// The directory the viewer is narrowed to, if it is.
+    place: Option<Place>,
+    /// The sessions outside it: in the store, and on no page but Usage.
+    outside: HashSet<String>,
     #[cfg(unix)]
     listener: Option<live::Listener>,
 }
@@ -490,6 +498,8 @@ impl App {
             notice: None,
             live: LiveStatus::Off,
             received: Received::default(),
+            place: config.within.as_deref().map(Place::new),
+            outside: HashSet::new(),
             #[cfg(unix)]
             listener: None,
             config,
@@ -657,10 +667,18 @@ impl App {
     /// Rebuilds the session list for the filter and the sort in force,
     /// keeping the cursor on the session it was on.
     pub fn arrange(&mut self, now: Timestamp) {
+        if let Some(place) = &mut self.place {
+            // A session without a known location is not shown either.
+            self.outside = self
+                .store
+                .sessions()
+                .filter(|session| !location(session).is_some_and(|path| place.holds(path)))
+                .map(|session| session.id.clone())
+                .collect();
+        }
         let selected = self.order.get(self.selected).cloned();
         let mut sessions: Vec<&Session> = self
-            .store
-            .sessions()
+            .shown()
             .filter(|s| self.filter.admits(status(s, now).kind))
             .filter(|s| {
                 self.repository
@@ -720,8 +738,21 @@ impl App {
     fn in_scope(&self) -> Vec<&Session> {
         match self.scoped_session() {
             Some(session) => vec![session],
-            None => self.store.sessions().collect(),
+            None => self.shown().collect(),
         }
+    }
+
+    /// The sessions the pages show: all of them, or with `--cwd` those of
+    /// the directory. The Usage page totals every session regardless.
+    pub fn shown(&self) -> impl Iterator<Item = &Session> {
+        self.store
+            .sessions()
+            .filter(|session| !self.outside.contains(&session.id))
+    }
+
+    /// The directory the pages are narrowed to.
+    pub fn within(&self) -> Option<&Path> {
+        self.place.as_ref().map(Place::dir)
     }
 
     /// Recent tool calls, the latest first, each with its session.
@@ -1680,15 +1711,22 @@ pub fn label(session: &Session) -> &str {
         .unwrap_or_else(|| session.id.get(..8).unwrap_or(&session.id))
 }
 
-/// The last component of where the session runs.
-pub fn project(session: &Session) -> Option<String> {
+/// Where the session runs: its project, else the directory of its latest
+/// record, else what its live start reported.
+pub fn location(session: &Session) -> Option<&Path> {
     let live_cwd = session.live.as_ref().and_then(|l| l.cwd.as_ref());
     session
         .project_path
         .as_ref()
         .or(session.cwd.as_ref())
         .or(live_cwd)
-        .and_then(|path| path.file_name())
+        .map(PathBuf::as_path)
+}
+
+/// The last component of where the session runs.
+pub fn project(session: &Session) -> Option<String> {
+    location(session)
+        .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
 }
 
@@ -1757,14 +1795,19 @@ pub mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
     }
 
-    pub fn fixture_app() -> App {
-        App::new(Config {
+    pub fn fixture_config() -> Config {
+        Config {
             projects_dir: fixtures().join(KNOWN_CLAUDE_CODE_VERSION).join("projects"),
             live: false,
             socket_dir: None,
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
-        })
+            within: None,
+        }
+    }
+
+    pub fn fixture_app() -> App {
+        App::new(fixture_config())
     }
 
     #[test]
@@ -1934,6 +1977,7 @@ pub mod tests {
             socket_dir: None,
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Subagents);
         assert_eq!(
@@ -2318,6 +2362,7 @@ pub mod tests {
             socket_dir: None,
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Trace);
         app.by_session = false; // these are about the flat list
@@ -2367,6 +2412,7 @@ pub mod tests {
             socket_dir: None,
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
+            within: None,
         });
         app.go_to(Page::Tools);
         app.move_by(3);
@@ -2485,6 +2531,7 @@ pub mod tests {
             socket_dir: None,
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
+            within: None,
         });
         assert!(app.order.is_empty());
         assert!(app.selected_session().is_none());
@@ -2520,6 +2567,7 @@ pub mod tests {
             socket_dir: Some(socket_dir.clone()),
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
+            within: None,
         });
         let LiveStatus::Listening(socket) = app.live.clone() else {
             panic!("{:?}", app.live)

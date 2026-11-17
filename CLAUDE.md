@@ -14,6 +14,9 @@ Hard rules:
 
 - **Read-only.** The crates read files and listen on a socket. They never
   write to Claude Code's directories and never send anything to Claude Code.
+  The one thing read outside those directories is a repository's `.git` (the
+  directory, or a worktree's file and its `commondir`), to tell which
+  sessions run in the same repository (`place`); no `git` is started.
 - **The crates do not log what they read, and do not hoard it.** The
   transcripts are the user's own files, so a view may model the text it needs
   (the last prompt, the first line of a prompt, a subagent's description, a
@@ -39,7 +42,7 @@ Hard rules:
 ## Layout
 
 ```
-crates/iktinos/        core: record, discover, tail, session, trace, output, pricing
+crates/iktinos/        core: record, discover, tail, session, trace, output, place, pricing
 crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
 crates/iktinos-tui/    the `iktinos` binary
 mods/iktinos-bridge/               the Claude Code mod (TS) that speaks the protocol
