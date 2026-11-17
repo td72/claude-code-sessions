@@ -65,6 +65,10 @@ pub struct Interaction {
     /// interaction whose prompt was not read (the transcript was read from
     /// the middle).
     pub id: String,
+    /// What the user asked: one line of the prompt
+    /// ([`summarize_prompt`](crate::record::summarize_prompt)). `None`
+    /// where the prompt was not read or is not text the user typed.
+    pub prompt: Option<String>,
     pub started_at: Option<Timestamp>,
     /// When Claude Code wrote the interaction's duration. `None` for one
     /// that is running or was cut off.
@@ -79,6 +83,7 @@ impl Interaction {
     pub(crate) fn new(id: String, started_at: Option<Timestamp>) -> Self {
         Self {
             id,
+            prompt: None,
             started_at,
             ended_at: None,
             duration_ms: None,

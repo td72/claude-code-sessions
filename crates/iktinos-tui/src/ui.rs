@@ -482,6 +482,34 @@ fn interaction_summary(interaction: &Interaction) -> String {
     )
 }
 
+/// What an interaction's row says it was: what was asked, or, where the
+/// prompt is not known, the tools it used and how often (`Bash×3 Read×2`).
+fn interaction_text(interaction: &Interaction) -> (String, Style) {
+    if let Some(prompt) = &interaction.prompt {
+        return (prompt.clone(), Style::new());
+    }
+    // In the order they were first used.
+    let mut tools: Vec<(String, usize)> = Vec::new();
+    for span in &interaction.thread.spans {
+        if let SpanKind::Tool(call) = &span.kind {
+            let name = format::tool_name(&call.name);
+            match tools.iter_mut().find(|(known, _)| *known == name) {
+                Some((_, count)) => *count += 1,
+                None => tools.push((name, 1)),
+            }
+        }
+    }
+    let text = tools
+        .iter()
+        .map(|(name, count)| match count {
+            1 => name.clone(),
+            _ => format!("{name}×{count}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (text, tool_style())
+}
+
 /// How an interaction ended, as far as can be told.
 fn interaction_state(
     session: &Session,
@@ -571,10 +599,18 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 .started_at
                 .map_or("—".to_owned(), |at| when(time, now, at));
             let mut cells = vec![Cell::from(Line::from(when).right_aligned())];
+            let (text, text_style) = interaction_text(interaction);
             if by_session {
-                cells.push(Cell::from("  └").style(dim()));
-            } else if names {
-                cells.push(session_cell(session));
+                // Under its session, in the session's column.
+                cells.push(Cell::from(Line::from(vec![
+                    Span::styled("  └ ", dim()),
+                    Span::styled(text, text_style),
+                ])));
+            } else {
+                if names {
+                    cells.push(session_cell(session));
+                }
+                cells.push(Cell::from(text).style(text_style));
             }
             let (requests, calls) = counts(interaction);
             cells.extend([
@@ -591,10 +627,18 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
         .collect();
     let mut widths = vec![Constraint::Length(when_width(time))];
     let mut header = vec!["when"];
-    if names {
-        // The session gets what the short columns leave.
+    if by_session {
         widths.push(Constraint::Fill(1));
-        header.push("session");
+        header.push("session / prompt");
+    } else {
+        if names {
+            widths.push(Constraint::Fill(2));
+            header.push("session");
+        }
+        // The session and what was asked share what the short columns
+        // leave, the prompt with the larger part.
+        widths.push(Constraint::Fill(3));
+        header.push("prompt");
     }
     widths.extend([Constraint::Length(4), Constraint::Length(5)]);
     header.extend(["llm", "tools"]);
@@ -866,6 +910,9 @@ fn interaction_lines(
             .to_owned(),
         ),
     ];
+    if let Some(prompt) = &interaction.prompt {
+        lines.push(field("prompt", prompt.clone()));
+    }
     if let Some(at) = interaction.started_at {
         lines.push(field("started", format::started(now, at)));
     }
@@ -2090,12 +2137,14 @@ mod tests {
             let line = line.replace('│', " ");
             line.split_whitespace().map(str::to_owned).collect()
         };
-        assert_eq!(words(lines[1]), ["when", "llm", "tools", "took"], "{shown}");
         assert_eq!(
-            words(lines[2]),
-            ["20s", "3", "3", "8.0s", "done"],
+            words(lines[1]),
+            ["when", "prompt", "llm", "tools", "took"],
             "{shown}"
         );
+        let row = words(lines[2]);
+        assert_eq!(row[row.len() - 4..], ["3", "3", "8.0s", "done"], "{shown}");
+        assert!(lines[2].contains("Synthetic prompt: run the checks"));
         assert!(interactions.contains("8.0s") && interactions.contains("done"));
         // The list is never unfolded in place.
         assert!(!interactions.contains("cargo test"), "{interactions}");
@@ -2182,12 +2231,18 @@ mod tests {
         let mut app = fixture_app();
         app.go_to(Page::Trace);
         app.move_by(1);
-        // Flat: the session is a column, and it has the room.
+        // Flat: the session is a column, and beside it what was asked.
         let flat = screen(&mut app, 150, 44, SOON);
         let list = pane_text(&flat, "┌ Trace (3 interactions · latest first)");
-        assert!(list.contains("session"), "{flat}");
-        assert!(list.contains("Synthetic title after the damage"), "{flat}");
-        assert!(list.contains("Synthetic session title"));
+        assert!(
+            list.contains("session") && list.contains("prompt"),
+            "{flat}"
+        );
+        // (They share the room: both are cut at this width.)
+        assert!(list.contains("Synthetic sessio"), "{flat}");
+        assert!(list.contains("Synthetic prompt: run the"), "{flat}");
+        // The rest of the prompt is not kept.
+        assert!(!flat.contains("SYNTHETIC-TEXT"));
 
         // By session: a row a session, its interactions under it.
         app.toggle_by_session();
@@ -2205,13 +2260,28 @@ mod tests {
         // session's row has the totals.
         let under = find("8.0s").replace('│', " ");
         let under: Vec<&str> = under.split_whitespace().collect();
-        assert_eq!(under, ["20s", "└", "3", "3", "8.0s", "done"]);
+        assert_eq!(
+            under,
+            [
+                "20s",
+                "└",
+                "Synthetic",
+                "prompt:",
+                "run",
+                "the",
+                "checks",
+                "3",
+                "3",
+                "8.0s",
+                "done"
+            ]
+        );
         assert!(
             session.split_whitespace().any(|word| word == "3"),
             "{session}"
         );
         assert!(
-            list[1].contains("session") && list[1].contains("tools"),
+            list[1].contains("session / prompt") && list[1].contains("tools"),
             "{tree}"
         );
         // The panes still show the interaction the cursor was on.
@@ -2253,6 +2323,48 @@ mod tests {
             pane_text(&span, "┌ Span ").contains("cargo test --workspace"),
             "{span}"
         );
+    }
+
+    #[test]
+    fn an_interaction_without_its_prompt_is_told_by_the_tools_it_used() {
+        use crate::app::tests::{append_call, scratch_projects};
+        let projects = scratch_projects("trace-tools");
+        for (id, name) in [
+            ("toolu_n1", "Bash"),
+            ("toolu_n2", "Read"),
+            ("toolu_n3", "Bash"),
+        ] {
+            append_call(&projects, id, 1, name, r#"{"command":"ls"}"#);
+        }
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+            time: crate::app::TimeStyle::default(),
+            ago_within: crate::app::DEFAULT_AGO_WITHIN,
+        });
+        let session = app.store.get(WITH_SUBAGENTS).unwrap();
+        let known = session.trace.back().unwrap();
+        assert_eq!(
+            interaction_text(known).0,
+            "Synthetic prompt: run the checks"
+        );
+        // The same interaction, had its prompt not been read.
+        let mut unknown = known.clone();
+        unknown.prompt = None;
+        let (text, style) = interaction_text(&unknown);
+        assert_eq!(text, "Bash×3 Read×2 example/lookup");
+        assert_eq!(style, tool_style());
+
+        // A search finds an interaction by what was asked.
+        app.go_to(Page::Trace);
+        app.start_search();
+        app.typing = Some("run the checks".to_owned());
+        app.submit_search();
+        let now = Timestamp::parse(LATER).unwrap();
+        assert_eq!(app.matches(Page::Trace, now).len(), 3);
+
+        let _ = std::fs::remove_dir_all(projects);
     }
 
     #[test]

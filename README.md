@@ -90,7 +90,9 @@ Each list page is a list over a detail pane, in fixed proportions:
   time axis that is as long as the interaction; and beside the list what is
   chosen: where the interaction's time went, or, in the tree, a request's
   tokens and cost or a call's command.
-  `t` lists the interactions under their sessions instead.
+  A row says what was asked (the first line of the prompt), or, where the
+  prompt is not known, the tools that were used. `t` lists the interactions
+  under their sessions instead.
 - **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
@@ -132,8 +134,8 @@ Both feed a `SessionStore` incrementally. Snapshot fields are last-write-wins by
 timestamp; accumulated fields are folded once from the transcript offsets. No
 field is written by both inputs, so arrival order never changes the result.
 
-Text is modelled where a view needs it (a title, the last prompt, a subagent's
-description). The crates never log record contents themselves, and a session
+Text is modelled where a view needs it (a title, the last prompt, the first
+line of each recent prompt, a subagent's description). The crates never log record contents themselves, and a session
 keeps bounded recent activity, not its whole history: its latest tool calls,
 and its latest interactions as a trace.
 

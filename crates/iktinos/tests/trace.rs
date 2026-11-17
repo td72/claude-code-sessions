@@ -89,6 +89,11 @@ fn turns_are_kept_with_their_own_spans() {
     assert_eq!(ids, ["prompt-t1", "prompt-t2", "prompt-t3"]);
 
     let first = &session.trace[0];
+    // What was asked: the first line of the prompt, and no more of it.
+    assert_eq!(
+        first.prompt.as_deref(),
+        Some("Synthetic prompt: run the checks")
+    );
     assert_eq!(first.started_at, at("12:00:00.000"));
     assert_eq!(first.ended_at, at("12:00:05.100"));
     assert_eq!(first.duration_ms, Some(5000));
@@ -271,7 +276,7 @@ fn records_with_missing_keys_do_not_break_the_tree() {
         ),
         // A prompt without `promptId`: its `uuid` names the interaction.
         record(
-            r#"{"type":"user","uuid":"x3","timestamp":"2026-11-04T13:01:00.000Z","message":{"content":"SYNTHETIC-TEXT"}}"#,
+            r#"{"type":"user","uuid":"x3","timestamp":"2026-11-04T13:01:00.000Z","message":{"content":"a prompt without an id"}}"#,
         ),
         // A response without a message id, and a tool block without an id.
         record(
@@ -296,6 +301,11 @@ fn records_with_missing_keys_do_not_break_the_tree() {
         .map(|interaction| interaction.id.as_str())
         .collect();
     assert_eq!(ids, ["", "x3"]);
+    assert_eq!(session.trace[0].prompt, None, "its prompt was not read");
+    assert_eq!(
+        session.trace[1].prompt.as_deref(),
+        Some("a prompt without an id")
+    );
     // The first response starts where its interaction does: nothing was before it.
     assert_eq!(
         tree(session, 0),

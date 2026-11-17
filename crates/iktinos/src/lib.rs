@@ -15,8 +15,8 @@
 //! Code mod. Both apply to a [`session::SessionStore`] incrementally; no field
 //! is written by both, so arrival order never changes the result.
 //!
-//! Text is modelled where a view needs it (a title, the last prompt, a subagent's
-//! description). The crates never log record contents themselves, and a session
+//! Text is modelled where a view needs it (a title, the last prompt, the first
+//! line of each recent prompt, a subagent's description). The crates never log record contents themselves, and a session
 //! keeps bounded recent activity (its latest tool calls and interactions), not its
 //! whole history.
 //!

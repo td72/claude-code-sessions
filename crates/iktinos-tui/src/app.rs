@@ -330,10 +330,14 @@ pub struct InteractionRow<'a> {
 }
 
 impl InteractionRow<'_> {
-    /// The text the interaction is searched by: its session and what its main
-    /// thread called.
+    /// The text the interaction is searched by: its session, what was asked
+    /// and what its main thread called.
     fn text(&self) -> String {
-        let mut text = format!("interaction {}", label(self.session));
+        let mut text = format!(
+            "interaction {} {}",
+            label(self.session),
+            self.interaction.prompt.as_deref().unwrap_or_default()
+        );
         for span in &self.interaction.thread.spans {
             if let SpanKind::Tool(call) = &span.kind {
                 text.push(' ');
@@ -1821,7 +1825,7 @@ pub mod tests {
     pub fn append_prompt(projects: &Path, id: &str, minute: u8) {
         use std::io::Write;
         let line = format!(
-            r#"{{"parentUuid":null,"isSidechain":false,"promptId":"{id}","type":"user","message":{{"role":"user","content":"SYNTHETIC-TEXT invented for the fixture"}},"uuid":"uuid-{id}","timestamp":"2026-11-02T11:{minute:02}:00.000Z","cwd":"/work/other.repo","sessionId":"{WITH_SUBAGENTS}","version":"2.1.325","gitBranch":"main"}}"#
+            r#"{{"parentUuid":null,"isSidechain":false,"promptId":"{id}","type":"user","message":{{"role":"user","content":"Synthetic prompt {id}\nSYNTHETIC-TEXT invented for the fixture"}},"uuid":"uuid-{id}","timestamp":"2026-11-02T11:{minute:02}:00.000Z","cwd":"/work/other.repo","sessionId":"{WITH_SUBAGENTS}","version":"2.1.325","gitBranch":"main"}}"#
         );
         let path = projects
             .join("-work-other-repo")

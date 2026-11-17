@@ -238,6 +238,29 @@ pub struct User {
     /// `promptId`: the prompt this record belongs to. A prompt and the
     /// results of the tool calls made to answer it share one.
     pub prompt_id: Option<String>,
+    /// What the user asked, on the main thread: the first line of the
+    /// prompt, cut to [`PROMPT_CHARS`]; for a slash command, its name.
+    /// `None` for anything else: tool results, what Claude Code injected, a
+    /// subagent's instructions. See [`summarize_prompt`].
+    pub prompt: Option<String>,
+}
+
+/// The longest a prompt's line is kept, in characters.
+pub const PROMPT_CHARS: usize = 120;
+
+/// One line saying what a prompt asks: its first line that holds text, cut
+/// to [`PROMPT_CHARS`]. A slash command is recorded as markup; its name
+/// (`/review`) stands for it. Any other text that starts with markup was
+/// written by Claude Code, not typed, and gives `None`.
+pub fn summarize_prompt(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.starts_with('<') {
+        let name = text.split_once("<command-name>")?.1;
+        let name = name.split_once("</command-name>")?.0.trim();
+        return (!name.is_empty()).then(|| cut(name, PROMPT_CHARS));
+    }
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    Some(cut(line, PROMPT_CHARS))
 }
 
 impl User {
@@ -248,11 +271,29 @@ impl User {
                 tool_use_id: string(b, "tool_use_id"),
                 is_error: b.get("is_error").and_then(Value::as_bool),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let is_meta = flag(obj, "isMeta");
+        let is_compact_summary = flag(obj, "isCompactSummary");
+        // A prompt is text on the main thread that answers no tool call.
+        let typed = tool_results.is_empty()
+            && !is_meta
+            && !is_compact_summary
+            && !flag(obj, "isSidechain")
+            && !obj.contains_key("agentId");
+        let content = obj.get("message").and_then(|m| m.get("content"));
+        let text = match content {
+            Some(Value::String(text)) => Some(text.as_str()),
+            // With an attachment the prompt is the first text block.
+            Some(Value::Array(_)) => content_blocks(obj)
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .find_map(|b| b.get("text").and_then(Value::as_str)),
+            _ => None,
+        };
         Self {
+            prompt: text.filter(|_| typed).and_then(summarize_prompt),
             tool_results,
-            is_meta: flag(obj, "isMeta"),
-            is_compact_summary: flag(obj, "isCompactSummary"),
+            is_meta,
+            is_compact_summary,
             prompt_id: string(obj, "promptId"),
         }
     }
@@ -756,6 +797,56 @@ mod tests {
         assert!(long.ends_with('…'));
         // Nothing to summarise.
         assert_eq!(summary(r#"{"content":"a whole file"}"#), None);
+
+        // A prompt: its first line with text; a command's name; nothing
+        // for what was not typed.
+        assert_eq!(
+            summarize_prompt("\n  fix the build \nand the tests").as_deref(),
+            Some("fix the build")
+        );
+        assert_eq!(
+            summarize_prompt(
+                "<command-message>review</command-message>\n<command-name>/review</command-name>"
+            )
+            .as_deref(),
+            Some("/review")
+        );
+        assert_eq!(
+            summarize_prompt("<system-reminder>injected</system-reminder>"),
+            None
+        );
+        assert_eq!(summarize_prompt("<command-name></command-name>"), None);
+        assert_eq!(summarize_prompt("  \n "), None);
+        let long = summarize_prompt(&"あ".repeat(300)).unwrap();
+        assert_eq!(long.chars().count(), PROMPT_CHARS);
+        let prompt = |record: &str| match Record::parse(record).view() {
+            View::User(user) => user.prompt.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            prompt(r#"{"type":"user","message":{"content":"run the tests\nplease"}}"#).as_deref(),
+            Some("run the tests")
+        );
+        assert_eq!(
+            prompt(
+                r#"{"type":"user","message":{"content":[{"type":"image"},{"type":"text","text":"what is this"}]}}"#
+            )
+            .as_deref(),
+            Some("what is this")
+        );
+        // Not a prompt: a tool's result, an injected record, a subagent's
+        // instructions.
+        for other in [
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t"},{"type":"text","text":"x"}]}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":"x"}}"#,
+            r#"{"type":"user","isCompactSummary":true,"message":{"content":"x"}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":"x"}}"#,
+            r#"{"type":"user","agentId":"a1","message":{"content":"x"}}"#,
+            r#"{"type":"user","message":{"content":7}}"#,
+            r#"{"type":"user"}"#,
+        ] {
+            assert_eq!(prompt(other), None, "{other}");
+        }
 
         // The whole text is kept beside a summary that is not all of it.
         let whole = |input: &str| whole_input(&serde_json::from_str(input).unwrap());

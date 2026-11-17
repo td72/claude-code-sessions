@@ -946,7 +946,9 @@ impl Entry {
                         .back()
                         .is_none_or(|interaction| interaction.id != id)
                     {
-                        session.start_interaction(Interaction::new(id, at), limit.interactions);
+                        let mut interaction = Interaction::new(id, at);
+                        interaction.prompt.clone_from(&user.prompt);
+                        session.start_interaction(interaction, limit.interactions);
                     }
                 }
                 for result in &user.tool_results {
