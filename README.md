@@ -58,7 +58,7 @@ for session in store.sessions() {
 
 | crate | role |
 | --- | --- |
-| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `pricing` (embedded price table) |
+| [`iktinos`](crates/iktinos) | core: `record` (typed transcript lines, raw kept, unknown shapes surveyed), `discover` (sessions, subagents, cwd resolution), `tail` (offset-based reading and append following), `session` (`Session` / `SessionStore`), `trace` (the latest turns as trees of spans), `pricing` (embedded price table) |
 | [`iktinos-live`](crates/iktinos-live) | the live-event protocol, the Unix-socket server that receives it, and the merge into `Session`. Listen only; never sends |
 | [`iktinos-tui`](crates/iktinos-tui) | the `iktinos` binary: a small terminal viewer |
 | [`mods/iktinos-bridge`](mods/iktinos-bridge) | the Claude Code mod that POSTs live events to every consumer's socket |
@@ -83,21 +83,27 @@ Each list page is a list over a detail pane, in fixed proportions:
 - **3:Subagents** — subagents with their type, task, model, tokens and cost;
   the detail is two panes, the subagent with its own tool calls and, beside
   it, the call chosen there with its whole command.
-- **4:Usage** — tokens and estimated cost by model and by source over every
+- **4:Trace** — the latest turns, the latest first. A turn unfolds into what
+  it was made of: its API requests, the tool calls each made, the subagents
+  those spawned and what they did, each with a bar on a time axis that is as
+  long as the turn. The detail pane shows where a turn's time went, a
+  request's tokens and cost, a call's command.
+- **5:Usage** — tokens and estimated cost by model and by source over every
   session, and sessions, tokens and cost by repository.
 
-Pages 2 and 3 cover every session until `Enter` is pressed on one in the
+Pages 2, 3 and 4 cover every session until `Enter` is pressed on one in the
 Sessions page; then they are narrowed to it. `Enter` on a subagent narrows the
 Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 
 | key | |
 | --- | --- |
-| `1` – `4` | switch page |
+| `1` – `5` | switch page |
 | `j` / `k`, `gg` / `G`, `Ctrl+d` / `Ctrl+u` | move in the list (or scroll the detail pane) |
-| `Enter` on a session | narrow pages 2 and 3 to it and show its tool calls |
+| `Enter` on a session | narrow pages 2, 3 and 4 to it and show its tool calls |
 | `Enter` on a subagent | narrow page 2 to it and show its tool calls |
 | `i` / `Enter`, `Tab`; then `h` / `Esc` | into the detail pane and back, a pane at a time |
 | `j` / `k` in a subagent's detail; then `i` / `Enter` | choose one of its tool calls; into the pane that shows it |
+| `Enter` / `l`, `h` on a turn or a subagent in the trace | unfold it; fold it (`h` elsewhere goes to the row it is under) |
 | `/`, `n` / `N` | search the list |
 | `Esc` on a list | clear the search, then the narrowing |
 | `s`, `f` | sort sessions (updated, cost, tokens); filter them (all, live, open) |
@@ -122,7 +128,36 @@ field is written by both inputs, so arrival order never changes the result.
 
 Text is modelled where a view needs it (a title, the last prompt, a subagent's
 description). The crates never log record contents themselves, and a session
-keeps bounded recent activity, not its whole history.
+keeps bounded recent activity, not its whole history: its latest tool calls,
+and its latest turns as a trace.
+
+## The trace
+
+`Session::trace` holds a session's latest turns (20 unless the store is told
+otherwise), and `Session::walk` reads one as a tree:
+
+```
+turn
+├─ API request
+│  ├─ tool call
+│  │  └─ subagent          (the call that spawned it)
+│  │     ├─ API request
+│  │     │  └─ tool call
+│  │     └─ API request
+│  └─ tool call
+└─ API request
+```
+
+A turn runs from a prompt to Claude Code's own `turn_duration` record; one
+without it is still running or was cut off, and the transcript cannot tell
+which. A tool call runs from its block to its result. A request runs from its
+`api-request` record to the last block of its response, which is an
+approximation: the transcript records when blocks were written, not when the
+API answered. A subagent hangs under the tool call named in its metadata file,
+or, without one, under the turn it started in.
+
+Only the transcripts write the trace; what is running right now still comes
+from the live events.
 
 ## Cost
 

@@ -1,7 +1,7 @@
 //! The viewer's state: a `SessionStore` kept current from the transcripts
 //! and, when the bridge mod is installed, from live events.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,6 +9,7 @@ use iktinos::discover::{discover, SessionFiles};
 use iktinos::record::{Record, Timestamp};
 use iktinos::session::{Activity, LiveState, Session, SessionStore, Subagent, ToolCall};
 use iktinos::tail::Tail;
+use iktinos::trace::{Item, Span, SpanKind, Turn};
 
 /// How recent a record makes a session "active" when no live event says more.
 const ACTIVE_WITHIN: Duration = Duration::from_secs(60);
@@ -61,17 +62,25 @@ pub enum Page {
     Sessions,
     Tools,
     Subagents,
+    Trace,
     Usage,
 }
 
 impl Page {
-    pub const ALL: [Page; 4] = [Page::Sessions, Page::Tools, Page::Subagents, Page::Usage];
+    pub const ALL: [Page; 5] = [
+        Page::Sessions,
+        Page::Tools,
+        Page::Subagents,
+        Page::Trace,
+        Page::Usage,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Page::Sessions => "Sessions",
             Page::Tools => "Tool calls",
             Page::Subagents => "Subagents",
+            Page::Trace => "Trace",
             Page::Usage => "Usage",
         }
     }
@@ -79,6 +88,16 @@ impl Page {
     /// Whether the page is a list over a detail pane.
     pub fn has_list(self) -> bool {
         self != Page::Usage
+    }
+
+    /// Which of the lists' scroll positions is the page's.
+    pub fn list_index(self) -> usize {
+        match self {
+            Page::Sessions | Page::Usage => 0,
+            Page::Tools => 1,
+            Page::Subagents => 2,
+            Page::Trace => 3,
+        }
     }
 }
 
@@ -175,14 +194,19 @@ pub struct App {
     pub detail_scroll: usize,
     /// The tool call under the cursor of a subagent's detail pane, which
     /// lists the subagent's calls.
+    pub trace_selected: usize,
+    /// The turns of the Trace page that are unfolded, by session and turn
+    /// id, and the subagents unfolded in them, by session and agent id.
+    pub open_turns: HashSet<(String, String)>,
+    pub open_agents: HashSet<(String, String)>,
     pub call_selected: usize,
     /// The pane beside a subagent's detail, which shows that call, has the
     /// focus. Only ever set while `in_detail` is.
     pub call_focus: bool,
     pub call_scroll: usize,
-    /// The first visible row of each list (Sessions, Tool calls, Subagents),
-    /// kept between draws so a list scrolls only when the cursor leaves it.
-    pub offsets: [usize; 3],
+    /// The first visible row of each list ([`Page::list_index`]), kept
+    /// between draws so a list scrolls only when the cursor leaves it.
+    pub offsets: [usize; 4],
     pub search: Option<Search>,
     /// The search being typed, after `/`.
     pub typing: Option<String>,
@@ -201,6 +225,80 @@ const RECENT_TOOLS: usize = 200;
 /// How many rows the Tool calls page lists at most.
 const TOOL_ROWS: usize = 500;
 
+/// How many turns the Trace page lists at most.
+const TURN_ROWS: usize = 200;
+
+/// One row of the Trace page: a turn, or a span or a subagent of an unfolded
+/// one.
+#[derive(Debug, Clone, Copy)]
+pub struct TraceRow<'a> {
+    pub session: &'a Session,
+    pub turn: &'a Turn,
+    /// The last moment known of the turn: its end, or the latest of what
+    /// was read of it.
+    pub turn_end: Option<Timestamp>,
+    /// 0 for the turn itself.
+    pub depth: usize,
+    pub item: TraceItem<'a>,
+    /// Whether a row that folds is unfolded. `None` for one that does not.
+    pub open: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TraceItem<'a> {
+    Turn,
+    Span(&'a Span),
+    Subagent(&'a Subagent),
+}
+
+impl TraceRow<'_> {
+    /// What names the row across refreshes.
+    pub fn key(&self) -> String {
+        let within = match self.item {
+            TraceItem::Turn => String::new(),
+            TraceItem::Span(span) => match &span.kind {
+                SpanKind::Tool(call) => format!("t:{}", call.id),
+                SpanKind::Request(request) => format!(
+                    "r:{}:{}",
+                    request.message_id.as_deref().unwrap_or_default(),
+                    span.started_at.map_or(0, |at| at.as_millis())
+                ),
+                _ => String::new(),
+            },
+            TraceItem::Subagent(subagent) => format!("a:{}", subagent.agent_id),
+        };
+        format!("{}\u{1f}{}\u{1f}{within}", self.session.id, self.turn.id)
+    }
+
+    /// The text the row is searched by.
+    fn text(&self) -> String {
+        match self.item {
+            TraceItem::Turn => format!("turn {}", label(self.session)),
+            TraceItem::Span(span) => match &span.kind {
+                SpanKind::Tool(call) => {
+                    format!(
+                        "{} {}",
+                        call.name,
+                        call.summary.as_deref().unwrap_or_default()
+                    )
+                }
+                SpanKind::Request(request) => format!(
+                    "request {} {}",
+                    request.model.as_deref().unwrap_or_default(),
+                    request.query_source.as_deref().unwrap_or_default()
+                ),
+                _ => String::new(),
+            },
+            TraceItem::Subagent(subagent) => format!(
+                "{} {} {}",
+                subagent.agent_type.as_deref().unwrap_or_default(),
+                subagent.description.as_deref().unwrap_or_default(),
+                subagent.agent_id
+            ),
+        }
+    }
+}
+
 impl App {
     pub fn new(config: Config) -> Self {
         let mut app = Self {
@@ -217,10 +315,13 @@ impl App {
             tool_selected: 0,
             subagent_selected: 0,
             detail_scroll: 0,
+            trace_selected: 0,
+            open_turns: HashSet::new(),
+            open_agents: HashSet::new(),
             call_selected: 0,
             call_focus: false,
             call_scroll: 0,
-            offsets: [0; 3],
+            offsets: [0; 4],
             search: None,
             typing: None,
             help: false,
@@ -271,6 +372,9 @@ impl App {
             .then(|| self.selected_call())
             .flatten()
             .map(|call| call.id.clone());
+        let row = (self.trace_selected > 0)
+            .then(|| self.selected_row().map(|row| row.key()))
+            .flatten();
 
         self.load();
 
@@ -288,6 +392,10 @@ impl App {
                 .position(|(s, a)| s.id == session && a.agent_id == id);
             self.follow(Page::Subagents, found);
         }
+        if let Some(key) = row {
+            let found = self.trace_rows().iter().position(|row| row.key() == key);
+            self.follow(Page::Trace, found);
+        }
         if let Some(id) = call {
             if let Some(at) = self.subagent_calls().iter().position(|c| c.id == id) {
                 self.call_selected = at;
@@ -301,7 +409,7 @@ impl App {
         let Some(to) = found else {
             return;
         };
-        let index = if page == Page::Tools { 1 } else { 2 };
+        let index = page.list_index();
         let from = *self.cursor_mut(page);
         *self.cursor_mut(page) = to;
         self.offsets[index] = (self.offsets[index] + to).saturating_sub(from);
@@ -459,6 +567,116 @@ impl App {
         subagents
     }
 
+    /// The rows of the Trace page: turns, the latest first, and under an
+    /// unfolded one its spans in the order they happened.
+    pub fn trace_rows(&self) -> Vec<TraceRow<'_>> {
+        let mut turns: Vec<(&Session, &Turn)> = self
+            .in_scope()
+            .into_iter()
+            .flat_map(|session| session.trace.iter().map(move |turn| (session, turn)))
+            .collect();
+        turns.sort_by(|a, b| {
+            b.1.started_at
+                .cmp(&a.1.started_at)
+                .then_with(|| a.0.id.cmp(&b.0.id))
+        });
+        turns.truncate(TURN_ROWS);
+
+        let mut rows = Vec::new();
+        for (session, turn) in turns {
+            let open = self
+                .open_turns
+                .contains(&(session.id.clone(), turn.id.clone()));
+            let latest = |ends: &mut dyn Iterator<Item = Option<Timestamp>>| {
+                turn.ended_at.or_else(|| ends.flatten().max())
+            };
+            let row = |depth, item, open, turn_end| TraceRow {
+                session,
+                turn,
+                turn_end,
+                depth,
+                item,
+                open,
+            };
+            if !open {
+                // Folded: what its main thread says is enough.
+                let spans = &turn.thread.spans;
+                let end = latest(&mut spans.iter().map(|s| s.ended_at.or(s.started_at)));
+                rows.push(row(0, TraceItem::Turn, Some(false), end));
+                continue;
+            }
+            let nodes = session.walk(turn);
+            let end = latest(&mut nodes.iter().map(|n| n.ended_at().or(n.started_at())));
+            rows.push(row(0, TraceItem::Turn, Some(true), end));
+            // What is under a folded subagent is skipped.
+            let mut folded: Option<usize> = None;
+            for node in nodes {
+                if folded.is_some_and(|depth| node.depth > depth) {
+                    continue;
+                }
+                folded = None;
+                let (item, open) = match node.item {
+                    Item::Span(span) => (TraceItem::Span(span), None),
+                    Item::Subagent(subagent) => {
+                        let key = (session.id.clone(), subagent.agent_id.clone());
+                        let open = self.open_agents.contains(&key);
+                        if !open {
+                            folded = Some(node.depth);
+                        }
+                        (TraceItem::Subagent(subagent), Some(open))
+                    }
+                };
+                rows.push(row(node.depth + 1, item, open, end));
+            }
+        }
+        rows
+    }
+
+    pub fn selected_row(&self) -> Option<TraceRow<'_>> {
+        self.trace_rows().get(self.trace_selected).copied()
+    }
+
+    /// Folds or unfolds the row under the Trace page's cursor. `false` if
+    /// it is not one that folds, or is already as asked.
+    fn fold(&mut self, open: Option<bool>) -> bool {
+        let Some(row) = self.selected_row() else {
+            return false;
+        };
+        let Some(is_open) = row.open else {
+            return false;
+        };
+        let open = open.unwrap_or(!is_open);
+        if open == is_open {
+            return false;
+        }
+        let (agent, key) = match row.item {
+            TraceItem::Subagent(subagent) => {
+                (true, (row.session.id.clone(), subagent.agent_id.clone()))
+            }
+            _ => (false, (row.session.id.clone(), row.turn.id.clone())),
+        };
+        let set = if agent {
+            &mut self.open_agents
+        } else {
+            &mut self.open_turns
+        };
+        if open {
+            set.insert(key);
+        } else {
+            set.remove(&key);
+        }
+        true
+    }
+
+    /// `l`: unfolds a folded row of the Trace page; otherwise into the
+    /// detail pane.
+    pub fn right(&mut self) {
+        if self.page == Page::Trace && !self.in_detail && self.fold(Some(true)) {
+            return;
+        }
+        self.focus_detail();
+    }
+
     pub fn selected_tool(&self) -> Option<(&Session, &ToolCall)> {
         self.tools().get(self.tool_selected).copied()
     }
@@ -503,6 +721,7 @@ impl App {
             Page::Sessions => self.order.len(),
             Page::Tools => self.tools().len(),
             Page::Subagents => self.subagents().len(),
+            Page::Trace => self.trace_rows().len(),
             Page::Usage => 0,
         }
     }
@@ -512,11 +731,12 @@ impl App {
             Page::Sessions => &mut self.selected,
             Page::Tools => &mut self.tool_selected,
             Page::Subagents | Page::Usage => &mut self.subagent_selected,
+            Page::Trace => &mut self.trace_selected,
         }
     }
 
     fn clamp(&mut self) {
-        for page in [Page::Sessions, Page::Tools, Page::Subagents] {
+        for page in [Page::Sessions, Page::Tools, Page::Subagents, Page::Trace] {
             let last = self.list_len(page).saturating_sub(1);
             let cursor = self.cursor_mut(page);
             *cursor = (*cursor).min(last);
@@ -650,14 +870,20 @@ impl App {
 
     /// `Enter`. On a session: narrow the Tool calls and Subagents pages to it
     /// and show its tool calls. On a subagent: narrow the Tool calls page to
-    /// it and show them. Elsewhere: into the detail pane, and from a
-    /// subagent's into the pane of the tool call chosen there.
+    /// it and show them. On a turn or a subagent of the Trace page: fold or
+    /// unfold it. Elsewhere: into the detail pane, and from a subagent's
+    /// into the pane of the tool call chosen there.
     pub fn enter(&mut self) {
         if self.in_detail {
             self.focus_detail();
             return;
         }
         match self.page {
+            Page::Trace => {
+                if !self.fold(None) {
+                    self.focus_detail();
+                }
+            }
             Page::Sessions => {
                 let Some(id) = self.order.get(self.selected).cloned() else {
                     return;
@@ -695,6 +921,8 @@ impl App {
         if self.scope != scope {
             self.subagent_selected = 0;
             self.offsets[2] = 0;
+            self.trace_selected = 0;
+            self.offsets[3] = 0;
         }
         self.scope = scope;
         self.agent_scope = agent;
@@ -728,9 +956,22 @@ impl App {
         }
     }
 
-    /// `h`: out of the pane in focus only.
+    /// `h`: out of the pane in focus only. On the Trace page's list it folds
+    /// the row, or goes to the row this one is under.
     pub fn leave_detail(&mut self) {
-        self.step_out();
+        if self.step_out() || self.page != Page::Trace || self.fold(Some(false)) {
+            return;
+        }
+        let rows = self.trace_rows();
+        let Some(depth) = rows.get(self.trace_selected).map(|row| row.depth) else {
+            return;
+        };
+        let parent = rows[..self.trace_selected]
+            .iter()
+            .rposition(|row| row.depth < depth);
+        if let Some(parent) = parent {
+            self.move_to(parent);
+        }
     }
 
     pub fn cycle_sort(&mut self) {
@@ -800,6 +1041,7 @@ impl App {
                     )
                 })
                 .collect(),
+            Page::Trace => self.trace_rows().iter().map(TraceRow::text).collect(),
             Page::Usage => Vec::new(),
         };
         rows.into_iter().map(|row| row.to_lowercase()).collect()
@@ -1004,6 +1246,7 @@ mod live {
 pub mod tests {
     use super::*;
     use iktinos::record::KNOWN_CLAUDE_CODE_VERSION;
+    use iktinos::trace::SpanKind;
     use std::path::Path;
 
     pub const INDEXED: &str = "11111111-1111-4111-8111-111111111111";
@@ -1261,6 +1504,174 @@ pub mod tests {
         app.go_to(Page::Tools);
         app.go_to(Page::Subagents);
         assert!(!app.in_detail && !app.in_call());
+
+        let _ = std::fs::remove_dir_all(projects);
+    }
+
+    /// Appends a prompt, later than everything else, to the session with
+    /// subagents: a new turn.
+    pub fn append_prompt(projects: &Path, id: &str, minute: u8) {
+        use std::io::Write;
+        let line = format!(
+            r#"{{"parentUuid":null,"isSidechain":false,"promptId":"{id}","type":"user","message":{{"role":"user","content":"SYNTHETIC-TEXT invented for the fixture"}},"uuid":"uuid-{id}","timestamp":"2026-11-02T11:{minute:02}:00.000Z","cwd":"/work/other.repo","sessionId":"{WITH_SUBAGENTS}","version":"2.1.325","gitBranch":"main"}}"#
+        );
+        let path = projects
+            .join("-work-other-repo")
+            .join(format!("{WITH_SUBAGENTS}.jsonl"));
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    /// The rows of the Trace page as text: indented, with how they fold.
+    fn trace(app: &App) -> Vec<String> {
+        app.trace_rows()
+            .iter()
+            .map(|row| {
+                let what = match row.item {
+                    TraceItem::Turn => format!("turn {}", row.turn.id),
+                    TraceItem::Span(span) => match &span.kind {
+                        SpanKind::Tool(call) => call.name.clone(),
+                        _ => "request".to_owned(),
+                    },
+                    TraceItem::Subagent(subagent) => format!("agent {}", subagent.agent_id),
+                };
+                let fold = match row.open {
+                    Some(true) => "- ",
+                    Some(false) => "+ ",
+                    None => "",
+                };
+                format!("{}{fold}{what}", "  ".repeat(row.depth))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_trace_page_lists_turns_and_unfolds_them() {
+        let mut app = fixture_app();
+        app.go_to(Page::Trace);
+        // Every session's turns, the latest first, folded.
+        let all = trace(&app);
+        assert_eq!(all.len(), 3, "{all:?}");
+        assert!(all.iter().all(|row| row.starts_with("+ turn ")), "{all:?}");
+        assert_eq!(app.selected_row().unwrap().session.id, UNINDEXED);
+
+        // Narrowed to a session like the pages before it.
+        app.go_to(Page::Sessions);
+        app.move_by(1);
+        app.enter();
+        app.go_to(Page::Trace);
+        assert_eq!(trace(&app), ["+ turn prompt-u1"]);
+
+        // Enter unfolds the turn: its requests, their calls, the subagent
+        // under the call that spawned it and the one placed by time.
+        app.enter();
+        assert!(!app.in_detail);
+        assert_eq!(
+            trace(&app),
+            [
+                "- turn prompt-u1",
+                "  request",
+                "    Bash",
+                "    Read",
+                "      + agent a1b2c3d4e5f60718",
+                "  request",
+                "    mcp__example__lookup",
+                "  request",
+                "  + agent b2c3d4e5f6071829",
+            ]
+        );
+        // `l` unfolds a subagent; on a row that does not fold it is the
+        // detail pane, like Enter.
+        app.move_by(4);
+        app.right();
+        assert!(!app.in_detail);
+        assert_eq!(
+            trace(&app)[4..8],
+            [
+                "      - agent a1b2c3d4e5f60718",
+                "        request",
+                "          Grep",
+                "        request",
+            ]
+        );
+        app.move_by(2);
+        assert_eq!(
+            app.selected_row().unwrap().key().rsplit('\u{1f}').next(),
+            Some("t:toolu_s1")
+        );
+        app.right();
+        assert!(app.in_detail);
+        app.leave_detail();
+        assert!(!app.in_detail);
+        app.enter();
+        assert!(app.in_detail, "a call does not fold");
+        app.back();
+
+        // `h` goes to the row this one is under, then folds it.
+        app.leave_detail();
+        assert_eq!(app.trace_selected, 5);
+        app.leave_detail();
+        assert_eq!(app.trace_selected, 4);
+        app.leave_detail();
+        assert_eq!(trace(&app)[4], "      + agent a1b2c3d4e5f60718");
+        assert_eq!(trace(&app).len(), 9);
+        app.leave_detail();
+        assert_eq!(app.trace_selected, 3, "the call that spawned it");
+        app.move_first();
+        app.leave_detail();
+        assert_eq!(trace(&app), ["+ turn prompt-u1"]);
+        app.leave_detail();
+        assert_eq!(app.trace_selected, 0);
+
+        // A search looks at the rows that are shown.
+        app.enter();
+        app.start_search();
+        app.typing = Some("lookup".to_owned());
+        app.submit_search();
+        assert_eq!(app.matches(Page::Trace, now()), [6]);
+        assert_eq!(app.trace_selected, 6);
+        app.back();
+
+        // Esc drops the narrowing; what was unfolded stays unfolded.
+        app.back();
+        assert_eq!(app.scope, None);
+        assert_eq!(app.trace_selected, 0);
+        assert_eq!(trace(&app).len(), 3 + 8);
+    }
+
+    #[test]
+    fn a_new_turn_does_not_move_the_trace_cursor_off_its_row() {
+        let projects = scratch_projects("trace-follow");
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            live: false,
+            socket_dir: None,
+        });
+        app.go_to(Page::Trace);
+        app.move_by(1);
+        app.enter();
+        app.move_by(2);
+        let watched = app.selected_row().unwrap().key();
+        assert!(watched.ends_with("t:toolu_01"), "{watched}");
+
+        // A newer turn arrives at the top, with a call of its own.
+        append_prompt(&projects, "prompt-new", 0);
+        append_tool_call(&projects, "toolu_new1", 1);
+        app.refresh();
+        // (Under the one of a session that is a day later.)
+        assert_eq!(trace(&app)[1], "+ turn prompt-new");
+        assert_eq!(app.selected_row().unwrap().key(), watched);
+        assert_eq!(app.trace_selected, 4);
+        // The turn that was unfolded still is, and the new call is in the
+        // new turn, not in it.
+        assert_eq!(trace(&app)[2], "- turn prompt-u1");
+        app.move_first();
+        app.move_by(1);
+        app.enter();
+        assert_eq!(
+            trace(&app)[1..4],
+            ["- turn prompt-new", "  request", "    Edit"]
+        );
 
         let _ = std::fs::remove_dir_all(projects);
     }

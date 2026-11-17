@@ -1,5 +1,6 @@
 //! `iktinos`: a terminal viewer for the Claude Code sessions on this machine.
-//! Sessions, recent tool calls, subagents and usage, a page each, over
+//! Sessions, recent tool calls, subagents, the trace of the latest turns and
+//! usage, a page each, over
 //! `iktinos::session::SessionStore`, with the live layer when the bridge mod
 //! is installed. Its pages and keys follow vig, which renders the same model
 //! as a page of its own.
@@ -134,11 +135,12 @@ fn handle_key(app: &mut App, key: KeyEvent, after_g: bool) -> Handled {
         KeyCode::Char('q') => return Handled::Quit,
         KeyCode::Char('r') => return Handled::Refresh,
         KeyCode::Char('?') => app.help = true,
-        KeyCode::Char(c @ '1'..='4') => {
+        KeyCode::Char(c @ '1'..='5') => {
             app.go_to(Page::ALL[c as usize - '1' as usize]);
         }
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
-        KeyCode::Char('i') | KeyCode::Char('l') | KeyCode::Right => app.focus_detail(),
+        KeyCode::Char('i') => app.focus_detail(),
+        KeyCode::Char('l') | KeyCode::Right => app.right(),
         KeyCode::Enter => app.enter(),
         KeyCode::Char('h') | KeyCode::Left => app.leave_detail(),
         KeyCode::Esc => app.back(),
@@ -322,7 +324,7 @@ mod tests {
             (app.page, app.sort, app.filter),
             (Page::Tools, app::Sort::Cost, app::Filter::All)
         );
-        press(&mut app, "4j\ti");
+        press(&mut app, "5j\ti");
         assert_eq!((app.page, app.in_detail), (Page::Usage, false));
 
         // Help.
