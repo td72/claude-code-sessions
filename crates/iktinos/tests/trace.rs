@@ -103,7 +103,7 @@ fn turns_are_kept_with_their_own_spans() {
         tree(&session, 0),
         [
             "llm_request repl_main_thread tool_use Some(1900)",
-            "tool Bash Some(true) Some(1000)",
+            "  tool Bash Some(true) Some(1000)",
             "llm_request repl_main_thread end_turn Some(1900)",
         ]
     );
@@ -126,11 +126,11 @@ fn a_subagent_hangs_under_the_call_that_spawned_it() {
         tree(&session, 1),
         [
             "llm_request repl_main_thread tool_use Some(900)",
-            "tool Agent Some(true) Some(6000)",
-            format!("  subagent {AGENT} Some(4500)").as_str(),
-            "    llm_request agent:builtin:Explore tool_use Some(1400)",
-            "    tool Grep Some(true) Some(500)",
-            "    llm_request agent:builtin:Explore end_turn Some(2400)",
+            "  tool Agent Some(true) Some(6000)",
+            format!("    subagent {AGENT} Some(4500)").as_str(),
+            "      llm_request agent:builtin:Explore tool_use Some(1400)",
+            "        tool Grep Some(true) Some(500)",
+            "      llm_request agent:builtin:Explore end_turn Some(2400)",
             "llm_request repl_main_thread end_turn Some(1900)",
         ]
     );
@@ -161,7 +161,7 @@ fn a_turn_that_was_cut_off_has_no_end() {
         tree(&session, 2),
         [
             "llm_request repl_main_thread tool_use Some(1900)",
-            "tool Bash None None",
+            "  tool Bash None None",
         ]
     );
 }
@@ -179,11 +179,11 @@ fn a_subagent_without_its_link_is_placed_by_time() {
         tree(session, 1),
         [
             "llm_request repl_main_thread tool_use Some(900)",
-            "tool Agent Some(true) Some(6000)",
+            "  tool Agent Some(true) Some(6000)",
             "llm_request repl_main_thread end_turn Some(1900)",
             format!("subagent {AGENT} Some(4500)").as_str(),
             "  llm_request agent:builtin:Explore tool_use Some(1400)",
-            "  tool Grep Some(true) Some(500)",
+            "    tool Grep Some(true) Some(500)",
             "  llm_request agent:builtin:Explore end_turn Some(2400)",
         ]
     );
@@ -309,7 +309,7 @@ fn records_with_missing_keys_do_not_break_the_tree() {
     // The first response starts where its interaction does: nothing was before it.
     assert_eq!(
         tree(session, 0),
-        ["llm_request ? ? None", "tool Read None None"]
+        ["llm_request ? ? None", "  tool Read None None"]
     );
     // The second starts at the record before it.
     assert_eq!(tree(session, 1), ["llm_request ? ? Some(2000)"]);
@@ -340,4 +340,160 @@ fn a_thread_keeps_a_bounded_number_of_spans() {
     assert_eq!(thread.dropped, calls * 2 - MAX_SPANS as u64);
     assert_eq!(session.walk(&session.trace[0]).len(), MAX_SPANS);
     assert_eq!(session.tool_calls, calls);
+}
+
+const RESPONSES: &str = "66666666-6666-4666-8666-666666666666";
+
+/// The session whose responses think, speak, call tools at once, and are
+/// marked.
+fn responses() -> (SessionFiles, Session) {
+    let found = discover(&fixture_dir().join("responses")).unwrap();
+    let files = found.into_iter().find(|f| f.id == RESPONSES).unwrap();
+    let mut store = SessionStore::new();
+    store.discovered(&files);
+    store.apply_records(RESPONSES, &read(&files.transcript.path));
+    let session = store.get(RESPONSES).unwrap().clone();
+    (files, session)
+}
+
+#[test]
+fn a_request_says_what_its_response_did() {
+    let (_, session) = responses();
+    let interaction = &session.trace[0];
+    let nodes = session.walk(interaction);
+    let shape: Vec<String> = nodes
+        .iter()
+        .map(|node| {
+            let what = match node.item {
+                Item::Span(span) => match &span.kind {
+                    SpanKind::LlmRequest(_) => "llm_request".to_owned(),
+                    SpanKind::Tool(call) => call.name.clone(),
+                    _ => "?".to_owned(),
+                },
+                Item::Subagent(_) => "subagent".to_owned(),
+            };
+            format!("{}{what}", "  ".repeat(node.depth))
+        })
+        .collect();
+    // Calls under the response that made them: two at once, then one.
+    assert_eq!(
+        shape,
+        [
+            "llm_request",
+            "  Read",
+            "  Bash",
+            "llm_request",
+            "  Grep",
+            "llm_request"
+        ]
+    );
+    // The thread itself keeps them side by side, in order.
+    assert_eq!(interaction.thread.spans.len(), 6);
+
+    let requests: Vec<_> = interaction
+        .thread
+        .spans
+        .iter()
+        .filter_map(|span| match &span.kind {
+            SpanKind::LlmRequest(request) => Some(request),
+            _ => None,
+        })
+        .collect();
+    let [spoke, silent, cut] = requests[..] else {
+        panic!("{requests:?}")
+    };
+
+    // The first line of what it said, and no more of it. It thought for
+    // three seconds: from the request to the end of the thinking block.
+    assert_eq!(
+        spoke.text.as_deref(),
+        Some("Synthetic answer: reading the build script first")
+    );
+    assert_eq!(spoke.thinking_ms, Some(3000));
+    assert!(!spoke.rebuilt && !spoke.reshaped);
+    assert_eq!(spoke.unusual_stop(), None);
+
+    // One that only thought and called a tool has no text.
+    assert_eq!(silent.text, None);
+    assert_eq!(silent.thinking_ms, Some(12000));
+    assert!(!silent.rebuilt && !silent.reshaped);
+
+    // Sent without a `base`, with another shape, and stopped early.
+    assert_eq!(
+        cut.text.as_deref(),
+        Some("Synthetic answer: the feature flag is missing")
+    );
+    assert_eq!(cut.thinking_ms, None);
+    assert!(cut.rebuilt);
+    assert!(cut.reshaped);
+    assert_eq!(cut.unusual_stop(), Some("max_tokens"));
+
+    // The calls name their response.
+    let calls: Vec<_> = interaction
+        .thread
+        .spans
+        .iter()
+        .filter_map(|span| match &span.kind {
+            SpanKind::Tool(call) => Some(call.message_id.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, [Some("msg_r1"), Some("msg_r1"), Some("msg_r2")]);
+
+    // Nothing unmodelled got in.
+    assert!(!format!("{session:?}").contains("SYNTHETIC-TEXT"));
+}
+
+#[test]
+fn the_first_request_of_a_thread_is_not_marked() {
+    // The other fixture's requests all name a base and share a shape; its
+    // subagent's first request starts a thread of its own.
+    let session = folded(SessionStore::new(), false);
+    let threads = session
+        .trace
+        .iter()
+        .map(|interaction| &interaction.thread)
+        .chain(session.subagents.values().map(|subagent| &subagent.thread));
+    for span in threads.flat_map(|thread| &thread.spans) {
+        if let SpanKind::LlmRequest(request) = &span.kind {
+            assert!(!request.rebuilt && !request.reshaped, "{request:?}");
+        }
+    }
+}
+
+#[test]
+fn the_whole_of_a_response_is_read_on_demand() {
+    use iktinos::output::read_response;
+    let (files, _) = responses();
+
+    // Every line of the text, not only the first; the thinking is not
+    // part of it.
+    let whole = read_response(&files, "msg_r1").unwrap().unwrap();
+    assert_eq!(
+        whole.text,
+        "Synthetic answer: reading the build script first\nSYNTHETIC-TEXT invented for the fixture"
+    );
+    assert!(!whole.truncated);
+    assert!(!format!("{whole:?}").contains("Synthetic"), "{whole:?}");
+
+    // A response that only called tools said nothing.
+    assert_eq!(read_response(&files, "msg_r2").unwrap(), None);
+    // One that is not in the session, and no id at all.
+    assert_eq!(read_response(&files, "msg_elsewhere").unwrap(), None);
+    assert_eq!(read_response(&files, "").unwrap(), None);
+
+    // A response whose text is in the second of its records.
+    let plain = fixture_dir().join("plain-turn.jsonl");
+    let mut files = files;
+    files.transcript.path = plain;
+    files.subagents.clear();
+    let ids: Vec<String> = read(&files.transcript.path)
+        .iter()
+        .filter_map(|record| match record.view() {
+            iktinos::record::View::Assistant(assistant) => assistant.message_id.clone(),
+            _ => None,
+        })
+        .collect();
+    let whole = read_response(&files, &ids[0]).unwrap().unwrap();
+    assert!(whole.text.starts_with("Synthetic answer: the checks pass"));
 }

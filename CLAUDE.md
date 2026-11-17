@@ -19,8 +19,10 @@ Hard rules:
   sessions run in the same repository (`place`); no `git` is started.
 - **The crates do not log what they read, and do not hoard it.** The
   transcripts are the user's own files, so a view may model the text it needs
-  (the last prompt, the first line of a prompt, a subagent's description, a
-  tool call's command or path, the start of what a tool call returned). But no
+  (the last prompt, the first line of a prompt or of a response, a
+  subagent's description, a tool call's command or path, the start of what a
+  tool call returned). What a response thought is never modelled, only how
+  long it took. But no
   crate writes record contents to a log by itself — `Record`'s `Debug` leaves
   the raw value out, and the `Debug` of a tool's output says how much there
   is, not what — and a `Session` keeps bounded recent activity, never the full

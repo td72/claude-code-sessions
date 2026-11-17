@@ -216,6 +216,8 @@ impl View {
             Some("api-request") => Self::ApiRequest(ApiRequest {
                 id: string(obj, "id"),
                 query_source: string(obj, "querySource"),
+                has_base: obj.get("base").is_some_and(|base| !base.is_null()),
+                shape_hash: string(obj, "shapeHash"),
             }),
             Some("cost-state") => Self::CostState(CostState {
                 total_cost_usd: obj.get("totalCostUSD").and_then(Value::as_f64),
@@ -508,6 +510,12 @@ pub struct Assistant {
     pub model: Option<String>,
     pub usage: Option<Usage>,
     pub stop_reason: Option<String>,
+    /// What the response said, where this record holds text: its first
+    /// line that says something, cut to [`RESPONSE_CHARS`].
+    pub text: Option<String>,
+    /// This record holds a block of thinking. Only that it is there: what
+    /// was thought is not modelled.
+    pub thinking: bool,
     /// Tool calls in this record: name and id only.
     pub tool_uses: Vec<ToolUse>,
     /// The record reports an API error instead of a response.
@@ -543,10 +551,32 @@ impl Assistant {
                 .and_then(|m| m.get("usage"))
                 .and_then(Usage::from_value),
             stop_reason: message.and_then(|m| string(m, "stop_reason")),
+            text: content_blocks(obj)
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .find_map(first_line),
+            thinking: content_blocks(obj).any(|b| {
+                matches!(
+                    b.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            }),
             tool_uses,
             is_api_error: flag(obj, "isApiErrorMessage"),
         }
     }
+}
+
+/// The longest a response's line is kept, in characters.
+pub const RESPONSE_CHARS: usize = 120;
+
+/// The first line of a response's text that says something, cut to
+/// [`RESPONSE_CHARS`].
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| cut(line, RESPONSE_CHARS))
 }
 
 /// A tool call: which tool, the id its result will carry, and a line saying
@@ -743,6 +773,12 @@ pub struct ApiRequest {
     pub id: Option<String>,
     /// Who asked: `repl_main_thread`, `agent:builtin:Explore`, `sdk`, …
     pub query_source: Option<String>,
+    /// The request names a `base`: the request it continues. One without,
+    /// in the middle of a thread, sent the conversation anew.
+    pub has_base: bool,
+    /// `shapeHash`: the same for requests with the same system prompt and
+    /// tools.
+    pub shape_hash: Option<String>,
 }
 
 /// A point in time, in milliseconds since the Unix epoch (UTC).

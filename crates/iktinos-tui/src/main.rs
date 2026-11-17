@@ -437,7 +437,9 @@ mod tests {
         assert!(app.closed_sessions.is_empty() && !app.by_session);
         press(&mut app, "j\njl");
         assert!(app.in_call() && !app.from_list);
-        press(&mut app, "hh");
+        // Out of the pane, up to the response that made the call, out of
+        // the tree.
+        press(&mut app, "hhh");
         assert!(!app.in_detail);
 
         // `T` switches how times are shown.
