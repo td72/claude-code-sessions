@@ -24,6 +24,7 @@ ratatui = "0.30"
 serde = { workspace = true, features = ["derive"] }
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 iktinos-live.workspace = true

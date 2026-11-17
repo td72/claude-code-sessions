@@ -148,7 +148,7 @@ Tool calls page further, to that subagent. `Esc` undoes one step at a time.
 | `t` in the trace | list the interactions all together, the latest first, or under their sessions again |
 | `Enter` on a session in that list, or on a subagent in an interaction's tree | unfold it, fold it |
 | `l`, `h` in the trace | the pane on the right, and back (`h` in the tree or under a session goes to the row above first) |
-| `/`, `n` / `N` | search: the rows that match are drawn in the search colour, the cursor goes to the first, and `n` / `N` to the next and the one before. With the focus on an interaction's tree the search is of the tree, where a call is found by every line of its command, a response by what it said and a subagent by its task; a folded subagent is unfolded. Anywhere else it is of the page's list, whose rows are found by what they show; in the trace it unfolds the sessions |
+| `/`, `n` / `N` | search: the word stands out on the rows that match, the cursor goes to the first, and `n` / `N` to the next and the one before. A row that matches by something it does not show (a later line of a command, text cut off at the edge) has a mark on the frame beside it. With the focus on an interaction's tree the search is of the tree, where a call is found by every line of its command, a response by what it said and a subagent by its task; a folded subagent is unfolded. Anywhere else it is of the page's list, whose rows are found by what they show; in the trace it unfolds the sessions |
 | `Esc` on a list | clear the search, then the repository, then the narrowing |
 | `Esc` in an interaction's tree | clear the tree's search, then leave the tree |
 | `o` on a tool call | read its whole output from the transcript and show it; again, the excerpt |
@@ -270,7 +270,7 @@ dim = "gray"
 | `error` | `red` | failed, very slow, full, cannot be read |
 | `waiting` | `cyan` | a session that waits for its user |
 | `dim` | `dark-gray` | captions, what is absent or unknown |
-| `search` | `yellow` | a row a search matches, and the search being typed |
+| `search` | `yellow` | the word a search found, the mark beside a row whose match does not show, and the search being typed |
 
 A colour is `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
 `gray`, `dark-gray`, `white`, the `light-` form of the six in the middle,

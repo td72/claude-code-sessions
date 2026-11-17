@@ -1758,6 +1758,15 @@ impl App {
             .filter(|s| s.tree && self.page == Page::Trace)
     }
 
+    /// What the search of this page's list looks for; empty without one.
+    pub fn list_query(&self) -> String {
+        self.search
+            .as_ref()
+            .filter(|s| s.page == self.page && !s.tree)
+            .map(|s| s.query.clone())
+            .unwrap_or_default()
+    }
+
     /// The rows of `page`'s list the search in force matches.
     pub fn matches(&self, page: Page, now: Timestamp) -> Vec<usize> {
         let Some(search) = self.search.as_ref().filter(|s| s.page == page && !s.tree) else {

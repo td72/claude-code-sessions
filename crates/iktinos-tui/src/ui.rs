@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use ratatui::buffer::Buffer;
+use unicode_width::UnicodeWidthStr;
+
 use iktinos::record::Timestamp;
 use iktinos::session::{CostSource, LiveState, ModelUsage, Session, Subagent, ToolCall};
 use iktinos::trace::{between, Interaction, Item, LlmRequest, SpanKind};
@@ -276,15 +279,6 @@ fn when_width(times: Times) -> u16 {
     }
 }
 
-/// The style of a row the search matches.
-fn row_style(matches: &[usize], index: usize) -> Style {
-    if matches.contains(&index) {
-        Style::new().fg(theme::current().search)
-    } else {
-        Style::new()
-    }
-}
-
 fn session_cell(session: &Session) -> Cell<'static> {
     Cell::from(
         app::label(session)
@@ -315,14 +309,14 @@ fn draw_list(
     frame.render_stateful_widget(table, area, &mut state);
     app.offsets[index] = state.offset();
 
-    // The rows a search matches, painted over whatever colours their cells
-    // have: a match must be seen at a glance. The rows start under the
-    // frame and the header, and end above the footer and the frame.
+    // The rows a search matches. Where the word shows on the row, it is
+    // painted over whatever colour its cell has; where it does not (it is
+    // in a later line of a command, or cut off), the frame beside the row
+    // is marked. The rows start under the frame and the header, and end
+    // above the footer and the frame.
     let first = area.y.saturating_add(2);
     let end = area.bottom().saturating_sub(1 + found.footer);
-    let style = Style::new()
-        .fg(theme::current().search)
-        .add_modifier(Modifier::BOLD);
+    let inside = area.x.saturating_add(1)..area.right().saturating_sub(1);
     for at in found.matches.iter().filter(|at| **at >= state.offset()) {
         let Ok(down) = u16::try_from(at - state.offset()) else {
             continue;
@@ -331,13 +325,56 @@ fn draw_list(
         if y >= end {
             break;
         }
-        let row = Rect {
-            x: area.x.saturating_add(1),
-            y,
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        frame.buffer_mut().set_style(row, style);
+        mark_found(frame.buffer_mut(), area.x, inside.clone(), y, found.query);
+    }
+}
+
+/// Paints the cells of row `y` between `columns` that spell `query`
+/// (lower-cased; the match ignores case), or, where none does, marks the
+/// frame's cell at `frame_x`.
+fn mark_found(
+    buffer: &mut Buffer,
+    frame_x: u16,
+    columns: std::ops::Range<u16>,
+    y: u16,
+    query: &str,
+) {
+    let colour = theme::current().search;
+    // The row as text, and the column each of its characters starts at. A
+    // wide character takes two cells: the second holds nothing of its own.
+    let mut text = String::new();
+    let mut starts: Vec<(usize, u16)> = Vec::new();
+    let mut x = columns.start;
+    while x < columns.end {
+        let symbol = buffer[(x, y)].symbol();
+        starts.push((text.len(), x));
+        text.push_str(&symbol.to_lowercase());
+        x = x.saturating_add(symbol.width().max(1) as u16);
+    }
+    let mut seen = false;
+    if !query.is_empty() {
+        let word = Style::new()
+            .fg(colour)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        for (from, found) in text.match_indices(query) {
+            let to = from + found.len();
+            for (index, (at, x)) in starts.iter().enumerate() {
+                if *at < from || *at >= to {
+                    continue;
+                }
+                // To the next character's column: both cells of a wide one.
+                let next = starts.get(index + 1).map_or(columns.end, |(_, x)| *x);
+                for x in *x..next {
+                    buffer[(x, y)].set_style(word);
+                }
+                seen = true;
+            }
+        }
+    }
+    if !seen {
+        buffer[(frame_x, y)]
+            .set_symbol("▌")
+            .set_style(Style::new().fg(colour));
     }
 }
 
@@ -346,6 +383,8 @@ fn draw_list(
 #[derive(Clone, Copy, Default)]
 struct Found<'a> {
     matches: &'a [usize],
+    /// What was searched for, lower-cased.
+    query: &'a str,
     footer: u16,
 }
 
@@ -355,8 +394,7 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
         .order
         .iter()
         .filter_map(|id| app.store.get(id))
-        .enumerate()
-        .map(|(index, session)| {
+        .map(|session| {
             let status = app.status(session, now);
             let updated = app::latest(session).map_or("—".to_owned(), |at| format::ago(now, at));
             // The session the other pages are narrowed to.
@@ -376,7 +414,6 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
                 ),
                 Cell::from(Line::from(format::cost(&session.cost)).right_aligned()),
             ])
-            .style(row_style(&matches, index))
         })
         .collect();
     let title = list_title(
@@ -424,8 +461,10 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestam
     .footer(totals_row(&app.totals(now)))
     .block(pane_block(title, !app.in_detail));
     let selected = (!app.order.is_empty()).then_some(app.selected);
+    let query = app.list_query();
     let found = Found {
         matches: &matches,
+        query: &query,
         footer: 1,
     };
     draw_list(frame, area, app, 0, table, selected, found);
@@ -448,8 +487,7 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
     let count = calls.len();
     let rows: Vec<Row<'static>> = calls
         .iter()
-        .enumerate()
-        .map(|(index, (session, call))| {
+        .map(|(session, call)| {
             let (mark, style) = outcome(call);
             let name = format!(
                 "{}{}",
@@ -473,7 +511,7 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
                 .style(took_style(app.config.slow, call.duration_ms)),
                 Cell::from(mark).style(style),
             ]);
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
     // What the call was about gets every column the others can spare.
@@ -495,8 +533,10 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.tool_selected);
+    let query = app.list_query();
     let found = Found {
         matches: &matches,
+        query: &query,
         footer: 0,
     };
     draw_list(frame, area, app, 1, table, selected, found);
@@ -560,8 +600,7 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
     let count = subagents.len();
     let rows: Vec<Row<'static>> = subagents
         .iter()
-        .enumerate()
-        .map(|(index, (session, subagent))| {
+        .map(|(session, subagent)| {
             let done = match subagent.finished {
                 Some(true) => Span::styled("done", done()),
                 _ => Span::styled("running", running()),
@@ -605,7 +644,7 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
                 ),
                 Cell::from(done),
             ]);
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
     // The task gets every column the others can spare.
@@ -629,8 +668,10 @@ fn draw_subagent_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timesta
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.subagent_selected);
+    let query = app.list_query();
     let found = Found {
         matches: &matches,
+        query: &query,
         footer: 0,
     };
     draw_list(frame, area, app, 2, table, selected, found);
@@ -754,8 +795,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
     let count = listed.len();
     let rows: Vec<Row<'static>> = listed
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
+        .map(|row| {
             let session = row.session;
             let Some(InteractionRow {
                 interaction, end, ..
@@ -786,8 +826,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     number(session.trace.iter().map(|i| counts(i).1).sum()),
                     Cell::from(""),
                     Cell::from(status_word(&status)).style(style_of(status.kind)),
-                ])
-                .style(row_style(&matches, index));
+                ]);
             };
             let end = if interaction_runs(app, session, interaction, now) {
                 Some(now)
@@ -839,7 +878,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                 .style(took_style(app.config.slow, took)),
                 Cell::from(state).style(style),
             ]);
-            Row::new(cells).style(row_style(&matches, index))
+            Row::new(cells)
         })
         .collect();
     let mut widths = vec![Constraint::Length(when_width(time))];
@@ -878,8 +917,10 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
         .header(Row::new(header).style(dim()))
         .block(pane_block(title, !app.in_detail));
     let selected = (count > 0).then_some(app.trace_selected);
+    let query = app.list_query();
     let found = Found {
         matches: &matches,
+        query: &query,
         footer: 0,
     };
     draw_list(
@@ -1166,8 +1207,13 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         .block(block);
     // The cursor shows once the tree has been entered.
     let selected = app.in_tree().then_some(app.span_selected.min(count - 1));
+    let query = app
+        .tree_search()
+        .map(|search| search.query.clone())
+        .unwrap_or_default();
     let found = Found {
         matches: &found,
+        query: &query,
         footer: 0,
     };
     draw_list(frame, area, app, TREE, table, selected, found);
@@ -3626,56 +3672,114 @@ mod tests {
         assert!(!app.in_detail);
     }
 
-    /// The foreground colours of the cells of the row that shows `needle`,
-    /// left of the frame's last column and without the blank cells.
-    fn row_colours(app: &mut App, needle: &str, now: &str) -> Vec<Color> {
+    /// The row of the screen that shows `needle`: the text of its cells
+    /// that are drawn as a found word (reversed and bold), and what the
+    /// frame's cell at its left shows.
+    fn found_on(app: &mut App, needle: &str, now: &str) -> (String, String) {
         let now = Timestamp::parse(now).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
         terminal.draw(|frame| draw(frame, app, now)).unwrap();
         let buffer = terminal.backend().buffer();
         for y in 0..44u16 {
             let text: String = (0..150u16).map(|x| buffer[(x, y)].symbol()).collect();
-            if text.contains(needle) {
-                return (1..149u16)
-                    .filter(|x| buffer[(*x, y)].symbol() != " ")
-                    .map(|x| buffer[(x, y)].fg)
+            if let Some(at) = text.find(needle) {
+                // The pane the row is in starts at the frame left of it.
+                let at = text[..at].chars().count() as u16;
+                let frame = (0..=at)
+                    .rev()
+                    .find(|x| ["│", "▌"].contains(&buffer[(*x, y)].symbol()))
+                    .unwrap();
+                let word = Modifier::REVERSED | Modifier::BOLD;
+                let found: String = (frame + 1..150)
+                    .take_while(|x| buffer[(*x, y)].symbol() != "│")
+                    .filter(|x| buffer[(*x, y)].modifier.contains(word))
+                    .inspect(|x| assert_eq!(buffer[(*x, y)].fg, Color::Yellow))
+                    .map(|x| buffer[(x, y)].symbol())
                     .collect();
+                return (found, buffer[(frame, y)].symbol().to_owned());
             }
         }
         panic!("no {needle} on the screen");
     }
 
     #[test]
-    fn a_row_a_search_matches_is_in_the_search_colour_whatever_its_cells_are() {
+    fn the_word_a_search_found_is_what_stands_out_on_its_row() {
         let mut app = fixture_app();
-        // A row has cells of several colours.
-        let plain = row_colours(&mut app, "Synthetic session title", SOON);
-        assert!(plain.contains(&Color::Yellow) && plain.contains(&Color::Reset));
-
-        app.typing = Some("session title".to_owned());
+        app.typing = Some("SESSION title".to_owned());
         app.submit_search();
-        let found = row_colours(&mut app, "Synthetic session title", SOON);
-        assert!(found.iter().all(|c| *c == Color::Yellow), "{found:?}");
-        // The rows it does not match, the totals under them and the header
-        // over them are as they were.
-        let other = row_colours(&mut app, "other.repo", SOON);
-        assert!(other.contains(&Color::Reset), "{other:?}");
-        let totals = row_colours(&mut app, "1 matching of 3 sessions", SOON);
-        assert!(totals.iter().all(|c| *c == Color::Cyan), "{totals:?}");
-        let header = row_colours(&mut app, "repository", SOON);
-        assert!(header.iter().all(|c| *c == Color::DarkGray), "{header:?}");
+        // The cursor is on the match: move it off, so that the row is not
+        // reversed as a whole.
+        app.move_first();
+        // The word, as the row spells it; the rest of the row is as it was.
+        assert_eq!(
+            found_on(&mut app, "Synthetic session title", SOON),
+            ("session title".to_owned(), "│".to_owned())
+        );
+        // A row that does not match, the totals and the header: nothing.
+        for other in ["other.repo", "1 matching of 3 sessions", "repository"] {
+            assert_eq!(found_on(&mut app, other, SOON).0, "", "{other}");
+        }
 
-        // The same on the other lists.
+        // Every place the word shows on the row.
+        app.search = None;
+        app.typing = Some("example".to_owned());
+        app.submit_search();
+        app.move_last();
+        let (found, _) = found_on(&mut app, "Synthetic title after the damage", SOON);
+        assert_eq!(found, "example");
+
+        // The other lists.
         app.go_to(Page::Tools);
         app.typing = Some("cargo".to_owned());
         app.submit_search();
-        let call = row_colours(&mut app, "cargo test --workspace", SOON);
-        assert!(call.iter().all(|c| *c == Color::Yellow), "{call:?}");
-        app.go_to(Page::Trace);
-        app.typing = Some("lookup".to_owned());
+        app.move_last();
+        assert_eq!(
+            found_on(&mut app, "cargo test --workspace", SOON).0,
+            "cargo"
+        );
+    }
+
+    #[test]
+    fn a_match_that_does_not_show_on_its_row_marks_the_frame_beside_it() {
+        use crate::app::tests::{append_call, scratch_projects};
+        let projects = scratch_projects("search-hidden");
+        // The row of a command of several lines shows the first.
+        append_call(
+            &projects,
+            "toolu_hidden",
+            5,
+            "Bash",
+            r#"{"command":"cd /work/other.repo\nmake synthetic-target"}"#,
+        );
+        let mut app = App::new(Config {
+            projects_dir: projects.clone(),
+            ..crate::app::tests::fixture_config()
+        });
+        app.go_to(Page::Tools);
+        app.typing = Some("synthetic-target".to_owned());
         app.submit_search();
-        let interaction = row_colours(&mut app, "└ Synthetic prompt: run the checks", SOON);
-        assert!(!interaction.is_empty());
+        assert_eq!(
+            found_on(&mut app, "cd /work/other.repo", LATER),
+            (String::new(), "▌".to_owned())
+        );
+        // The rows that do not match have the frame as it is.
+        assert_eq!(found_on(&mut app, "cargo test --workspace", LATER).1, "│");
+
+        // A word that is cut off at the edge of its column.
+        app.search = None;
+        app.go_to(Page::Sessions);
+        app.typing = Some("after the damage".to_owned());
+        app.submit_search();
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        let now = Timestamp::parse(LATER).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let marked = (0..30u16)
+            .filter(|y| buffer[(0, *y)].symbol() == "▌")
+            .count();
+        assert_eq!(marked, 1);
+
+        let _ = std::fs::remove_dir_all(projects);
     }
 
     #[test]
@@ -3781,10 +3885,13 @@ mod tests {
             !shown.contains("Trace (1 interaction · latest first) of 22222222  /"),
             "{shown}"
         );
-        // The row is in the search colour, whatever its cells are.
-        let row = row_colours(&mut app, "example/lookup  synthetic lookup", SOON);
-        // The bar on the time axis is part of the row.
-        assert!(row.iter().all(|c| *c == Color::Yellow), "{row:?}");
+        // The word stands out on its row, in both places it shows.
+        app.move_by(-1);
+        assert_eq!(
+            found_on(&mut app, "example/lookup  synthetic lookup", SOON).0,
+            "lookuplookup"
+        );
+        app.move_by(1);
 
         // What a folded subagent did is found: the search unfolds it.
         app.typing = Some("synthetic pattern".to_owned());
