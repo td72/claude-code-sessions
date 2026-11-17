@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wr
 use ratatui::Frame;
 
 use crate::app::{
-    self, App, InteractionRow, LiveStatus, Loaded, Page, StatusKind, TimeStyle, Times, TraceItem,
-    TraceRow, TREE,
+    self, App, InteractionRow, LiveStatus, Loaded, Page, Status, StatusKind, TimeStyle, Times,
+    TraceItem, TraceRow, TREE,
 };
 use crate::format;
 use crate::highlight;
@@ -419,6 +419,15 @@ fn draw_tool_list(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) 
     draw_list(frame, area, app, 1, table, selected);
 }
 
+/// A status in the one word a narrow column has room for: `running` for
+/// `running Bash`, `approve?` for `approve Write?`.
+fn status_word(status: &Status) -> String {
+    match status.kind {
+        StatusKind::NeedsApproval => "approve?".to_owned(),
+        _ => status.text.split(' ').next().unwrap_or_default().to_owned(),
+    }
+}
+
 fn subagent_name(subagent: &Subagent) -> &str {
     subagent
         .description
@@ -650,7 +659,7 @@ fn draw_interaction_list(frame: &mut Frame, area: Rect, app: &mut App, now: Time
                     number(session.trace.iter().map(|i| counts(i).0).sum()),
                     number(session.trace.iter().map(|i| counts(i).1).sum()),
                     Cell::from(""),
-                    Cell::from(status.text).style(style_of(status.kind)),
+                    Cell::from(status_word(&status)).style(style_of(status.kind)),
                 ])
                 .style(row_style(&matches, index));
             };
@@ -3380,6 +3389,131 @@ mod tests {
         let screen = screen(&mut app, 150, 44, SOON);
         assert!(!screen.contains("live events"), "{screen}");
         assert!(!screen.contains("this session"), "{screen}");
+    }
+
+    /// The fixture sessions after these event samples, in this order.
+    #[cfg(unix)]
+    fn with_events(names: &[&str]) -> App {
+        use crate::app::tests::fixtures;
+        let mut app = fixture_app();
+        for name in names {
+            let body =
+                std::fs::read(fixtures().join("events").join(format!("{name}.json"))).unwrap();
+            let event = iktinos_live::event::Event::parse(&body).unwrap();
+            iktinos_live::merge::apply_event(&mut app.store, &event);
+        }
+        app.arrange(Timestamp::parse(SOON).unwrap());
+        select(&mut app, WITH_SUBAGENTS);
+        app
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_awaiting_approval_asks_for_attention() {
+        let mut app = with_events(&["turn-start", "tool-check-ask"]);
+        let shown = screen(&mut app, 150, 44, SOON);
+        let header = shown.lines().next().unwrap();
+        assert!(header.contains("1 need approval"), "{header}");
+        assert!(row(&shown, "other.repo").contains("approve Write?"));
+        assert!(shown.contains("state     approve Write?"), "{shown}");
+
+        // In the colour of what needs someone.
+        let mut terminal = Terminal::new(TestBackend::new(150, 44)).unwrap();
+        let now = Timestamp::parse(SOON).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines: Vec<&str> = shown.lines().collect();
+        let y = lines.iter().position(|l| l.contains("other.repo")).unwrap();
+        let x = lines[y][..lines[y].find("approve").unwrap()]
+            .chars()
+            .count();
+        let cell = &buffer[(x as u16, y as u16)];
+        assert_eq!(cell.fg, Color::Yellow);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+
+        // The trace's row for the session has room for a word.
+        app.go_to(Page::Trace);
+        let trace = screen(&mut app, 150, 30, SOON);
+        assert!(row(&trace, "▾ other.repo").contains("approve?"), "{trace}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_tool_is_named_with_what_it_runs() {
+        let mut app = with_events(&["turn-start", "tool-check-allow", "tool-call-start"]);
+        let shown = screen(&mut app, 150, 44, SOON);
+        assert!(shown.lines().next().unwrap().contains("2 busy"), "{shown}");
+        assert!(row(&shown, "other.repo").contains("running Bash"));
+        let detail = shown.clone();
+        let state = detail
+            .lines()
+            .position(|line| line.contains("state     running Bash"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        // What it runs, under the state.
+        assert!(
+            detail
+                .lines()
+                .nth(state + 1)
+                .unwrap()
+                .contains("cargo test --workspace"),
+            "{shown}"
+        );
+
+        // The call ended: the session works on, with no tool to name.
+        let mut app = with_events(&[
+            "turn-start",
+            "tool-check-allow",
+            "tool-call-start",
+            "tool-call-end",
+        ]);
+        let shown = screen(&mut app, 150, 44, SOON);
+        assert!(row(&shown, "other.repo").contains("working"), "{shown}");
+        assert!(!shown.contains("cargo test --workspace"), "{shown}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rate_limits_are_listed_with_how_much_is_used() {
+        let mut app = with_events(&["turn-start", "session-measure"]);
+        let shown = screen(&mut app, 150, 60, SOON);
+        let detail = shown.clone();
+        assert!(detail.contains("rate limits"), "{shown}");
+        let five = row(&detail, "five_hour");
+        assert!(five.contains("42%"), "{shown}");
+        assert!(row(&detail, "seven_day").contains("7%"), "{shown}");
+        // The context is measured against the window in effect.
+        assert!(detail.contains("6.7k of 200.0k"), "{shown}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waiting_working_and_ended_sessions_are_told_apart() {
+        let state = |names: &[&str]| {
+            let mut app = with_events(names);
+            let shown = screen(&mut app, 150, 44, SOON);
+            let header = shown.lines().next().unwrap().to_owned();
+            let listed = row(&shown, "other.repo").to_owned();
+            app.go_to(Page::Trace);
+            let trace = screen(&mut app, 150, 30, SOON);
+            (header, listed, row(&trace, "▾ other.repo").to_owned())
+        };
+
+        let (header, listed, trace) = state(&["turn-start"]);
+        assert!(header.contains("2 busy"), "{header}");
+        assert!(listed.contains("working"), "{listed}");
+        // Live events say the session works: so does its row in the trace,
+        // whatever the transcript's last interaction came to.
+        assert!(trace.contains("working"), "{trace}");
+
+        let (header, listed, trace) = state(&["turn-start", "turn-complete"]);
+        assert!(header.contains("1 busy  1 waiting"), "{header}");
+        assert!(listed.contains("waiting"), "{listed}");
+        assert!(trace.contains("waiting"), "{trace}");
+
+        let (header, listed, trace) = state(&["turn-start", "session-end"]);
+        assert!(header.contains("1 busy  live off"), "{header}");
+        assert!(listed.contains("exited"), "{listed}");
+        assert!(trace.contains("exited"), "{trace}");
     }
 
     #[test]
