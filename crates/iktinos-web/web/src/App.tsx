@@ -260,6 +260,9 @@ function InteractionView(props: {
       </button>
       {props.open && (
         <div className="body">
+          {interaction.nodes.length === 0 && (
+            <p className="nothing dim">nothing was read of this interaction but its prompt</p>
+          )}
           <ol className="tree">
             {interaction.nodes.map((node, index) => {
               const key = nodeKey(node, index);
