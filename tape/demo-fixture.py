@@ -11,7 +11,7 @@ Four sessions in three repositories are written at once. With `live`, one
 of them then keeps working for about a minute: its transcript grows call
 by call, and the events the bridge mod would send are posted to every
 socket in <socket-dir>. Another waits for a permission, which only the
-events can say.
+events can say; a while later it is allowed, and runs its command.
 """
 
 import json
@@ -56,12 +56,18 @@ class Session:
         self.prompt_id = ""
         self.context = 18_000
         self.started = self.clock
+        # While the recording runs, waiting takes real time.
+        self.realtime = False
         self.record({"type": "mode", "mode": "normal"}, common=False)
 
     # --- the clock ---
 
     def wait(self, seconds: float):
-        self.clock += timedelta(seconds=seconds)
+        if self.realtime:
+            time.sleep(seconds)
+            self.clock = now()
+        else:
+            self.clock += timedelta(seconds=seconds)
 
     def uid(self, prefix: str) -> str:
         self.n += 1
@@ -131,8 +137,10 @@ class Session:
             common=False,
         )
 
-    def response(self, content: list, stop: str, agent: str | None = None):
-        if agent is None:
+    def response(self, content: list, stop: str | None, agent: str | None = None,
+                 msg: str | None = None):
+        """One block of a response. Its blocks share `msg`, each in a record."""
+        if agent is None and stop is not None:
             self.context += 2_400
         read = 21_000 if agent else self.context
         self.record(
@@ -144,7 +152,7 @@ class Session:
                 "requestRef": self.ref,
                 "message": {
                     "model": AGENT_MODEL if agent else MAIN_MODEL,
-                    "id": self.uid("msg"),
+                    "id": msg or self.uid("msg"),
                     "type": "message",
                     "role": "assistant",
                     "content": content,
@@ -167,10 +175,21 @@ class Session:
             agent,
         )
 
-    def use(self, name: str, tool_input: dict, think: float = 1.5, agent: str | None = None) -> str:
-        """The model asks for a tool call, `think` seconds after it was asked."""
+    def use(self, name: str, tool_input: dict, think: float = 1.5, agent: str | None = None,
+            say: str | None = None, thought: bool = False) -> str:
+        """The model asks for a tool call, `think` seconds after it was asked:
+        after thinking (`thought`), and after saying `say`, if it does."""
         self.request(agent)
-        self.wait(think)
+        msg = self.uid("msg")
+        if thought:
+            self.wait(think * 0.7)
+            self.response([{"type": "thinking", "thinking": "SYNTHETIC", "signature": "sig"}],
+                          None, agent, msg)
+            self.wait(think * 0.3)
+        else:
+            self.wait(think)
+        if say:
+            self.response([{"type": "text", "text": say}], None, agent, msg)
         tool_id = self.uid("toolu")
         self.response(
             [
@@ -184,6 +203,7 @@ class Session:
             ],
             "tool_use",
             agent,
+            msg,
         )
         return tool_id
 
@@ -222,19 +242,21 @@ class Session:
         self.record(record, agent)
 
     def call(self, name: str, tool_input: dict, output: str, took: float = 0.4,
-             think: float = 1.5, ok: bool = True, agent: str | None = None) -> str:
+             think: float = 1.5, ok: bool = True, agent: str | None = None,
+             say: str | None = None, thought: bool = False) -> str:
         """A whole tool call: asked for, run for `took` seconds, returned."""
-        tool_id = self.use(name, tool_input, think, agent)
+        tool_id = self.use(name, tool_input, think, agent, say, thought)
         self.wait(took)
         self.result(tool_id, output, ok, name == "Bash", agent)
         self.wait(0.1)
         return tool_id
 
-    def answer(self, think: float = 2.5, agent: str | None = None, began: datetime | None = None):
+    def answer(self, text: str, think: float = 2.5, agent: str | None = None,
+               began: datetime | None = None):
         """The last response of an interaction, and how long the turn took."""
         self.request(agent)
         self.wait(think)
-        self.response([{"type": "text", "text": "SYNTHETIC answer"}], "end_turn", agent)
+        self.response([{"type": "text", "text": text}], "end_turn", agent)
         if agent is None and began is not None:
             self.wait(0.1)
             took = int((self.clock - began).total_seconds() * 1000)
@@ -298,10 +320,12 @@ def atlas(projects: Path) -> Session:
     # Look around, with a subagent.
     began = s.clock
     s.prompt("Where does fetch() get called, and is there any retry today?")
-    s.call("Read", {"file_path": f"{ATLAS}/src/fetch.rs"}, SOURCE, 0.3)
+    s.call("Read", {"file_path": f"{ATLAS}/src/fetch.rs"}, SOURCE, 0.3,
+           say="I'll start with the fetcher itself.")
     s.call("Read", {"file_path": f"{ATLAS}/Cargo.toml"}, '[package]\nname = "atlas"', 0.2)
     explore = s.use("Agent", {"description": "Find every caller of fetch()",
-                              "prompt": "SYNTHETIC", "subagent_type": "Explore"})
+                              "prompt": "SYNTHETIC", "subagent_type": "Explore"},
+                    3.0, thought=True)
     agent = "a1b2c3d4e5f60718"
     s.meta(agent, "Explore", "Find every caller of fetch()", explore)
     s.wait(0.5)
@@ -311,22 +335,25 @@ def atlas(projects: Path) -> Session:
     s.call("Read", {"file_path": f"{ATLAS}/src/main.rs"}, SOURCE, 0.2, agent=agent)
     s.call("Read", {"file_path": f"{ATLAS}/src/sync.rs"}, SOURCE, 0.3, agent=agent)
     s.call("Glob", {"pattern": "tests/**/*.rs"}, "tests/fetch.rs\ntests/sync.rs", 0.2, agent=agent)
-    s.answer(3.0, agent)
+    s.answer("Three callers, none of them retries.", 3.0, agent)
     s.wait(0.3)
     s.result(explore, "Three callers: main.rs:41, sync.rs:17, sync.rs:88. No retry anywhere.")
-    s.answer(4.0, began=began)
+    s.answer("fetch() is called from three places, and nothing retries today.", 4.0, began=began)
 
     # The change itself, with one failing test run.
     s.wait(95)
     began = s.clock
     s.prompt("Add retry with exponential backoff to the fetcher")
-    s.call("Edit", {"file_path": f"{ATLAS}/src/fetch.rs"}, "The file has been updated.", 0.4, 6.0)
+    s.call("Edit", {"file_path": f"{ATLAS}/src/fetch.rs"}, "The file has been updated.", 0.4, 6.0,
+           thought=True)
     s.call("Write", {"file_path": f"{ATLAS}/src/backoff.rs"}, "File created.", 0.3, 9.0)
     s.call("Edit", {"file_path": f"{ATLAS}/src/main.rs"}, "The file has been updated.", 0.3, 3.0)
-    s.call("Bash", {"command": "cargo test --workspace"}, TESTS_FAILED, 38.4, 2.0, ok=False)
-    s.call("Edit", {"file_path": f"{ATLAS}/src/backoff.rs"}, "The file has been updated.", 0.4, 7.0)
+    s.call("Bash", {"command": "cargo test --workspace"}, TESTS_FAILED, 38.4, 2.0, ok=False,
+           say="Now the tests.")
+    s.call("Edit", {"file_path": f"{ATLAS}/src/backoff.rs"}, "The file has been updated.", 0.4, 7.0,
+           say="The cap is applied before the doubling. Fixing that.", thought=True)
     s.call("Bash", {"command": "cargo test --workspace"}, TESTS_OK, 41.7, 2.0)
-    s.answer(3.5, began=began)
+    s.answer("The fetcher now retries with exponential backoff, capped at 30s.", 3.5, began=began)
 
     # Polish: still going when the recording starts.
     s.clock = now() - timedelta(seconds=50)
@@ -375,10 +402,10 @@ def harbor(projects: Path) -> Session:
            "src/date-picker/popover.tsx:58\nsrc/hooks/use-outside-click.ts:22", 0.5, agent=agent)
     s.call("Read", {"file_path": f"{HARBOR}/src/hooks/use-outside-click.ts"},
            "export function useOutsideClick() { /* invented */ }", 0.2, agent=agent)
-    s.answer(2.5, agent)
+    s.answer("The listener is registered in a timeout the test does not wait for.", 2.5, agent)
     s.wait(0.3)
     s.result(task, "use-outside-click.ts:22 registers its listener in a timeout.")
-    s.answer(5.0, began=began)
+    s.answer("The test clicks outside before the listener exists.", 5.0, began=began)
 
     s.wait(140)
     began = s.clock
@@ -387,7 +414,7 @@ def harbor(projects: Path) -> Session:
            "The file has been updated.", 0.3, 5.0)
     s.call("Bash", {"command": "pnpm vitest run src/date-picker --repeat 20"},
            " Test Files  1 passed (1)\n      Tests  120 passed (120)", 31.2)
-    s.answer(3.0, began=began)
+    s.answer("Twenty runs in a row pass now.", 3.0, began=began)
     return s
 
 
@@ -399,8 +426,9 @@ def notes(projects: Path) -> Session:
     began = s.clock
     s.prompt("Turn notes/workshop.md into an outline with one heading per session")
     s.call("Read", {"file_path": f"{NOTES}/notes/workshop.md"}, "# Workshop\n(invented)", 0.2)
-    s.call("Write", {"file_path": f"{NOTES}/notes/outline.md"}, "File created.", 0.3, 11.0)
-    s.answer(2.0, began=began)
+    s.call("Write", {"file_path": f"{NOTES}/notes/outline.md"}, "File created.", 0.3, 11.0,
+           thought=True)
+    s.answer("The outline is in notes/outline.md, one heading per session.", 2.0, began=began)
     return s
 
 
@@ -454,35 +482,35 @@ def work(s: Session, waiting: Session, bridge: Bridge):
     bridge.send({"type": "tool.check", "session_id": waiting.id, "tool": "Bash",
                  "tool_use_id": waiting.pending, "decision": "ask"}, standing=True)
 
+    ask = bridge.standing[-1]
     steps = [
-        ("Edit", {"file_path": f"{ATLAS}/src/backoff.rs"}, "The file has been updated.", 0.5, 3.0),
-        ("Bash", {"command": "cargo fmt --all --check"}, "", 2.5, 2.0),
-        ("Read", {"file_path": f"{ATLAS}/tests/fetch.rs"}, SOURCE, 0.3, 2.5),
-        ("Edit", {"file_path": f"{ATLAS}/tests/fetch.rs"}, "The file has been updated.", 0.4, 4.0),
-        ("Bash", {"command": "cargo test backoff"}, TESTS_OK, 7.0, 2.0),
-        ("Edit", {"file_path": f"{ATLAS}/README.md"}, "The file has been updated.", 0.4, 3.5),
-        ("Bash", {"command": "cargo doc --no-deps"}, " Documenting atlas v0.4.0", 6.0, 2.0),
-        ("Bash", {"command": "cargo clippy --all-targets -- -D warnings"}, CLIPPY_OK, 8.0, 2.5),
-        ("Read", {"file_path": f"{ATLAS}/CHANGELOG.md"}, "# Changelog\n(invented)", 0.3, 2.0),
-        ("Edit", {"file_path": f"{ATLAS}/CHANGELOG.md"}, "The file has been updated.", 0.4, 4.0),
-        ("Bash", {"command": "cargo test --workspace"}, TESTS_OK, 9.0, 2.0),
+        ("Edit", {"file_path": f"{ATLAS}/src/backoff.rs"}, "The file has been updated.", 0.5, 3.0,
+         "Documenting the cap first."),
+        ("Bash", {"command": "cargo fmt --all --check"}, "", 2.5, 2.0, None),
+        ("Read", {"file_path": f"{ATLAS}/tests/fetch.rs"}, SOURCE, 0.3, 2.5, None),
+        ("Edit", {"file_path": f"{ATLAS}/tests/fetch.rs"}, "The file has been updated.", 0.4, 4.0,
+         "A test for the cap as well."),
+        ("Bash", {"command": "cargo test backoff"}, TESTS_OK, 7.0, 2.0, None),
+        ("Edit", {"file_path": f"{ATLAS}/README.md"}, "The file has been updated.", 0.4, 3.5, None),
+        ("Bash", {"command": "cargo doc --no-deps"}, " Documenting atlas v0.4.0", 6.0, 2.0, None),
+        ("Bash", {"command": "cargo clippy --all-targets -- -D warnings"}, CLIPPY_OK, 8.0, 2.5,
+         "Clippy once more."),
+        ("Read", {"file_path": f"{ATLAS}/CHANGELOG.md"}, "# Changelog\n(invented)", 0.3, 2.0, None),
+        ("Edit", {"file_path": f"{ATLAS}/CHANGELOG.md"}, "The file has been updated.", 0.4, 4.0,
+         None),
+        ("Bash", {"command": "cargo test --workspace"}, TESTS_OK, 9.0, 2.0, None),
     ]
     used = 31.0
-    for name, tool_input, output, took, think in steps:
-        s.clock = now()
-        s.request()
-        time.sleep(think)
-        s.clock = now()
-        tool_id = s.uid("toolu")
-        s.response([{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input,
-                     "caller": {"type": "direct"}}], "tool_use")
+    s.realtime = True
+    s.clock = now()
+    for index, (name, tool_input, output, took, think, say) in enumerate(steps):
+        tool_id = s.use(name, tool_input, think, say=say)
         summary = tool_input.get("command") or tool_input.get("file_path")
         bridge.send({"type": "tool.check", "session_id": s.id, "tool": name,
                      "tool_use_id": tool_id, "decision": "allow"})
         bridge.send({"type": "tool.call", "session_id": s.id, "phase": "start", "tool": name,
                      "tool_use_id": tool_id, "summary": summary})
-        time.sleep(took)
-        s.clock = now()
+        s.wait(took)
         s.result(tool_id, output, bash=name == "Bash")
         bridge.send({"type": "tool.call", "session_id": s.id, "phase": "end", "tool": name,
                      "tool_use_id": tool_id, "duration_ms": int(took * 1000), "success": True})
@@ -491,9 +519,23 @@ def work(s: Session, waiting: Session, bridge: Bridge):
                      "context": {"tokens": s.context, "window": WINDOW},
                      "rate_limits": [{"kind": "five_hour", "percent_used": used},
                                      {"kind": "seven_day", "percent_used": 12.0}]})
+        # Meanwhile the other session is allowed its command, and runs it.
+        if index == 3:
+            bridge.standing.remove(ask)
+            bridge.send({"type": "tool.check", "session_id": waiting.id, "tool": "Bash",
+                         "tool_use_id": waiting.pending, "decision": "allow"})
+            bridge.send({"type": "tool.call", "session_id": waiting.id, "phase": "start",
+                         "tool": "Bash", "tool_use_id": waiting.pending,
+                         "summary": "cargo update"})
+        if index == 5:
+            waiting.clock = now()
+            waiting.result(waiting.pending, "    Updating serde v1.0.210 -> v1.0.219\n"
+                           "    Updating tokio v1.40.0 -> v1.44.1", bash=True)
+            bridge.send({"type": "tool.call", "session_id": waiting.id, "phase": "end",
+                         "tool": "Bash", "tool_use_id": waiting.pending,
+                         "duration_ms": 9000, "success": True})
 
-    s.clock = now()
-    s.answer(3.0, began=s.live_began)
+    s.answer("Documented, and clippy is clean.", 3.0, began=s.live_began)
     bridge.send({"type": "turn.complete", "session_id": s.id, "turn_id": "turn-3",
                  "reason": "answer"})
 
