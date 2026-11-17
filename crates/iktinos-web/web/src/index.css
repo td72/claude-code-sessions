@@ -197,7 +197,12 @@ header h1 {
   position: sticky;
   top: 1.9rem;
   background: var(--chosen);
-  border-bottom: 2px solid var(--line);
+  border-bottom: 3px solid var(--label);
+}
+
+/* And is set apart from the rest: a rule under it, then some room. */
+.sessions tbody tr.selected + tr td {
+  padding-top: 0.9rem;
 }
 
 .sessions .label {
