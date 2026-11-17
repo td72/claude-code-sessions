@@ -34,6 +34,58 @@ pub struct Config {
     /// Show only the sessions that run in this directory, below it, or in
     /// a worktree of its git repository (`--cwd`).
     pub within: Option<PathBuf>,
+    /// How often the transcripts are read again.
+    pub refresh: Duration,
+    /// The pages shown, in the order of their keys, `1` onwards.
+    pub pages: Vec<Page>,
+    /// The page the viewer starts on.
+    pub start: Page,
+    /// How long the socket may be silent while a session is busy before
+    /// the header says so in colour.
+    pub quiet_after: Duration,
+    /// How the session list is ordered and filtered to begin with.
+    pub sort: Sort,
+    pub filter: Filter,
+    /// How recent a record makes a session "active" when no live event
+    /// says more.
+    pub active_within: Duration,
+    /// The trace lists interactions under their sessions to begin with.
+    pub by_session: bool,
+    /// How many of its latest interactions a session keeps.
+    pub interactions: usize,
+    /// How long something takes before it is shown as slow, and as very
+    /// slow.
+    pub slow: [Duration; 2],
+    /// How many recent tool calls a session keeps.
+    pub recent_tools: usize,
+    /// How much of a tool call's output a session keeps, in characters.
+    pub output_chars: usize,
+}
+
+impl Config {
+    /// Every setting at its default, for the transcripts in `projects_dir`.
+    pub fn new(projects_dir: PathBuf) -> Self {
+        Self {
+            projects_dir,
+            live: true,
+            socket_dir: None,
+            time: TimeStyle::default(),
+            ago_within: DEFAULT_AGO_WITHIN,
+            within: None,
+            refresh: Duration::from_secs(1),
+            pages: Page::ALL.to_vec(),
+            start: Page::ALL[0],
+            quiet_after: Duration::from_secs(60),
+            sort: Sort::Updated,
+            filter: Filter::All,
+            active_within: ACTIVE_WITHIN,
+            by_session: true,
+            interactions: iktinos::trace::DEFAULT_TRACE_INTERACTIONS,
+            slow: [Duration::from_secs(10), Duration::from_secs(60)],
+            recent_tools: 200,
+            output_chars: 2000,
+        }
+    }
 }
 
 /// How new something is shown as "ago" unless told otherwise.
@@ -142,8 +194,8 @@ pub enum Page {
 }
 
 impl Page {
-    /// In the order of their keys, `1` to `5`. The first is the page the
-    /// viewer starts on.
+    /// Every page, in the order they are shown in unless the
+    /// configuration says otherwise.
     pub const ALL: [Page; 5] = [
         Page::Trace,
         Page::Sessions,
@@ -151,6 +203,17 @@ impl Page {
         Page::Subagents,
         Page::Usage,
     ];
+
+    /// The page as the configuration file names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Page::Sessions => "sessions",
+            Page::Tools => "tools",
+            Page::Subagents => "subagents",
+            Page::Trace => "trace",
+            Page::Usage => "usage",
+        }
+    }
 
     pub fn title(self) -> &'static str {
         match self {
@@ -268,7 +331,7 @@ pub struct Viewport {
 }
 
 pub struct App {
-    config: Config,
+    pub config: Config,
     pub store: SessionStore,
     /// A tail per transcript, with the session it belongs to.
     tails: BTreeMap<PathBuf, (String, Tail)>,
@@ -342,13 +405,6 @@ pub struct App {
     #[cfg(unix)]
     listener: Option<live::Listener>,
 }
-
-/// How many recent tool calls per session the viewer keeps.
-const RECENT_TOOLS: usize = 200;
-
-/// How many characters of a tool's output each call keeps to show. The
-/// whole is read when it is asked for.
-const TOOL_OUTPUT: usize = 2000;
 
 /// The whole output of one call, as it was read on demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,16 +534,17 @@ impl App {
     pub fn new(config: Config) -> Self {
         let mut app = Self {
             store: SessionStore::new()
-                .with_recent_tools(RECENT_TOOLS)
-                .with_tool_output(TOOL_OUTPUT),
+                .with_recent_tools(config.recent_tools)
+                .with_tool_output(config.output_chars)
+                .with_trace_interactions(config.interactions),
             tails: BTreeMap::new(),
             files: BTreeMap::new(),
             whole: None,
             said: None,
-            page: Page::ALL[0],
+            page: config.start,
             in_detail: false,
-            sort: Sort::Updated,
-            filter: Filter::All,
+            sort: config.sort,
+            filter: config.filter,
             repository: None,
             time: config.time,
             order: Vec::new(),
@@ -498,7 +555,7 @@ impl App {
             subagent_selected: 0,
             detail_scroll: 0,
             trace_selected: 0,
-            by_session: true,
+            by_session: config.by_session,
             closed_sessions: HashSet::new(),
             span_selected: 0,
             open_agents: HashSet::new(),
@@ -695,7 +752,7 @@ impl App {
         let selected = self.order.get(self.selected).cloned();
         let mut sessions: Vec<&Session> = self
             .shown()
-            .filter(|s| self.filter.admits(status(s, now).kind))
+            .filter(|s| self.filter.admits(self.status(s, now).kind))
             .filter(|s| {
                 self.repository
                     .as_ref()
@@ -764,6 +821,17 @@ impl App {
         self.store
             .sessions()
             .filter(|session| !self.outside.contains(&session.id))
+    }
+
+    /// What a session is doing, as this viewer is set to judge it.
+    pub fn status(&self, session: &Session, now: Timestamp) -> Status {
+        status_within(session, now, self.config.active_within)
+    }
+
+    /// The page a key shows: `0` for the key `1`. `None` past the pages
+    /// that are shown.
+    pub fn page_at(&self, index: usize) -> Option<Page> {
+        self.config.pages.get(index).copied()
     }
 
     /// The directory the pages are narrowed to.
@@ -1192,8 +1260,9 @@ impl App {
         (rows / 2).max(1) as isize
     }
 
+    /// Shows `page`, if it is one of the pages shown at all.
     pub fn go_to(&mut self, page: Page) {
-        if self.page != page {
+        if self.page != page && self.config.pages.contains(&page) {
             self.page = page;
             self.in_detail = false;
             self.call_focus = false;
@@ -1577,7 +1646,7 @@ impl App {
                         label(s),
                         project(s).unwrap_or_default(),
                         s.git_branch.as_deref().unwrap_or_default(),
-                        status(s, now).text,
+                        self.status(s, now).text,
                         s.id
                     )
                 })
@@ -1719,9 +1788,17 @@ pub fn now() -> Timestamp {
     Timestamp::from_millis(millis)
 }
 
-/// What a session is doing: from live events when they say, from the
-/// transcript otherwise.
+/// [`status_within`] with the default for how recent a record makes a
+/// session active.
+#[cfg(test)]
 pub fn status(session: &Session, now: Timestamp) -> Status {
+    status_within(session, now, ACTIVE_WITHIN)
+}
+
+/// What a session is doing: from live events when they say, from the
+/// transcript otherwise, where a record newer than `active_within` makes
+/// it active.
+pub fn status_within(session: &Session, now: Timestamp, active_within: Duration) -> Status {
     let status = |kind, text: &str| Status {
         kind,
         text: text.to_owned(),
@@ -1752,7 +1829,7 @@ pub fn status(session: &Session, now: Timestamp) -> Status {
             LiveState::Unknown => {}
         }
     }
-    match session.activity(now, ACTIVE_WITHIN) {
+    match session.activity(now, active_within) {
         Activity::Active { .. } => status(StatusKind::Busy, "active"),
         Activity::Idle => status(StatusKind::Idle, "idle"),
         Activity::Exited => status(StatusKind::Exited, "exited"),
@@ -1862,6 +1939,7 @@ pub mod tests {
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(PathBuf::new())
         }
     }
 
@@ -2057,6 +2135,7 @@ pub mod tests {
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(PathBuf::new())
         });
         app.go_to(Page::Subagents);
         assert_eq!(
@@ -2449,6 +2528,7 @@ pub mod tests {
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(PathBuf::new())
         });
         app.go_to(Page::Trace);
         app.by_session = false; // these are about the flat list
@@ -2499,6 +2579,7 @@ pub mod tests {
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(PathBuf::new())
         });
         app.go_to(Page::Tools);
         app.move_by(3);
@@ -2618,6 +2699,7 @@ pub mod tests {
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(PathBuf::new())
         });
         assert!(app.order.is_empty());
         assert!(app.selected_session().is_none());
@@ -2654,6 +2736,7 @@ pub mod tests {
             time: TimeStyle::default(),
             ago_within: DEFAULT_AGO_WITHIN,
             within: None,
+            ..Config::new(PathBuf::new())
         });
         let LiveStatus::Listening(socket) = app.live.clone() else {
             panic!("{:?}", app.live)
