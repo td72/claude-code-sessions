@@ -313,12 +313,15 @@ pub struct Totals {
     pub without_cost: usize,
 }
 
-/// A search within one page's list.
+/// A search within one page's list, or within the tree of the Trace page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Search {
     pub page: Page,
     /// Lower-cased: matching ignores case.
     pub query: String,
+    /// Of the rows of an interaction's tree, not of the page's list. It
+    /// holds for whichever interaction the tree is of.
+    pub tree: bool,
 }
 
 /// What the last draw measured, for keys that move by what is visible.
@@ -477,32 +480,32 @@ pub struct InteractionRow<'a> {
 }
 
 impl InteractionRow<'_> {
-    /// The text the interaction is searched by: what was asked, what its
-    /// main thread called and what its responses said; with
-    /// `with_session`, its session and where that runs too.
+    /// The text the interaction is searched by: what its row shows. What
+    /// was asked, or, where that is not known, the tools it used; with
+    /// `with_session`, its session and where that runs too. What it called
+    /// and what was answered are found in its tree.
     fn text(&self, with_session: bool) -> String {
-        let mut text = self.interaction.prompt.clone().unwrap_or_default();
+        let mut text = match &self.interaction.prompt {
+            Some(prompt) => prompt.clone(),
+            None => {
+                let names: Vec<&str> = self
+                    .interaction
+                    .thread
+                    .spans
+                    .iter()
+                    .filter_map(|span| match &span.kind {
+                        SpanKind::Tool(call) => Some(call.name.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                names.join(" ")
+            }
+        };
         if with_session {
             text.push(' ');
             text.push_str(label(self.session));
             text.push(' ');
             text.push_str(&project(self.session).unwrap_or_default());
-        }
-        for span in &self.interaction.thread.spans {
-            let parts = match &span.kind {
-                // The whole command where it is more than its first line.
-                SpanKind::Tool(call) => [
-                    Some(call.name.as_str()),
-                    call.summary.as_deref(),
-                    call.input.as_deref(),
-                ],
-                SpanKind::LlmRequest(request) => [request.text.as_deref(), None, None],
-                _ => [None, None, None],
-            };
-            for part in parts.into_iter().flatten() {
-                text.push(' ');
-                text.push_str(part);
-            }
         }
         text
     }
@@ -531,6 +534,28 @@ pub enum TraceItem<'a> {
 }
 
 impl TraceRow<'_> {
+    /// The text the row is searched by: a call's tool and every line of
+    /// its command, what a response said, a subagent's type and task.
+    fn text(&self) -> String {
+        let parts = match self.item {
+            TraceItem::Span(span) => match &span.kind {
+                SpanKind::Tool(call) => [
+                    Some(call.name.as_str()),
+                    call.summary.as_deref(),
+                    call.input.as_deref(),
+                ],
+                SpanKind::LlmRequest(request) => [request.text.as_deref(), None, None],
+                _ => [None, None, None],
+            },
+            TraceItem::Subagent(subagent) => [
+                subagent.agent_type.as_deref(),
+                subagent.description.as_deref(),
+                Some(subagent.agent_id.as_str()),
+            ],
+        };
+        parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
+    }
+
     /// What names the row across refreshes.
     pub fn key(&self) -> String {
         match self.item {
@@ -1423,6 +1448,11 @@ impl App {
     /// `Esc`: out of the pane in focus. On a list it drops the search; with
     /// no search, the narrowing to a subagent, then the narrowing to a session.
     pub fn back(&mut self) {
+        // In the tree, its search goes first.
+        if self.choosing_span() && self.tree_search().is_some() {
+            self.search = None;
+            return;
+        }
         if self.step_out() {
             return;
         }
@@ -1673,15 +1703,14 @@ impl App {
                 .tools()
                 .iter()
                 .map(|(s, c)| {
-                    // The whole command where the row shows its first
-                    // line only, and where the session runs.
+                    // The whole command, where the row shows its first
+                    // line only.
                     format!(
-                        "{} {} {} {} {}",
+                        "{} {} {} {}",
                         c.name,
                         c.summary.as_deref().unwrap_or_default(),
                         c.input.as_deref().unwrap_or_default(),
-                        label(s),
-                        project(s).unwrap_or_default()
+                        label(s)
                     )
                 })
                 .collect(),
@@ -1690,12 +1719,11 @@ impl App {
                 .iter()
                 .map(|(s, a)| {
                     format!(
-                        "{} {} {} {} {}",
+                        "{} {} {} {}",
                         a.agent_type.as_deref().unwrap_or_default(),
                         a.description.as_deref().unwrap_or_default(),
                         a.agent_id,
-                        label(s),
-                        project(s).unwrap_or_default()
+                        label(s)
                     )
                 })
                 .collect(),
@@ -1709,9 +1737,30 @@ impl App {
         rows.into_iter().map(|row| row.to_lowercase()).collect()
     }
 
-    /// The rows of `page` the search in force matches.
+    /// The rows of the tree of the interaction under the cursor that the
+    /// search in force matches, where it is a search of the tree.
+    pub fn tree_matches(&self) -> Vec<usize> {
+        let Some(search) = self.tree_search() else {
+            return Vec::new();
+        };
+        self.span_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.text().to_lowercase().contains(&search.query))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The search in force, if it is one of the Trace page's tree.
+    pub fn tree_search(&self) -> Option<&Search> {
+        self.search
+            .as_ref()
+            .filter(|s| s.tree && self.page == Page::Trace)
+    }
+
+    /// The rows of `page`'s list the search in force matches.
     pub fn matches(&self, page: Page, now: Timestamp) -> Vec<usize> {
-        let Some(search) = self.search.as_ref().filter(|s| s.page == page) else {
+        let Some(search) = self.search.as_ref().filter(|s| s.page == page && !s.tree) else {
             return Vec::new();
         };
         self.haystacks(page, now)
@@ -1722,11 +1771,19 @@ impl App {
             .collect()
     }
 
-    /// Starts typing a search in the page's list.
+    /// Starts typing a search: of the tree, with the focus on the Trace
+    /// page's tree; of the page's list otherwise, which takes the focus
+    /// from whatever pane had it.
     pub fn start_search(&mut self) {
-        if self.page.has_list() && !self.in_detail {
-            self.typing = Some(String::new());
+        if !self.page.has_list() {
+            return;
         }
+        if self.in_detail && !self.choosing_span() {
+            self.in_detail = false;
+            self.call_focus = false;
+            self.from_list = false;
+        }
+        self.typing = Some(String::new());
     }
 
     /// `Enter` while typing: search, and go to the first match from the
@@ -1741,7 +1798,25 @@ impl App {
             return;
         }
         let page = self.page;
-        self.search = Some(Search { page, query });
+        let tree = self.choosing_span();
+        self.search = Some(Search { page, query, tree });
+        if tree {
+            // What a folded subagent did could not be found: unfold them.
+            if let Some(session) = self.selected_interaction().map(|row| row.session) {
+                let keys: Vec<_> = session
+                    .subagents
+                    .keys()
+                    .map(|agent| (session.id.clone(), agent.clone()))
+                    .collect();
+                self.open_agents.extend(keys);
+            }
+            let matches = self.tree_matches();
+            let at = self.span_selected;
+            if let Some(to) = matches.iter().find(|m| **m >= at).or(matches.first()) {
+                self.move_to(*to);
+            }
+            return;
+        }
         if page == Page::Trace {
             // What a folded session holds could not be found: unfold all.
             self.closed_sessions.clear();
@@ -1755,12 +1830,14 @@ impl App {
 
     /// `n` / `N`: the next or the previous match, wrapping around.
     pub fn next_match(&mut self, by: isize) {
-        if self.in_detail {
+        let (matches, at) = if self.choosing_span() {
+            (self.tree_matches(), self.span_selected)
+        } else if self.in_detail {
             return;
-        }
-        let page = self.page;
-        let matches = self.matches(page, now());
-        let at = *self.cursor_mut(page);
+        } else {
+            let page = self.page;
+            (self.matches(page, now()), *self.cursor_mut(page))
+        };
         let to = if by > 0 {
             matches.iter().find(|m| **m > at).or(matches.first())
         } else {
@@ -2424,11 +2501,11 @@ pub mod tests {
         app.toggle_focus();
         assert!(!app.in_detail && !app.call_focus);
 
-        // A search finds an interaction by what it called.
+        // All together, a search finds an interaction by its session.
         app.back();
         assert_eq!(app.scope, None);
         app.start_search();
-        app.typing = Some("lookup".to_owned());
+        app.typing = Some("22222222".to_owned());
         app.submit_search();
         assert_eq!(app.matches(Page::Trace, now()), [1]);
         assert_eq!(app.trace_selected, 1);
@@ -2509,8 +2586,8 @@ pub mod tests {
         assert!(app.choosing_span());
         app.back();
 
-        // A search matches a session by its name and an interaction by
-        // what it called.
+        // A search matches a session by its name, and a row by what it
+        // shows: what an interaction called is not on its row.
         app.start_search();
         app.typing = Some("other.repo".to_owned());
         app.submit_search();
@@ -2519,7 +2596,7 @@ pub mod tests {
         app.start_search();
         app.typing = Some("lookup".to_owned());
         app.submit_search();
-        assert_eq!(app.matches(Page::Trace, now()), [3]);
+        assert!(app.matches(Page::Trace, now()).is_empty());
         app.back();
 
         // `t` again: flat, on the same interaction. From a session's row,

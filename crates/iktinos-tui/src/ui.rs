@@ -231,7 +231,11 @@ fn list_title(app: &App, what: String, matches: usize) -> String {
             ));
         }
     }
-    if let Some(search) = app.search.as_ref().filter(|s| s.page == app.page) {
+    if let Some(search) = app
+        .search
+        .as_ref()
+        .filter(|s| s.page == app.page && !s.tree)
+    {
         title.push_str(&format!("  /{} ({matches})", search.query));
     }
     title
@@ -1124,12 +1128,16 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         })
         .collect();
 
-    let title = match app.selected_interaction() {
+    let found = app.tree_matches();
+    let mut title = match app.selected_interaction() {
         Some(InteractionRow { interaction, .. }) => {
             format!("Interaction: {}", interaction_summary(interaction))
         }
         None => "Interaction".to_owned(),
     };
+    if let Some(search) = app.tree_search() {
+        title.push_str(&format!("  /{} ({})", search.query, found.len()));
+    }
     let block = pane_block(title, app.choosing_span());
     if count == 0 {
         let text = if app.selected_interaction().is_some() {
@@ -1158,7 +1166,11 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App, now: Timestamp) {
         .block(block);
     // The cursor shows once the tree has been entered.
     let selected = app.in_tree().then_some(app.span_selected.min(count - 1));
-    draw_list(frame, area, app, TREE, table, selected, Found::default());
+    let found = Found {
+        matches: &found,
+        footer: 0,
+    };
+    draw_list(frame, area, app, TREE, table, selected, found);
 }
 
 /// The detail of a row of the interaction's tree.
@@ -2303,7 +2315,7 @@ const HELP: &[(&str, &str)] = &[
         "Esc (list)",
         "clear the search, then the narrowing, step by step",
     ),
-    ("/", "search the list"),
+    ("/", "search the list; in an interaction's tree, the tree"),
     ("n / N", "next / previous match"),
     (
         "t",
@@ -3605,10 +3617,13 @@ mod tests {
         // Esc clears the search first.
         app.back();
         assert_eq!(app.search, None);
-        // There is no searching from inside the detail pane.
+        // From the detail pane, `/` is the list's search: the focus goes
+        // back to the list.
         app.focus_detail();
+        assert!(app.in_detail);
         app.start_search();
-        assert_eq!(app.typing, None);
+        assert_eq!(app.typing.as_deref(), Some(""));
+        assert!(!app.in_detail);
     }
 
     /// The foreground colours of the cells of the row that shows `needle`,
@@ -3687,12 +3702,9 @@ mod tests {
             app.matches(page, Timestamp::parse(LATER).unwrap())
         };
 
-        // A tool call: by a later line of its command, and by where its
-        // session runs.
+        // A tool call: by a later line of its command.
         assert_eq!(search(&mut app, Page::Tools, "synthetic-target").len(), 1);
         assert_eq!(app.selected_tool().unwrap().1.id, "toolu_search");
-        let here = search(&mut app, Page::Tools, "other.repo").len();
-        assert_eq!(here, app.tools().len(), "every call is that session's");
 
         // The trace by session: a session's name finds the session, not
         // every interaction under it.
@@ -3700,14 +3712,12 @@ mod tests {
         let named = search(&mut app, Page::Trace, "22222222");
         assert_eq!(named.len(), 1, "{named:?}");
         assert!(app.selected_list_row().unwrap().interaction.is_none());
-        // What a response said finds its interaction.
-        let said = search(&mut app, Page::Trace, "synthetic answer");
-        assert!(!said.is_empty());
-        assert!(said
-            .iter()
-            .all(|at| app.trace_list()[*at].interaction.is_some()));
-        // The word "interaction" is not in every row.
-        assert!(search(&mut app, Page::Trace, "interaction").is_empty());
+        // A row is found by what it shows. What an interaction called and
+        // what was answered are not on its row, nor is the word
+        // "interaction".
+        for hidden in ["synthetic answer", "synthetic-target", "interaction"] {
+            assert!(search(&mut app, Page::Trace, hidden).is_empty(), "{hidden}");
+        }
 
         // A folded session is unfolded by a search: what it holds is
         // found.
@@ -3720,12 +3730,11 @@ mod tests {
         }
         app.enter();
         assert_eq!(app.closed_sessions.len(), 1);
-        let folded = search(&mut app, Page::Trace, "synthetic-target");
+        let asked = search(&mut app, Page::Trace, "run the checks");
         assert!(app.closed_sessions.is_empty());
-        assert_eq!(folded.len(), 1);
-        let row = app.selected_list_row().unwrap();
-        assert_eq!(row.session.id, WITH_SUBAGENTS);
-        assert!(row.interaction.is_some());
+        assert!(asked
+            .iter()
+            .any(|at| app.trace_list()[*at].session.id == WITH_SUBAGENTS));
 
         // All together, the session is on the row and finds it.
         app.toggle_by_session();
@@ -3736,6 +3745,72 @@ mod tests {
             .all(|at| app.trace_list()[*at].session.id == WITH_SUBAGENTS));
 
         let _ = std::fs::remove_dir_all(projects);
+    }
+
+    #[test]
+    fn a_search_from_the_tree_is_of_the_tree() {
+        let mut app = fixture_app();
+        select(&mut app, WITH_SUBAGENTS);
+        app.enter();
+        app.go_to(Page::Trace);
+        app.by_session = false;
+        app.enter();
+        assert!(app.choosing_span());
+
+        // `/` with the focus on the tree searches its rows, and the focus
+        // stays there.
+        app.start_search();
+        assert!(app.in_detail && app.typing.is_some());
+        app.typing = Some("LOOKUP".to_owned());
+        app.submit_search();
+        assert!(app.choosing_span());
+        let found = app.tree_matches();
+        assert_eq!(found.len(), 1);
+        assert_eq!(app.span_selected, found[0]);
+        // The list above has no match of its own.
+        assert!(app
+            .matches(Page::Trace, Timestamp::parse(SOON).unwrap())
+            .is_empty());
+
+        let shown = screen(&mut app, 150, 44, SOON);
+        assert!(
+            shown.contains("┌ Interaction: 3 LLM requests, 3 tool calls  /lookup (1)"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("Trace (1 interaction · latest first) of 22222222  /"),
+            "{shown}"
+        );
+        // The row is in the search colour, whatever its cells are.
+        let row = row_colours(&mut app, "example/lookup  synthetic lookup", SOON);
+        // The bar on the time axis is part of the row.
+        assert!(row.iter().all(|c| *c == Color::Yellow), "{row:?}");
+
+        // What a folded subagent did is found: the search unfolds it.
+        app.typing = Some("synthetic pattern".to_owned());
+        app.submit_search();
+        let found = app.tree_matches();
+        // Both subagents searched for it; neither was unfolded before.
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&app.span_selected));
+        assert!(app.selected_span().unwrap().depth > 0);
+
+        // What a response said, and `n` / `N` between the matches.
+        app.typing = Some("cargo".to_owned());
+        app.submit_search();
+        let found = app.tree_matches();
+        assert!(!found.is_empty());
+        let first = app.span_selected;
+        app.next_match(1);
+        app.next_match(-1);
+        assert_eq!(app.span_selected, first);
+
+        // Esc clears the tree's search first, then leaves the tree.
+        app.back();
+        assert_eq!(app.search, None);
+        assert!(app.choosing_span());
+        app.back();
+        assert!(!app.in_detail);
     }
 
     #[test]
