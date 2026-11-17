@@ -87,6 +87,23 @@ pub enum LiveStatus {
     Failed(String),
 }
 
+/// What the socket has received since the viewer started. The viewer's own
+/// count: nothing of it is written anywhere.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Received {
+    /// Events read, those of an unknown type among them.
+    pub events: u64,
+    /// Events of a type this viewer does not know: a newer mod.
+    pub unknown: u64,
+    /// Requests answered with an error: not an event, or of a protocol
+    /// version this viewer does not speak.
+    pub rejected: u64,
+    /// When the latest event was taken from the socket.
+    pub last_at: Option<Timestamp>,
+    /// The same for each session that sent one.
+    pub sessions: BTreeMap<String, Timestamp>,
+}
+
 /// One line of what a session is doing, and how much attention it wants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -284,6 +301,8 @@ pub struct App {
     /// Something the user should know: a missing directory, a failed socket.
     pub notice: Option<String>,
     pub live: LiveStatus,
+    /// What arrived on the socket so far.
+    pub received: Received,
     #[cfg(unix)]
     listener: Option<live::Listener>,
 }
@@ -446,6 +465,7 @@ impl App {
             viewport: Viewport::default(),
             notice: None,
             live: LiveStatus::Off,
+            received: Received::default(),
             #[cfg(unix)]
             listener: None,
             config,
@@ -475,6 +495,11 @@ impl App {
     /// Looks for new transcripts, reads what was appended to the known ones
     /// and applies the live events that arrived.
     pub fn refresh(&mut self) {
+        self.refresh_at(now());
+    }
+
+    /// [`refresh`](Self::refresh) at a time the caller names.
+    pub fn refresh_at(&mut self, now: Timestamp) {
         // New rows arrive at the top of the Tool calls and Subagents lists.
         // A cursor further down stays on its row; one on the first row keeps
         // following the latest.
@@ -501,7 +526,7 @@ impl App {
             .then(|| self.selected_span().map(|row| row.key()))
             .flatten();
 
-        self.load();
+        self.load(now);
 
         if let Some((session, id)) = tool {
             let found = self
@@ -550,7 +575,7 @@ impl App {
         self.offsets[index] = (self.offsets[index] + to).saturating_sub(from);
     }
 
-    fn load(&mut self) {
+    fn load(&mut self, now: Timestamp) {
         match discover(&self.config.projects_dir) {
             Ok(found) => {
                 self.notice = None;
@@ -563,9 +588,9 @@ impl App {
         self.read_appended();
         #[cfg(unix)]
         if let Some(listener) = &self.listener {
-            listener.drain(&mut self.store);
+            listener.drain(&mut self.store, &mut self.received, now);
         }
-        self.arrange(now());
+        self.arrange(now);
     }
 
     fn track(&mut self, files: &SessionFiles) {
@@ -1594,10 +1619,13 @@ mod live {
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::Receiver;
 
+    use iktinos::record::Timestamp;
     use iktinos::session::SessionStore;
-    use iktinos_live::event::Event;
+    use iktinos_live::event::{Body, Event};
     use iktinos_live::merge::apply_event;
     use iktinos_live::server::Server;
+
+    use super::Received;
 
     /// The socket server and the events it has received.
     pub struct Listener {
@@ -1619,10 +1647,19 @@ mod live {
             self.server.socket_path().to_owned()
         }
 
-        pub fn drain(&self, store: &mut SessionStore) {
+        /// Applies the events that arrived, and counts them.
+        pub fn drain(&self, store: &mut SessionStore, received: &mut Received, now: Timestamp) {
             for event in self.events.try_iter() {
+                received.events += 1;
+                received.last_at = Some(now);
+                if matches!(event.body, Body::Unknown) {
+                    received.unknown += 1;
+                } else {
+                    received.sessions.insert(event.session_id.clone(), now);
+                }
                 apply_event(store, &event);
             }
+            received.rejected = self.server.rejected();
         }
     }
 }
