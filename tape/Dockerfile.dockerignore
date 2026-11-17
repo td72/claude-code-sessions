@@ -1,0 +1,5 @@
+# The build sees the sources and nothing else.
+*
+!Cargo.toml
+!Cargo.lock
+!crates

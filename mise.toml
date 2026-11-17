@@ -1,0 +1,13 @@
+[tools]
+prek = "latest"
+
+# The demo GIFs are recorded in a container (tape/record.sh), never on this
+# machine directly: it needs Docker, not vhs.
+
+[tasks.demo]
+run = "tape/record.sh demo"
+description = "Record the demo GIF (in a container, from synthetic sessions)"
+
+[tasks."demo:all"]
+depends = ["demo"]
+description = "Record all demo GIFs"

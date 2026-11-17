@@ -49,6 +49,7 @@ crates/iktinos-live/   event protocol, Unix-socket server, merge (unix only)
 crates/iktinos-tui/    the `iktinos` binary
 mods/iktinos-bridge/               the Claude Code mod (TS) that speaks the protocol
 tests/fixtures/<claude code version>/   synthetic transcripts and event samples
+tape/, assets/                     demo tapes (recorded in a container) and their GIFs
 ```
 
 Crates are versioned independently (core stays stable while live follows the
@@ -96,5 +97,16 @@ environment `release`).
 - **GitHub Actions** are locked with `gh actions-lock`
   (`.github/workflows/actions.lock`, verified by `verify-lockfile.yml`). After
   changing any `uses:`, rerun `gh actions-lock` and commit the lockfile with it.
+- **Demo GIFs**: `tape/<name>.tape` is recorded to `assets/<name>.gif` with
+  `mise run demo:<name>` (`demo:all` for every one), which runs VHS in a
+  container (`tape/record.sh`): only `tape/` and `assets/` are mounted, there
+  is no network, and the sessions shown are the invented ones
+  `tape/demo-fixture.py` writes there. Never run `vhs` on the host — iktinos
+  would show the machine's real sessions — and never start `iktinos` in a
+  tape without `--projects-dir` and `--socket-dir`. A change to the viewer's
+  look or keys updates the tape and its gif in the same pull request.
+  A gif recorded this way holds nothing real and needs no review of its own
+  before it is pushed. One recorded any other way is never pushed: the
+  repository is public, so a push publishes it.
 - **Docs**: the README describes the design; each crate's `lib.rs` carries the
   module map. Keep them in step with the code.
