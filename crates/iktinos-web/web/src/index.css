@@ -531,3 +531,21 @@ header h1 {
 .detail .calls {
   margin-top: 0.3rem;
 }
+
+.usage-button {
+  margin-left: auto;
+  color: var(--label);
+}
+
+.usage-button.open {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.pane > .usage + p {
+  margin: 0.9rem 0 0;
+}
+
+.pane > p + p {
+  margin: 0.2rem 0 0;
+}

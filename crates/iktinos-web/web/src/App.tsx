@@ -7,6 +7,7 @@ import type {
   Node,
   SessionDetail,
   SessionSummary,
+  Totals,
   Trace,
   Usage,
   Whole,
@@ -33,6 +34,10 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("trace");
   const [trace, setTrace] = useState<Trace | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  // What every session together has used, while that is what is shown
+  // beside the list instead of one session.
+  const [usage, setUsage] = useState<Totals | null>(null);
+  const showsUsage = useRef(false);
   const [problem, setProblem] = useState<"unauthorized" | "unreachable" | null>(null);
   const [now, setNow] = useState(() => Date.now());
   // What was last asked for: an answer for another session or another tab
@@ -74,9 +79,27 @@ export default function App() {
     [failed],
   );
 
+  const loadUsage = useCallback(async () => {
+    try {
+      const loaded = await api.usage();
+      if (showsUsage.current) setUsage(loaded);
+    } catch (error) {
+      failed(error);
+    }
+  }, [failed]);
+
+  /** Shows the usage of every session, or goes back to the one chosen. */
+  const toggleUsage = useCallback(() => {
+    showsUsage.current = !showsUsage.current;
+    if (showsUsage.current) void loadUsage();
+    else setUsage(null);
+  }, [loadUsage]);
+
   /** Shows a session: its row is marked, and the open tab is read for it. */
   const select = useCallback(
     (id: string) => {
+      showsUsage.current = false;
+      setUsage(null);
       setSelected(id);
       void load(id, wanted.current.tab);
     },
@@ -101,10 +124,11 @@ export default function App() {
       const first = listed.sessions[0]?.id;
       if (wanted.current.id === null && first !== undefined) select(first);
       else void load(wanted.current.id, wanted.current.tab);
+      if (showsUsage.current) void loadUsage();
     } catch (error) {
       failed(error);
     }
-  }, [failed, select, load]);
+  }, [failed, select, load, loadUsage]);
 
   // The server says when something changed, and says so once when the
   // stream opens: what is shown is read then, and again each time.
@@ -152,27 +176,39 @@ export default function App() {
         {counts.waiting > 0 && <span className="waiting">{counts.waiting} waiting</span>}
         {problem === "unreachable" && <span className="error">the server does not answer</span>}
         {notice && <span className="error">{notice}</span>}
+        <button
+          type="button"
+          className={usage ? "usage-button open" : "usage-button"}
+          aria-pressed={usage !== null}
+          onClick={toggleUsage}
+        >
+          Usage
+        </button>
       </header>
       <SessionList sessions={sessions} selected={selected} onSelect={select} now={now} />
-      <Pane
-        session={sessions.find((session) => session.id === selected) ?? null}
-        empty={sessions.length === 0 ? "no sessions" : "choose a session"}
-        tab={tab}
-        onTab={open}
-      >
-        {tab === "trace" && trace && trace.session.id === selected && (
-          <TraceView key={trace.session.id} trace={trace} now={now} />
-        )}
-        {tab === "session" && detail && detail.id === selected && (
-          <SessionView detail={detail} now={now} />
-        )}
-        {tab === "tools" && detail && detail.id === selected && (
-          <ToolsView key={detail.id} detail={detail} now={now} />
-        )}
-        {tab === "subagents" && detail && detail.id === selected && (
-          <SubagentsView key={detail.id} detail={detail} now={now} />
-        )}
-      </Pane>
+      {usage ? (
+        <UsageView usage={usage} />
+      ) : (
+        <Pane
+          session={sessions.find((session) => session.id === selected) ?? null}
+          empty={sessions.length === 0 ? "no sessions" : "choose a session"}
+          tab={tab}
+          onTab={open}
+        >
+          {tab === "trace" && trace && trace.session.id === selected && (
+            <TraceView key={trace.session.id} trace={trace} now={now} />
+          )}
+          {tab === "session" && detail && detail.id === selected && (
+            <SessionView detail={detail} now={now} />
+          )}
+          {tab === "tools" && detail && detail.id === selected && (
+            <ToolsView key={detail.id} detail={detail} now={now} />
+          )}
+          {tab === "subagents" && detail && detail.id === selected && (
+            <SubagentsView key={detail.id} detail={detail} now={now} />
+          )}
+        </Pane>
+      )}
     </div>
   );
 }
@@ -211,6 +247,59 @@ function Pane(props: {
         ))}
       </div>
       {props.children}
+    </section>
+  );
+}
+
+/** What every session together has used: by model, by source, by repository. */
+function UsageView({ usage }: { usage: Totals }) {
+  return (
+    <section className="pane">
+      <div className="heading">
+        <span className="label">Usage</span>
+        <span className="dim">{format.count(usage.sessions, "session")}</span>
+        <span>{format.usd(usage.usd)}</span>
+      </div>
+      <UsageTable title="by model" rows={usage.by_model} />
+      <UsageTable title="by source" rows={usage.by_source} />
+      <table className="usage">
+        <thead>
+          <tr>
+            <th>by repository</th>
+            <th className="number">sessions</th>
+            <th className="number">tokens</th>
+            <th className="number">cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {usage.by_repository.map((repository) => (
+            <tr key={repository.name}>
+              <td className="cwd">{repository.name}</td>
+              <td className="number">{repository.sessions}</td>
+              <td className="number">{format.tokens(repository.tokens)}</td>
+              <td className="number">{format.usd(repository.usd)}</td>
+            </tr>
+          ))}
+          <tr className="total">
+            <td>total</td>
+            <td className="number">{usage.sessions}</td>
+            <td className="number">
+              {format.tokens(usage.by_repository.reduce((sum, r) => sum + r.tokens, 0))}
+            </td>
+            <td className="number">{format.usd(usage.usd)}</td>
+          </tr>
+        </tbody>
+      </table>
+      {usage.unknown_cost > 0 && (
+        <p className="dim">
+          {format.count(usage.unknown_cost, "session")} without a known cost{" "}
+          {usage.unknown_cost === 1 ? "is" : "are"} not in the total
+        </p>
+      )}
+      <p className="dim">
+        Session costs are Claude Code's own where it reported them, estimates otherwise. Costs by
+        model and by source are estimates.
+      </p>
     </section>
   );
 }

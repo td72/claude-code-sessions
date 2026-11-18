@@ -5,6 +5,7 @@
 //! line of a prompt, a command, the start of an output) and nothing of a raw
 //! record. Times are milliseconds since the Unix epoch.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use iktinos_core::output::{WholeOutput, WholeResponse};
@@ -268,6 +269,96 @@ fn usage(name: &str, usage: &ModelUsage) -> Usage {
         cache_write_tokens: usage.cache_write_5m_tokens + usage.cache_write_1h_tokens,
         cache_read_tokens: usage.cache_read_tokens,
         estimated_usd: usage.estimated_cost(),
+    }
+}
+
+/// One repository's share: the sessions that run in it.
+#[derive(Debug, Serialize)]
+pub struct Repository {
+    pub name: String,
+    pub sessions: u64,
+    pub tokens: u64,
+    /// The sum of its sessions' own costs, those that are known.
+    pub usd: f64,
+}
+
+/// What every session together has used.
+#[derive(Debug, Serialize)]
+pub struct Totals {
+    pub sessions: u64,
+    /// The most tokens first.
+    pub by_model: Vec<Usage>,
+    pub by_source: Vec<Usage>,
+    /// The most expensive first.
+    pub by_repository: Vec<Repository>,
+    /// The sum of the sessions' own costs: Claude Code's where it reported
+    /// one, an estimate otherwise.
+    pub usd: f64,
+    /// Sessions whose cost is not known, and so is not in `usd`.
+    pub unknown_cost: u64,
+}
+
+fn add(total: &mut ModelUsage, usage: &ModelUsage) {
+    total.responses += usage.responses;
+    total.input_tokens += usage.input_tokens;
+    total.output_tokens += usage.output_tokens;
+    total.cache_write_5m_tokens += usage.cache_write_5m_tokens;
+    total.cache_write_1h_tokens += usage.cache_write_1h_tokens;
+    total.cache_read_tokens += usage.cache_read_tokens;
+    total.estimated_usd += usage.estimated_usd;
+    total.unpriced_responses += usage.unpriced_responses;
+}
+
+/// Totals `sessions` by model, by source and by repository.
+pub fn totals<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> Totals {
+    let mut by_model: BTreeMap<&str, ModelUsage> = BTreeMap::new();
+    let mut by_source: BTreeMap<&str, ModelUsage> = BTreeMap::new();
+    let mut by_repository: BTreeMap<String, Repository> = BTreeMap::new();
+    let (mut count, mut usd, mut unknown_cost) = (0, 0.0, 0);
+    for session in sessions {
+        count += 1;
+        for (model, usage) in &session.usage.by_model {
+            add(by_model.entry(model).or_default(), usage);
+        }
+        for (source, usage) in &session.usage.by_query_source {
+            add(by_source.entry(source).or_default(), usage);
+        }
+        let name = session.location_name().unwrap_or_else(|| "—".to_owned());
+        let repository = by_repository
+            .entry(name.clone())
+            .or_insert_with(|| Repository {
+                name,
+                sessions: 0,
+                tokens: 0,
+                usd: 0.0,
+            });
+        repository.sessions += 1;
+        repository.tokens += session.usage.total().total_tokens();
+        match session.cost.usd {
+            Some(cost) => {
+                repository.usd += cost;
+                usd += cost;
+            }
+            None => unknown_cost += 1,
+        }
+    }
+    let rows = |totals: BTreeMap<&str, ModelUsage>| {
+        let mut rows: Vec<_> = totals.into_iter().collect();
+        // The most tokens first; the map's order (by name) breaks ties.
+        rows.sort_by_key(|(_, total)| std::cmp::Reverse(total.total_tokens()));
+        rows.iter()
+            .map(|(name, total)| usage(name, total))
+            .collect()
+    };
+    let mut by_repository: Vec<Repository> = by_repository.into_values().collect();
+    by_repository.sort_by(|a, b| b.usd.total_cmp(&a.usd));
+    Totals {
+        sessions: count,
+        by_model: rows(by_model),
+        by_source: rows(by_source),
+        by_repository,
+        usd,
+        unknown_cost,
     }
 }
 

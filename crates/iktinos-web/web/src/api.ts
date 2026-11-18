@@ -150,6 +150,18 @@ const part = (id: string) => encodeURIComponent(id);
 export const sessions = () =>
   get<{ sessions: SessionSummary[]; notice: string | null }>("/api/sessions");
 
+/** What every session has used, together. */
+export type Totals = {
+  sessions: number;
+  by_model: Usage[];
+  by_source: Usage[];
+  by_repository: { name: string; sessions: number; tokens: number; usd: number }[];
+  usd: number;
+  unknown_cost: number;
+};
+
+export const usage = () => get<Totals>("/api/usage");
+
 export const detail = (session: string) => get<SessionDetail>(`/api/sessions/${part(session)}`);
 
 export const trace = (session: string) => get<Trace>(`/api/sessions/${part(session)}/trace`);

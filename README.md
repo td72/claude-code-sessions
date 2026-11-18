@@ -215,10 +215,11 @@ session is and has used: its context, its tokens and cost by model and by
 source, its rate limits) and **Tool calls** (its latest 200, the latest
 first, subagents' included, and the one chosen in full) and **Subagents**
 (each with its type, task, model, tokens and cost, and the calls of the one
-chosen). The usage is to come.
+chosen). **Usage** in the bar at the top shows, in place of that pane, what
+the sessions together have used: by model, by source and by repository.
 
 The page is drawn from JSON the server returns (`/api/sessions`,
-`/api/sessions/<id>`, `/api/sessions/<id>/trace`, a call's whole output, a
+`/api/sessions/<id>`, `/api/sessions/<id>/trace`, `/api/usage`, a call's whole output, a
 response's whole text) and reads it again when the server says something
 changed (server-sent events, `/api/events`).
 
