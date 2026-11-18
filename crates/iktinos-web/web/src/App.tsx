@@ -1,48 +1,91 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import * as api from "./api.ts";
-import type { Interaction, Node, SessionSummary, Trace, Whole } from "./api.ts";
+import type {
+  Interaction,
+  Node,
+  SessionDetail,
+  SessionSummary,
+  Trace,
+  Usage,
+  Whole,
+} from "./api.ts";
 import * as format from "./format.ts";
 
 /** How often the times on the page ("12s") are written again. */
 const TICK_MS = 5000;
 
+/** What the pane beside the list shows of the session that is chosen. */
+type Tab = "trace" | "session";
+
+const TABS: { tab: Tab; title: string }[] = [
+  { tab: "trace", title: "Trace" },
+  { tab: "session", title: "Session" },
+];
+
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("trace");
   const [trace, setTrace] = useState<Trace | null>(null);
+  const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [problem, setProblem] = useState<"unauthorized" | "unreachable" | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  // The session the trace was last asked for: an answer for another is dropped.
-  const wanted = useRef<string | null>(null);
+  // What was last asked for: an answer for another session or another tab
+  // is dropped.
+  const wanted = useRef<{ id: string | null; tab: Tab }>({ id: null, tab: "trace" });
 
   const failed = useCallback((error: unknown) => {
     if (error instanceof api.Unauthorized) setProblem("unauthorized");
     else if (!(error instanceof api.NotFound)) setProblem("unreachable");
   }, []);
 
-  const loadTrace = useCallback(
-    async (id: string | null) => {
-      wanted.current = id;
-      if (id === null) return setTrace(null);
+  /** Reads what the pane shows: the tab that is open, of the session chosen. */
+  const load = useCallback(
+    async (id: string | null, tab: Tab) => {
+      wanted.current = { id, tab };
+      const current = () => wanted.current.id === id && wanted.current.tab === tab;
+      if (id === null) {
+        setTrace(null);
+        setDetail(null);
+        return;
+      }
       try {
-        const loaded = await api.trace(id);
-        if (wanted.current === id) setTrace(loaded);
+        if (tab === "trace") {
+          const loaded = await api.trace(id);
+          if (current()) setTrace(loaded);
+        } else {
+          const loaded = await api.detail(id);
+          if (current()) setDetail(loaded);
+        }
       } catch (error) {
-        if (error instanceof api.NotFound && wanted.current === id) setTrace(null);
+        // The session went away.
+        if (error instanceof api.NotFound && current()) {
+          setTrace(null);
+          setDetail(null);
+        }
         failed(error);
       }
     },
     [failed],
   );
 
-  /** Shows a session: its row is marked, and its trace is read. */
+  /** Shows a session: its row is marked, and the open tab is read for it. */
   const select = useCallback(
     (id: string) => {
       setSelected(id);
-      void loadTrace(id);
+      void load(id, wanted.current.tab);
     },
-    [loadTrace],
+    [load],
+  );
+
+  const open = useCallback(
+    (tab: Tab) => {
+      setTab(tab);
+      void load(wanted.current.id, tab);
+    },
+    [load],
   );
 
   const loadSessions = useCallback(async () => {
@@ -53,12 +96,12 @@ export default function App() {
       setProblem(null);
       // Until one is chosen, the latest session is the one shown.
       const first = listed.sessions[0]?.id;
-      if (wanted.current === null && first !== undefined) select(first);
-      else void loadTrace(wanted.current);
+      if (wanted.current.id === null && first !== undefined) select(first);
+      else void load(wanted.current.id, wanted.current.tab);
     } catch (error) {
       failed(error);
     }
-  }, [failed, select, loadTrace]);
+  }, [failed, select, load]);
 
   // The server says when something changed, and says so once when the
   // stream opens: what is shown is read then, and again each time.
@@ -108,14 +151,213 @@ export default function App() {
         {notice && <span className="error">{notice}</span>}
       </header>
       <SessionList sessions={sessions} selected={selected} onSelect={select} now={now} />
-      {trace ? (
-        <TraceView key={trace.session.id} trace={trace} now={now} />
-      ) : (
-        <section className="trace empty">
-          {sessions.length === 0 ? "no sessions" : "choose a session"}
-        </section>
+      <Pane
+        session={sessions.find((session) => session.id === selected) ?? null}
+        empty={sessions.length === 0 ? "no sessions" : "choose a session"}
+        tab={tab}
+        onTab={open}
+      >
+        {tab === "trace" && trace && trace.session.id === selected && (
+          <TraceView key={trace.session.id} trace={trace} now={now} />
+        )}
+        {tab === "session" && detail && detail.id === selected && (
+          <SessionView detail={detail} now={now} />
+        )}
+      </Pane>
+    </div>
+  );
+}
+
+/** The pane beside the list: the session that is chosen, under its tabs. */
+function Pane(props: {
+  session: SessionSummary | null;
+  empty: string;
+  tab: Tab;
+  onTab: (tab: Tab) => void;
+  children: ReactNode;
+}) {
+  const session = props.session;
+  if (session === null) return <section className="pane empty">{props.empty}</section>;
+  return (
+    <section className="pane">
+      <div className="heading">
+        <span className="cwd">{session.location ?? "—"}</span>
+        <span className="label">{session.label}</span>
+        {session.branch && <span className="dim">{session.branch}</span>}
+        <span className={session.status.kind}>{session.status.text}</span>
+        <span className="dim">{format.modelName(session.model)}</span>
+      </div>
+      <div className="tabs" role="tablist">
+        {TABS.map(({ tab, title }) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={tab === props.tab}
+            className={tab === props.tab ? "open" : undefined}
+            onClick={() => props.onTab(tab)}
+          >
+            {title}
+          </button>
+        ))}
+      </div>
+      {props.children}
+    </section>
+  );
+}
+
+/** What a session is and what it has used. */
+function SessionView({ detail, now }: { detail: SessionDetail; now: number }) {
+  const context = detail.context;
+  return (
+    <div className="session">
+      <div className="field">
+        <span className="name">state</span>
+        <span className={detail.status.kind}>{detail.status.text}</span>
+      </div>
+      {detail.running && <Field name="" value={detail.running} />}
+      <div className="field">
+        <span className="name">context</span>
+        {context === null ? (
+          <span className="dim">—</span>
+        ) : context.fill === null ? (
+          <span>{format.tokens(context.tokens)} of an unknown window</span>
+        ) : (
+          <>
+            <span>
+              {format.tokens(context.tokens)} of {format.tokens(context.window ?? 0)} (
+              {Math.round(context.fill * 100)}%)
+            </span>
+            <span className="meter">
+              <span
+                className={`fill ${context.fill >= 0.9 ? "error" : context.fill >= 0.7 ? "warn" : "ok"}`}
+                style={{ width: `${Math.min(1, context.fill) * 100}%` }}
+              />
+            </span>
+          </>
+        )}
+      </div>
+      <Field name="cwd" value={detail.location ?? "—"} />
+      <Field name="branch" value={detail.branch ?? "—"} />
+      <Field name="model" value={detail.model ?? "—"} />
+      <Field
+        name="activity"
+        value={[
+          format.count(detail.interactions, "interaction"),
+          format.count(detail.tool_calls, "tool call"),
+          format.count(detail.subagents, "subagent"),
+        ].join(", ")}
+      />
+      <Field
+        name="started"
+        value={
+          detail.started_at === null
+            ? "—"
+            : `${format.when(now, detail.started_at)} (${format.ago(now, detail.started_at)} ago)`
+        }
+      />
+      <Field name="id" value={detail.id} />
+      <div className="field">
+        <span className="name">cost</span>
+        <span>{format.cost(detail.cost)}</span>
+        <span className="dim">{costNote(detail.cost.source)}</span>
+      </div>
+      <UsageTable title="by model" rows={detail.by_model} />
+      <UsageTable title="by source" rows={detail.by_source} />
+      {detail.rate_limits.length > 0 && (
+        <table className="usage">
+          <thead>
+            <tr>
+              <th>rate limits</th>
+              <th className="number">used</th>
+              <th>resets</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.rate_limits.map((limit) => (
+              <tr key={limit.kind}>
+                <td>{limit.kind}</td>
+                <td
+                  className={`number ${limit.percent_used >= 90 ? "error" : limit.percent_used >= 70 ? "warn" : ""}`}
+                >
+                  {Math.round(limit.percent_used)}%
+                </td>
+                <td className="dim">
+                  {limit.resets_at ? format.when(now, Date.parse(limit.resets_at)) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
+  );
+}
+
+/** Where the session's cost came from, in words. */
+function costNote(source: string): string {
+  switch (source) {
+    case "reported":
+      return "reported by Claude Code";
+    case "reported_plus_estimate":
+      return "reported, plus an estimate since";
+    case "estimated":
+      return "estimated from the price table";
+    default:
+      return "";
+  }
+}
+
+function UsageTable({ title, rows }: { title: string; rows: Usage[] }) {
+  if (rows.length === 0) return null;
+  const sum = (pick: (row: Usage) => number) => rows.reduce((total, row) => total + pick(row), 0);
+  const priced = rows.filter((row) => row.estimated_usd !== null);
+  const line = (
+    key: string,
+    name: string,
+    cells: [number, number, number, number | null, number],
+  ) => (
+    <tr key={key} className={key === "total" ? "total" : undefined}>
+      <td>{name}</td>
+      <td className="number">{format.tokens(cells[0])}</td>
+      <td className="number">{format.tokens(cells[1])}</td>
+      <td className="number">{format.tokens(cells[2])}</td>
+      <td className="number">{cells[3] === null ? "—" : `~${format.usd(cells[3])}`}</td>
+      <td className="number">{cells[4]}</td>
+    </tr>
+  );
+  return (
+    <table className="usage">
+      <thead>
+        <tr>
+          <th>{title}</th>
+          <th className="number">in</th>
+          <th className="number">out</th>
+          <th className="number">cache</th>
+          <th className="number">cost</th>
+          <th className="number">calls</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) =>
+          line(row.name, row.name, [
+            row.input_tokens,
+            row.output_tokens,
+            row.cache_read_tokens + row.cache_write_tokens,
+            row.estimated_usd,
+            row.responses,
+          ]),
+        )}
+        {rows.length > 1 &&
+          line("total", "total", [
+            sum((row) => row.input_tokens),
+            sum((row) => row.output_tokens),
+            sum((row) => row.cache_read_tokens + row.cache_write_tokens),
+            priced.length === 0 ? null : sum((row) => row.estimated_usd ?? 0),
+            sum((row) => row.responses),
+          ])}
+      </tbody>
+    </table>
   );
 }
 
@@ -193,14 +435,7 @@ function TraceView({ trace, now }: { trace: Trace; now: number }) {
   const openKey = open ?? (first ? interactionKey(first, 0) : null);
 
   return (
-    <section className="trace">
-      <div className="heading">
-        <span className="cwd">{session.location ?? "—"}</span>
-        <span className="label">{session.label}</span>
-        {session.branch && <span className="dim">{session.branch}</span>}
-        <span className={session.status.kind}>{session.status.text}</span>
-        <span className="dim">{format.modelName(session.model)}</span>
-      </div>
+    <div className="trace">
       {trace.interactions.length === 0 && (
         <p className="dim">nothing was read of this session's interactions</p>
       )}
@@ -222,7 +457,7 @@ function TraceView({ trace, now }: { trace: Trace; now: number }) {
           />
         );
       })}
-    </section>
+    </div>
   );
 }
 

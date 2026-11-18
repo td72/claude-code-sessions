@@ -59,3 +59,8 @@ export function toolName(name: string): string {
 export function modelName(model: string | null): string {
   return model ? model.replace(/^claude-/, "") : "";
 }
+
+/** `1 session`, `3 sessions`. */
+export function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}

@@ -20,6 +20,26 @@ export type SessionSummary = {
   subagents: number;
 };
 
+export type Usage = {
+  name: string;
+  responses: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_write_tokens: number;
+  cache_read_tokens: number;
+  estimated_usd: number | null;
+};
+
+/** One session, with what its detail shows. */
+export type SessionDetail = SessionSummary & {
+  /** What the running tool is doing, where live events say. */
+  running: string | null;
+  context: { tokens: number; window: number | null; fill: number | null } | null;
+  by_model: Usage[];
+  by_source: Usage[];
+  rate_limits: { kind: string; percent_used: number; resets_at: string | null }[];
+};
+
 export type Output = {
   text: string;
   stderr: string | null;
@@ -120,6 +140,8 @@ const part = (id: string) => encodeURIComponent(id);
 
 export const sessions = () =>
   get<{ sessions: SessionSummary[]; notice: string | null }>("/api/sessions");
+
+export const detail = (session: string) => get<SessionDetail>(`/api/sessions/${part(session)}`);
 
 export const trace = (session: string) => get<Trace>(`/api/sessions/${part(session)}/trace`);
 
