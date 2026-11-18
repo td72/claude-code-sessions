@@ -213,8 +213,9 @@ shown is also copied to the top of the list, where it stays while the others
 move. The pane beside the list has tabs: **Trace**, **Session** (what the
 session is and has used: its context, its tokens and cost by model and by
 source, its rate limits) and **Tool calls** (its latest 200, the latest
-first, subagents' included, and the one chosen in full). The subagents and
-the usage are to come.
+first, subagents' included, and the one chosen in full) and **Subagents**
+(each with its type, task, model, tokens and cost, and the calls of the one
+chosen). The usage is to come.
 
 The page is drawn from JSON the server returns (`/api/sessions`,
 `/api/sessions/<id>`, `/api/sessions/<id>/trace`, a call's whole output, a

@@ -17,12 +17,13 @@ import * as format from "./format.ts";
 const TICK_MS = 5000;
 
 /** What the pane beside the list shows of the session that is chosen. */
-type Tab = "trace" | "session" | "tools";
+type Tab = "trace" | "session" | "tools" | "subagents";
 
 const TABS: { tab: Tab; title: string }[] = [
   { tab: "trace", title: "Trace" },
   { tab: "session", title: "Session" },
   { tab: "tools", title: "Tool calls" },
+  { tab: "subagents", title: "Subagents" },
 ];
 
 export default function App() {
@@ -168,6 +169,9 @@ export default function App() {
         {tab === "tools" && detail && detail.id === selected && (
           <ToolsView key={detail.id} detail={detail} now={now} />
         )}
+        {tab === "subagents" && detail && detail.id === selected && (
+          <SubagentsView key={detail.id} detail={detail} now={now} />
+        )}
       </Pane>
     </div>
   );
@@ -301,11 +305,7 @@ function SessionView({ detail, now }: { detail: SessionDetail; now: number }) {
 
 /** The session's latest tool calls, the latest first, and the one chosen in full. */
 function ToolsView({ detail, now }: { detail: SessionDetail; now: number }) {
-  const [chosen, setChosen] = useState<string | null>(null);
   const calls = detail.recent_tools;
-  const call = calls.find((call) => call.id === chosen);
-  // Who made a call: the subagent's type, where one did.
-  const agents = new Map(detail.subagent_list.map((agent) => [agent.agent_id, agent]));
   if (calls.length === 0) return <p className="dim">no tool calls were read of this session</p>;
   return (
     <div className="tools">
@@ -314,6 +314,20 @@ function ToolsView({ detail, now }: { detail: SessionDetail; now: number }) {
           ? `the latest ${calls.length} of ${format.count(detail.tool_calls, "tool call")}`
           : format.count(calls.length, "tool call")}
       </p>
+      <CallsTable detail={detail} calls={calls} now={now} />
+    </div>
+  );
+}
+
+/** Tool calls as a table, and the one chosen in full below it. */
+function CallsTable(props: { detail: SessionDetail; calls: Call[]; now: number }) {
+  const { detail, calls, now } = props;
+  const [chosen, setChosen] = useState<string | null>(null);
+  const call = calls.find((call) => call.id === chosen);
+  // Who made a call: the subagent's type, where one did.
+  const agents = new Map(detail.subagent_list.map((agent) => [agent.agent_id, agent]));
+  return (
+    <>
       <table className="calls">
         <thead>
           <tr>
@@ -351,6 +365,87 @@ function ToolsView({ detail, now }: { detail: SessionDetail; now: number }) {
         </tbody>
       </table>
       {call && <CallDetail key={call.id} session={detail.id} call={call} />}
+    </>
+  );
+}
+
+/** The session's subagents, the latest first, and the one chosen with its calls. */
+function SubagentsView({ detail, now }: { detail: SessionDetail; now: number }) {
+  const [chosen, setChosen] = useState<string | null>(null);
+  const agents = [...detail.subagent_list].sort(
+    (a, b) => (b.started_at ?? 0) - (a.started_at ?? 0) || a.agent_id.localeCompare(b.agent_id),
+  );
+  const agent = agents.find((agent) => agent.agent_id === chosen);
+  // One that has not said it finished runs only while its session works.
+  const working = detail.status.kind === "busy";
+  if (agents.length === 0) return <p className="dim">this session has started no subagents</p>;
+  const calls = agent ? detail.recent_tools.filter((call) => call.agent_id === agent.agent_id) : [];
+  return (
+    <div className="tools">
+      <p className="dim">{format.count(agents.length, "subagent")}</p>
+      <table className="calls agents">
+        <thead>
+          <tr>
+            <th>started</th>
+            <th>type</th>
+            <th>task</th>
+            <th>model</th>
+            <th className="number">tokens</th>
+            <th className="number">cost</th>
+            <th className="number">calls</th>
+            <th>state</th>
+          </tr>
+        </thead>
+        <tbody>
+          {agents.map((agent) => (
+            <tr
+              key={agent.agent_id}
+              className={agent.agent_id === chosen ? "chosen" : undefined}
+              onClick={() => setChosen(agent.agent_id === chosen ? null : agent.agent_id)}
+            >
+              <td className="dim">{format.when(now, agent.started_at)}</td>
+              <td className="subagent">{agent.agent_type ?? "agent"}</td>
+              <td className="what">{agent.description ?? ""}</td>
+              <td className="dim">{format.modelName(agent.model)}</td>
+              <td className="number">{format.tokens(agent.tokens)}</td>
+              <td className="number">
+                {agent.estimated_usd === null ? "—" : `~${format.usd(agent.estimated_usd)}`}
+              </td>
+              <td className="number">{agent.tool_calls}</td>
+              <td className={agent.finished ? "ok" : working ? "warn" : "dim"}>
+                {agent.finished ? "done" : working ? "running" : "no end"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {agent && (
+        <aside className="detail" key={agent.agent_id}>
+          <h2 className="subagent">{agent.agent_type ?? "agent"}</h2>
+          {agent.description && <p>{agent.description}</p>}
+          <Field name="id" value={agent.agent_id} />
+          <Field
+            name="last seen"
+            value={
+              agent.last_activity === null
+                ? "—"
+                : `${format.when(now, agent.last_activity)} (${format.ago(now, agent.last_activity)} ago)`
+            }
+          />
+          {calls.length === 0 ? (
+            <p className="dim">none of its tool calls are among the session's latest</p>
+          ) : (
+            <>
+              <p className="dim">
+                {calls.length < agent.tool_calls
+                  ? `the latest ${calls.length} of its ${format.count(agent.tool_calls, "tool call")}`
+                  : `its ${format.count(calls.length, "tool call")}`}
+              </p>
+              <CallsTable detail={detail} calls={calls} now={now} />
+            </>
+          )}
+        </aside>
+      )}
     </div>
   );
 }
