@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as api from "./api.ts";
 import type {
+  Call,
   Interaction,
   Node,
   SessionDetail,
@@ -16,11 +17,12 @@ import * as format from "./format.ts";
 const TICK_MS = 5000;
 
 /** What the pane beside the list shows of the session that is chosen. */
-type Tab = "trace" | "session";
+type Tab = "trace" | "session" | "tools";
 
 const TABS: { tab: Tab; title: string }[] = [
   { tab: "trace", title: "Trace" },
   { tab: "session", title: "Session" },
+  { tab: "tools", title: "Tool calls" },
 ];
 
 export default function App() {
@@ -163,6 +165,9 @@ export default function App() {
         {tab === "session" && detail && detail.id === selected && (
           <SessionView detail={detail} now={now} />
         )}
+        {tab === "tools" && detail && detail.id === selected && (
+          <ToolsView key={detail.id} detail={detail} now={now} />
+        )}
       </Pane>
     </div>
   );
@@ -290,6 +295,62 @@ function SessionView({ detail, now }: { detail: SessionDetail; now: number }) {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+/** The session's latest tool calls, the latest first, and the one chosen in full. */
+function ToolsView({ detail, now }: { detail: SessionDetail; now: number }) {
+  const [chosen, setChosen] = useState<string | null>(null);
+  const calls = detail.recent_tools;
+  const call = calls.find((call) => call.id === chosen);
+  // Who made a call: the subagent's type, where one did.
+  const agents = new Map(detail.subagent_list.map((agent) => [agent.agent_id, agent]));
+  if (calls.length === 0) return <p className="dim">no tool calls were read of this session</p>;
+  return (
+    <div className="tools">
+      <p className="dim">
+        {calls.length < detail.tool_calls
+          ? `the latest ${calls.length} of ${format.count(detail.tool_calls, "tool call")}`
+          : format.count(calls.length, "tool call")}
+      </p>
+      <table className="calls">
+        <thead>
+          <tr>
+            <th>when</th>
+            <th>tool</th>
+            <th>what</th>
+            <th>by</th>
+            <th className="number">took</th>
+            <th>result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {calls.map((call) => {
+            const { text, className } = callState(call, detail.status.kind === "busy");
+            const agent = call.agent_id === null ? undefined : agents.get(call.agent_id);
+            return (
+              <tr
+                key={call.id}
+                className={call.id === chosen ? "chosen" : undefined}
+                onClick={() => setChosen(call.id === chosen ? null : call.id)}
+              >
+                <td className="dim">{format.when(now, call.started_at)}</td>
+                <td className="tool">{format.toolName(call.name)}</td>
+                <td className="what">{call.summary ?? ""}</td>
+                <td className={call.agent_id === null ? "dim" : "subagent"}>
+                  {call.agent_id === null ? "" : `↳ ${agent?.agent_type ?? "agent"}`}
+                </td>
+                <td className={`number ${slow(call.duration_ms)}`}>
+                  {format.duration(call.duration_ms)}
+                </td>
+                <td className={className}>{text}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {call && <CallDetail key={call.id} session={detail.id} call={call} />}
     </div>
   );
 }
@@ -567,14 +628,17 @@ function label(node: Node, nodes: Node[]): { name: string; beside: string } {
   }
 }
 
+/** How a call ended, or that it has not: it runs only while its session works. */
+function callState(call: Call, running: boolean): { text: string; className: string } {
+  if (call.success === true) return { text: "ok", className: "ok" };
+  if (call.success === false) return { text: "failed", className: "error" };
+  return running ? { text: "running", className: "warn" } : { text: "no result", className: "dim" };
+}
+
 function state(node: Node, running: boolean): { text: string; className: string } {
   switch (node.kind) {
     case "tool":
-      if (node.success === true) return { text: "ok", className: "ok" };
-      if (node.success === false) return { text: "failed", className: "error" };
-      return running
-        ? { text: "running", className: "warn" }
-        : { text: "no result", className: "dim" };
+      return callState(node, running);
     case "subagent":
       return node.finished
         ? { text: "done", className: "ok" }
@@ -647,18 +711,7 @@ function slow(ms: number | null): string {
 function Detail({ session, node, nodes }: { session: string; node: Node; nodes: Node[] }) {
   switch (node.kind) {
     case "tool":
-      return (
-        <aside className="detail">
-          <h2 className="tool">{format.toolName(node.name)}</h2>
-          <Field name="took" value={format.duration(node.duration_ms)} />
-          {node.agent_id && <Field name="agent" value={node.agent_id} />}
-          <Field name="id" value={node.id} />
-          {(node.input ?? node.summary) && (
-            <pre className="command">{node.input ?? node.summary}</pre>
-          )}
-          <OutputView session={session} call={node} />
-        </aside>
-      );
+      return <CallDetail session={session} call={node} />;
     case "subagent":
       return (
         <aside className="detail">
@@ -716,6 +769,20 @@ function Detail({ session, node, nodes }: { session: string; node: Node; nodes: 
   }
 }
 
+/** One tool call in full: what it was given and what it returned. */
+function CallDetail({ session, call }: { session: string; call: Call }) {
+  return (
+    <aside className="detail">
+      <h2 className="tool">{format.toolName(call.name)}</h2>
+      <Field name="took" value={format.duration(call.duration_ms)} />
+      {call.agent_id && <Field name="agent" value={call.agent_id} />}
+      <Field name="id" value={call.id} />
+      {(call.input ?? call.summary) && <pre className="command">{call.input ?? call.summary}</pre>}
+      <OutputView session={session} call={call} />
+    </aside>
+  );
+}
+
 function Field({ name, value, warn }: { name: string; value: string; warn?: boolean }) {
   return (
     <div className="field">
@@ -745,7 +812,7 @@ function useWhole(read: () => Promise<Whole>) {
   return [value, toggle] as const;
 }
 
-function OutputView({ session, call }: { session: string; call: Node & { kind: "tool" } }) {
+function OutputView({ session, call }: { session: string; call: Call }) {
   const [read, toggle] = useWhole(() => api.wholeOutput(session, call.id));
   const excerpt = call.output;
   if (call.success === null) return <p className="dim">no result yet</p>;

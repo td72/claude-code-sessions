@@ -38,6 +38,9 @@ export type SessionDetail = SessionSummary & {
   by_model: Usage[];
   by_source: Usage[];
   rate_limits: { kind: string; percent_used: number; resets_at: string | null }[];
+  /** The latest tool calls, the latest first; subagents' included. */
+  recent_tools: Call[];
+  subagent_list: SubagentSummary[];
 };
 
 export type Output = {
@@ -48,6 +51,32 @@ export type Output = {
   lines: number;
   interrupted: boolean;
   other_blocks: number;
+};
+
+/** One tool call. */
+export type Call = {
+  id: string;
+  name: string;
+  summary: string | null;
+  input: string | null;
+  agent_id: string | null;
+  started_at: number | null;
+  duration_ms: number | null;
+  success: boolean | null;
+  output: Output | null;
+};
+
+export type SubagentSummary = {
+  agent_id: string;
+  agent_type: string | null;
+  description: string | null;
+  model: string | null;
+  finished: boolean | null;
+  started_at: number | null;
+  last_activity: number | null;
+  tokens: number;
+  estimated_usd: number | null;
+  tool_calls: number;
 };
 
 type Timed = {
@@ -74,29 +103,9 @@ export type RequestNode = Timed & {
   usd: number | null;
 };
 
-export type ToolNode = Timed & {
-  kind: "tool";
-  id: string;
-  name: string;
-  summary: string | null;
-  input: string | null;
-  agent_id: string | null;
-  success: boolean | null;
-  output: Output | null;
-};
+export type ToolNode = Timed & Call & { kind: "tool" };
 
-export type SubagentNode = Timed & {
-  kind: "subagent";
-  agent_id: string;
-  agent_type: string | null;
-  description: string | null;
-  model: string | null;
-  finished: boolean | null;
-  last_activity: number | null;
-  tokens: number;
-  estimated_usd: number | null;
-  tool_calls: number;
-};
+export type SubagentNode = Timed & SubagentSummary & { kind: "subagent" };
 
 export type Node = RequestNode | ToolNode | SubagentNode;
 

@@ -68,6 +68,10 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 /// excerpt.
 const OUTPUT_CHARS: usize = 2000;
 
+/// How many of its latest tool calls each session keeps, as in the terminal
+/// viewer.
+const RECENT_TOOLS: usize = 200;
+
 // `ASSETS`: the page, embedded by the build script. What `web/` built if
 // it was built, else the placeholder under `assets/`.
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
@@ -194,7 +198,9 @@ impl Server {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port))?;
         let addr = listener.local_addr()?;
         let mut world = World {
-            store: SessionStore::new().with_tool_output(OUTPUT_CHARS),
+            store: SessionStore::new()
+                .with_recent_tools(RECENT_TOOLS)
+                .with_tool_output(OUTPUT_CHARS),
             follower: Follower::new(&config.projects_dir),
             place: config.within.as_deref().map(Place::new),
             notice: None,
