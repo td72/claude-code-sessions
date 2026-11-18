@@ -735,9 +735,11 @@ function state(node: Node, running: boolean): { text: string; className: string 
     case "tool":
       return callState(node, running);
     case "subagent":
-      return node.finished
-        ? { text: "done", className: "ok" }
-        : { text: "running", className: "warn" };
+      // One that has not said it finished runs only while its interaction does.
+      if (node.finished) return { text: "done", className: "ok" };
+      return running
+        ? { text: "running", className: "warn" }
+        : { text: "no end", className: "dim" };
     case "llm_request": {
       const stop = node.stop_reason ?? "";
       const className =
