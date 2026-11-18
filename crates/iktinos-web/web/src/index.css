@@ -440,3 +440,69 @@ header h1 {
 .usage tr.total td {
   border-top: 1px solid var(--line);
 }
+
+.tools > p {
+  margin: 0 0 0.5rem;
+}
+
+.calls {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.calls th {
+  color: var(--label);
+  font-weight: 400;
+  text-align: left;
+  padding: 0.1rem 0.75rem 0.1rem 0;
+}
+
+.calls th:nth-child(1) {
+  width: 8rem;
+}
+
+.calls th:nth-child(2) {
+  width: 9rem;
+}
+
+.calls th:nth-child(4) {
+  width: 9rem;
+}
+
+.calls th:nth-child(5) {
+  width: 4.5rem;
+}
+
+.calls th:nth-child(6) {
+  width: 5rem;
+}
+
+.calls th.number {
+  text-align: right;
+}
+
+.calls td {
+  padding: 0.12rem 0.75rem 0.12rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calls tbody tr {
+  cursor: pointer;
+}
+
+.calls tbody tr:hover {
+  background: var(--panel);
+}
+
+.calls tbody tr.chosen {
+  background: var(--chosen);
+}
+
+.tools .detail {
+  margin-top: 0.6rem;
+  padding-left: 0;
+  padding-right: 0;
+}

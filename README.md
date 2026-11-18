@@ -210,10 +210,11 @@ interactions on the right: each a tree with a bar per row on a time axis, and
 the row chosen in full below it (a command and what it returned, a request's
 tokens and what its response said, read whole on demand). The session that is
 shown is also copied to the top of the list, where it stays while the others
-move. The pane beside the list has tabs: **Trace**, and **Session** (what the
+move. The pane beside the list has tabs: **Trace**, **Session** (what the
 session is and has used: its context, its tokens and cost by model and by
-source, its rate limits). The tool calls, the subagents and the usage are to
-come.
+source, its rate limits) and **Tool calls** (its latest 200, the latest
+first, subagents' included, and the one chosen in full). The subagents and
+the usage are to come.
 
 The page is drawn from JSON the server returns (`/api/sessions`,
 `/api/sessions/<id>`, `/api/sessions/<id>/trace`, a call's whole output, a
