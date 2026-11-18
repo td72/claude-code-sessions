@@ -38,3 +38,30 @@ jobs:
 
       - name: cargo build
         run: cargo build --workspace --target ${{ matrix.target }}
+
+  # The page of `iktinos serve` (crates/iktinos-web/web): checked, built, and
+  # the server tested with it embedded. The other jobs build without Node and
+  # so embed the placeholder page.
+  web:
+    runs-on: ubuntu-latest
+    env:
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # Node, as mise.toml says.
+      - uses: jdx/mise-action@v5.2.7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
+
+      - name: Format, lint and type-check the page
+        run: mise run web:check
+
+      - name: Build the page
+        run: mise run web:build
+
+      - name: Test the server with the page embedded
+        run: cargo test -p iktinos-web --all-features
+
+      - name: The package holds the page
+        run: cargo package --list -p iktinos-web --allow-dirty | grep -qx 'web/dist/index.html'

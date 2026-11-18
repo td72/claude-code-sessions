@@ -6,6 +6,10 @@
 # crate to crates.io (Trusted Publishing, no stored token) and then creates
 # the tag and GitHub release `<crate>-v<version>`.
 #
+# `iktinos-web` embeds a page that git does not track (web/dist). It is built
+# in a job of its own, which runs npm and has no right to publish, and handed
+# to the publishing job as an artifact.
+#
 # Publish order when several crates change: core, then live, then tui, then
 # web, then the command (iktinos) — one release pull request each.
 
@@ -20,8 +24,45 @@ permissions:
   contents: read
 
 jobs:
+  # The page of `iktinos serve`, for a release of iktinos-web only.
+  page:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/iktinos-web-')
+    runs-on: ubuntu-latest
+    env:
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+
+      - name: Verify the locked actions
+        run: |
+          gh extension install github/gh-actions-lock --pin v0.4.1
+          gh actions-lock --verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: jdx/mise-action@v5.2.7
+
+      - name: Build the page
+        run: mise run web:build
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: page
+          path: crates/iktinos-web/web/dist
+          if-no-files-found: error
+          retention-days: 1
+
   release:
-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
+    needs: page
+    # `page` is skipped for every crate but iktinos-web.
+    if: >-
+      always()
+      && github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.head.ref, 'release/')
+      && (needs.page.result == 'success' || needs.page.result == 'skipped')
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -72,6 +113,18 @@ jobs:
           fi
           echo "crate=$crate" >> "$GITHUB_OUTPUT"
           echo "tag=$crate-v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the page built for this release
+        if: steps.target.outputs.crate == 'iktinos-web'
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: page
+          path: crates/iktinos-web/web/dist
+
+      # Without it the crate would be published with the placeholder page.
+      - name: The package holds the page
+        if: steps.target.outputs.crate == 'iktinos-web'
+        run: cargo package --list -p iktinos-web | grep -qx 'web/dist/index.html'
 
       - name: Authenticate with crates.io
         id: crates-auth
