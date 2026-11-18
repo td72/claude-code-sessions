@@ -411,7 +411,7 @@ fn what_is_read_again_is_named_by_ids_never_by_a_path() {
             format!("/api/sessions/{INDEXED}/calls/toolu_01/output"),
             404,
         ),
-        ("/api/usage".to_owned(), 404),
+        ("/api/usage/all".to_owned(), 404),
         ("/api".to_owned(), 404),
         ("/assets/../Cargo.toml".to_owned(), 404),
     ] {
@@ -465,6 +465,65 @@ fn a_server_narrowed_to_a_directory_serves_its_sessions_only() {
         let path = format!("/api/sessions/{WITH_SUBAGENTS}{rest}");
         assert_eq!(get(&server, &path).status, 404, "{path}");
     }
+}
+
+#[test]
+fn the_usage_totals_every_session() {
+    let server = server();
+    let usage = get(&server, "/api/usage").json();
+    assert_eq!(usage["sessions"], 3);
+    let listed = get(&server, "/api/sessions").json();
+    let listed = listed["sessions"].as_array().unwrap();
+
+    // By model and by source add up to the same tokens: the sessions'.
+    let tokens = |rows: &Value| -> u64 {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_write_tokens",
+                    "cache_read_tokens",
+                ]
+                .iter()
+                .map(|key| row[*key].as_u64().unwrap())
+                .sum::<u64>()
+            })
+            .sum()
+    };
+    let all: u64 = listed.iter().map(|s| s["tokens"].as_u64().unwrap()).sum();
+    assert!(all > 0);
+    assert_eq!(tokens(&usage["by_model"]), all);
+    assert_eq!(tokens(&usage["by_source"]), all);
+
+    // By repository, the most expensive first, and the sessions' own costs.
+    let repositories = usage["by_repository"].as_array().unwrap();
+    let names: Vec<&str> = repositories
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["other.repo", "example"]);
+    assert_eq!(repositories[1]["sessions"], 2);
+    let costs: f64 = listed
+        .iter()
+        .filter_map(|s| s["cost"]["usd"].as_f64())
+        .sum();
+    assert!((usage["usd"].as_f64().unwrap() - costs).abs() < 1e-9);
+    let unknown = listed.iter().filter(|s| s["cost"]["usd"].is_null()).count();
+    assert_eq!(usage["unknown_cost"], unknown);
+
+    // A server narrowed to a directory still totals every session, as the
+    // terminal viewer does.
+    let narrowed = Server::start(Config {
+        port: 0,
+        live: false,
+        within: Some("/work/example".into()),
+        ..Config::new(fixture_projects())
+    })
+    .unwrap();
+    assert_eq!(get(&narrowed, "/api/usage").json(), usage);
 }
 
 #[test]

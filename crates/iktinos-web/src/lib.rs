@@ -466,6 +466,7 @@ fn route(request: &Request, shared: &Shared) -> Routed {
     match segments[..] {
         ["api", "events"] => Routed::Events,
         ["api", "sessions"] => respond(sessions(shared)),
+        ["api", "usage"] => respond(usage(shared)),
         ["api", "sessions", id] if plain(id) => respond(session(shared, id, View::Detail)),
         ["api", "sessions", id, "trace"] if plain(id) => respond(session(shared, id, View::Trace)),
         ["api", "sessions", id, "calls", call, "output"] if plain(id) && plain(call) => {
@@ -520,6 +521,14 @@ fn sessions(shared: &Shared) -> Response {
             .collect(),
         notice: world.notice.clone(),
     })
+}
+
+/// What the sessions together have used. Every session is in it, even on
+/// a server narrowed to a directory, as in the terminal viewer: the totals
+/// name repositories, never a session.
+fn usage(shared: &Shared) -> Response {
+    let world = shared.world.read().unwrap_or_else(|e| e.into_inner());
+    to_json(&json::totals(world.store.sessions()))
 }
 
 enum View {
