@@ -150,8 +150,59 @@ header h1 {
 }
 
 .sessions {
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border-right: 1px solid var(--line);
+}
+
+.sessions .scroll {
+  flex: 1;
+  overflow: auto;
+}
+
+.controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.sessions .controls {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tools .controls {
+  margin-bottom: 0.5rem;
+}
+
+.controls input,
+.controls select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0.15rem 0.4rem;
+}
+
+.controls input {
+  flex: 1;
+  min-width: 6rem;
+  max-width: 24rem;
+}
+
+.controls select {
+  max-width: 7rem;
+}
+
+.sessions th button {
+  color: var(--dim);
+}
+
+.sessions th button:hover,
+.sessions th button.sorted {
+  color: var(--text);
 }
 
 .sessions table {

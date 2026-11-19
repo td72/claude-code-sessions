@@ -218,6 +218,12 @@ first, subagents' included, and the one chosen in full) and **Subagents**
 chosen). **Usage** in the bar at the top shows, in place of that pane, what
 the sessions together have used: by model, by source and by repository.
 
+Above the list, a box finds sessions by what their rows show (every word
+typed must be there), a choice narrows them to the live or the open ones, and
+the headings of the updated, tokens and cost columns order them. The Tool
+calls tab has a box of its own. The order and the choice are kept in the
+browser; nothing typed is sent to the server.
+
 The page is drawn from JSON the server returns (`/api/sessions`,
 `/api/sessions/<id>`, `/api/sessions/<id>/trace`, `/api/usage`, a call's whole output, a
 response's whole text) and reads it again when the server says something
