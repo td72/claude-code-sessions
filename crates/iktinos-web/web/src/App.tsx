@@ -394,16 +394,36 @@ function SessionView({ detail, now }: { detail: SessionDetail; now: number }) {
 
 /** The session's latest tool calls, the latest first, and the one chosen in full. */
 function ToolsView({ detail, now }: { detail: SessionDetail; now: number }) {
+  const [query, setQuery] = useState("");
   const calls = detail.recent_tools;
   if (calls.length === 0) return <p className="dim">no tool calls were read of this session</p>;
+  const agents = new Map(detail.subagent_list.map((agent) => [agent.agent_id, agent]));
+  const found = calls.filter((call) =>
+    matches(query, [
+      format.toolName(call.name),
+      call.summary,
+      call.agent_id === null ? null : (agents.get(call.agent_id)?.agent_type ?? "agent"),
+      call.success === false ? "failed" : call.success === true ? "ok" : null,
+    ]),
+  );
   return (
     <div className="tools">
-      <p className="dim">
-        {calls.length < detail.tool_calls
-          ? `the latest ${calls.length} of ${format.count(detail.tool_calls, "tool call")}`
-          : format.count(calls.length, "tool call")}
-      </p>
-      <CallsTable detail={detail} calls={calls} now={now} />
+      <div className="controls">
+        <input
+          type="search"
+          placeholder="find a call"
+          aria-label="find a call"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <span className="dim">
+          {found.length < calls.length ? `${found.length} of ` : ""}
+          {calls.length < detail.tool_calls
+            ? `the latest ${calls.length} of ${format.count(detail.tool_calls, "tool call")}`
+            : format.count(calls.length, "tool call")}
+        </span>
+      </div>
+      <CallsTable detail={detail} calls={found} now={now} />
     </div>
   );
 }
@@ -606,15 +626,80 @@ function UsageTable({ title, rows }: { title: string; rows: Usage[] }) {
   );
 }
 
+/** What the list is ordered by: the greatest first. */
+type Sort = "updated" | "tokens" | "cost";
+
+/** Which sessions the list holds, as in the terminal viewer. */
+type Filter = "all" | "live" | "open";
+
+const FILTERS: { filter: Filter; title: string }[] = [
+  { filter: "all", title: "all" },
+  { filter: "live", title: "live: working, or wanting attention" },
+  { filter: "open", title: "open: not exited" },
+];
+
+/** A choice kept in this browser. It is a convenience: without storage the default is used. */
+function useKept<T extends string>(name: string, among: readonly T[], initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const kept = localStorage.getItem(name);
+      return among.includes(kept as T) ? (kept as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  const keep = (next: T) => {
+    setValue(next);
+    try {
+      localStorage.setItem(name, next);
+    } catch {
+      // Not kept, then.
+    }
+  };
+  return [value, keep] as const;
+}
+
+/** Whether every word typed is somewhere in what a row shows. */
+function matches(query: string, shown: (string | null | undefined)[]): boolean {
+  const text = shown.join("\n").toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .every((word) => text.includes(word));
+}
+
 function SessionList(props: {
   sessions: SessionSummary[];
   selected: string | null;
   onSelect: (id: string) => void;
   now: number;
 }) {
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useKept<Sort>("sort", ["updated", "tokens", "cost"], "updated");
+  const [filter, setFilter] = useKept<Filter>("filter", ["all", "live", "open"], "all");
+  const listed = useMemo(() => {
+    const kept = props.sessions.filter((session) => {
+      const kind = session.status.kind;
+      if (filter === "live" && kind !== "busy" && kind !== "needs_approval" && kind !== "waiting")
+        return false;
+      if (filter === "open" && kind === "exited") return false;
+      return matches(query, [
+        session.location_name,
+        session.label,
+        session.branch,
+        session.model,
+        session.status.text,
+      ]);
+    });
+    // The server lists the latest first; the sort keeps that order among equals.
+    if (sort === "tokens") kept.sort((a, b) => b.tokens - a.tokens);
+    if (sort === "cost") kept.sort((a, b) => (b.cost.usd ?? -1) - (a.cost.usd ?? -1));
+    return kept;
+  }, [props.sessions, query, sort, filter]);
   // The session that is shown is also the first row, a copy that stays
   // put: the list is ordered by when each session was last heard of, so
   // its own row moves as the others work. That row is marked where it is.
+  // The copy stays even when the list no longer holds the session.
   const shown = props.sessions.find((session) => session.id === props.selected);
   const row = (session: SessionSummary, pinned: boolean) => (
     <tr
@@ -634,23 +719,63 @@ function SessionList(props: {
       <td className="number">{format.cost(session.cost)}</td>
     </tr>
   );
+  const sorter = (by: Sort, title: string) => (
+    <th className="number" aria-sort={sort === by ? "descending" : undefined}>
+      <button
+        type="button"
+        className={sort === by ? "sorted" : undefined}
+        title={`order by ${title}, the greatest first`}
+        onClick={() => setSort(by)}
+      >
+        {title}
+        {sort === by ? " ▾" : ""}
+      </button>
+    </th>
+  );
   return (
     <nav className="sessions">
-      <table>
-        <thead>
-          <tr>
-            <th>session</th>
-            <th>state</th>
-            <th className="number">updated</th>
-            <th className="number">tokens</th>
-            <th className="number">cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {shown && row(shown, true)}
-          {props.sessions.map((session) => row(session, false))}
-        </tbody>
-      </table>
+      <div className="controls">
+        <input
+          type="search"
+          placeholder="find a session"
+          aria-label="find a session"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <select
+          aria-label="which sessions"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value as Filter)}
+        >
+          {FILTERS.map(({ filter, title }) => (
+            <option key={filter} value={filter}>
+              {title}
+            </option>
+          ))}
+        </select>
+        {listed.length < props.sessions.length && (
+          <span className="dim">
+            {listed.length} of {props.sessions.length}
+          </span>
+        )}
+      </div>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>session</th>
+              <th>state</th>
+              {sorter("updated", "updated")}
+              {sorter("tokens", "tokens")}
+              {sorter("cost", "cost")}
+            </tr>
+          </thead>
+          <tbody>
+            {shown && row(shown, true)}
+            {listed.map((session) => row(session, false))}
+          </tbody>
+        </table>
+      </div>
     </nav>
   );
 }
