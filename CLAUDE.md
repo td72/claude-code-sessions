@@ -101,6 +101,13 @@ be configured): publish it by hand, then add the trusted publisher on
 crates.io (repository `td72/iktinos`, workflow `release.yml`,
 environment `release`).
 
+`iktinos-web` embeds the page, which git does not track
+(`crates/iktinos-web/web/dist`). `release.yml` builds it in a job of its own,
+which runs npm and has no right to publish, and hands it to the publishing
+job. Publishing it by hand: `mise run web:build` first, and check that
+`cargo package --list -p iktinos-web` names `web/dist/index.html`; without
+it the crate is published with the placeholder page.
+
 ## Conventions
 
 - **Issues / PRs**: present the title and body in Japanese for review first;
