@@ -124,14 +124,22 @@ jobs:
       # Without it the crate would be published with the placeholder page.
       - name: The package holds the page
         if: steps.target.outputs.crate == 'iktinos-web'
-        run: cargo package --list -p iktinos-web | grep -qx 'web/dist/index.html'
+        run: cargo package --list -p iktinos-web --allow-dirty | grep -qx 'web/dist/index.html'
 
       - name: Authenticate with crates.io
         id: crates-auth
         uses: rust-lang/crates-io-auth-action@v1.0.6
 
+      # The page is in the package and not in git, which cargo calls dirty:
+      # for iktinos-web alone that is allowed. The checkout is the merge
+      # commit, so the page is all that differs from it.
       - name: Publish to crates.io
-        run: cargo publish -p "$CRATE"
+        run: |
+          if [ "$CRATE" = iktinos-web ]; then
+            cargo publish -p "$CRATE" --allow-dirty
+          else
+            cargo publish -p "$CRATE"
+          fi
         env:
           CRATE: ${{ steps.target.outputs.crate }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
