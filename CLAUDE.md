@@ -105,8 +105,11 @@ environment `release`).
 (`crates/iktinos-web/web/dist`). `release.yml` builds it in a job of its own,
 which runs npm and has no right to publish, and hands it to the publishing
 job. Publishing it by hand: `mise run web:build` first, and check that
-`cargo package --list -p iktinos-web` names `web/dist/index.html`; without
-it the crate is published with the placeholder page.
+`cargo package --list -p iktinos-web --allow-dirty` names
+`web/dist/index.html`; without it the crate is published with the placeholder
+page. Then `cargo publish -p iktinos-web --allow-dirty`, from a checkout with
+nothing else uncommitted: cargo calls the page dirty because git does not
+track it.
 
 ## Conventions
 
